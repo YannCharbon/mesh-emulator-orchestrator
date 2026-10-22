@@ -110,6 +110,12 @@ The emulator isn't deterministic: the RNG is unseeded and it runs on wall-clock
 time. So equivalence here is statistical. The build-level check above is the
 strict one.
 
+**Fresh-clone check.** Both repositories were cloned into an empty
+directory and built from scratch. The object comparison gave the same result
+(stack objects identical; 7 application objects differing only by source path),
+and one 300 s `dag_simple` run matched the runs above: 13/14 ready, node 14
+operational at 253 s, all parents real links.
+
 **Harness pitfall found on the way.** `wssimserver` numbers nodes in the order
 they connect, not from their MAC address. If the `wshwsim` processes are
 started in parallel, the topology is silently scrambled, and parents that
