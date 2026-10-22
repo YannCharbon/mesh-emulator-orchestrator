@@ -3,8 +3,8 @@
 
 #include "spinel_buffer.h"
 #include "spinel_defs.h"
-#include "utils.h"
-#include "log.h"
+#include "common/utils.h"
+#include "common/log.h"
 
 int spinel_remaining_size(const struct spinel_buffer *buf)
 {

@@ -9,7 +9,7 @@
 #define SPINEL_BUFFER_H
 #include <stdint.h>
 
-#include "log.h"
+#include "common/log.h"
 
 struct spinel_buffer {
     int len; // Length of the data in frame or size of the frame buffer

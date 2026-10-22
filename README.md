@@ -3,6 +3,15 @@
 * You need mbedtls for this repo.
 * See license before fork/copy.
 
+> **mesh-emulator-orchestrator** is `wisun-mbed-simulator` (commit `d86eb34`)
+> with Nanostack moved out to
+> [`nanostack-generic-standalone`](../nanostack-generic-standalone). This repo
+> keeps the emulator: the simulated medium (`wssimserver`), the simulated RCP
+> (`wshwsim`), the node applications (`wsbrd`, `wsnode`), the Spinel/UART
+> transport and the run scripts. The stack is built from the sibling
+> repository and linked as static libraries. Behaviour is unchanged; see
+> [MIGRATION.md](MIGRATION.md).
+
 ## Compile mbedtls
 
 0) Install dependencies:
@@ -16,11 +25,13 @@ sudo apt-get install libnl-3-dev libnl-route-3-dev libcap-dev \
 
 ## Compile mbed OS
 
-1) Compilation of the simulation tools is now enabled to build the relevant binaries. Return from mbedtls dir to this repo's dir and:
+1) Compilation of the simulation tools is now enabled to build the relevant binaries. Clone `nanostack-generic-standalone` next to this repo (or pass `-DNANOSTACK_DIR=<path>`), return from mbedtls dir to this repo's dir and:
 
 ```bash
 cmake -DCMAKE_PREFIX_PATH="$(pwd)/mbedtls/" -G Ninja .
 ```
+
+With GCC 14 or newer, add `-DCMAKE_C_FLAGS="-std=gnu17 -fpermissive"`: GCC 15 defaults to C23 and turns legacy warnings in this code into errors.
 
 and then: `ninja`
 

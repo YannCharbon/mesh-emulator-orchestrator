@@ -1,0 +1,16 @@
+# In-source CMake/Ninja build (cmake -G Ninja . && ninja)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+build.ninja
+.ninja_deps
+.ninja_log
+nanostack-build/
+*.a
+/wsbrd
+/wsnode
+/wshwsim
+/wssimserver
+# Out-of-source builds and a locally cloned mbedtls
+/build*/
+/mbedtls/

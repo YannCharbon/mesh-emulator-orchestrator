@@ -8,9 +8,9 @@
 #include <unistd.h>
 #include <termios.h>
 
-#include "log.h"
-#include "utils.h"
-#include "os_types.h"
+#include "common/log.h"
+#include "common/utils.h"
+#include "common/os_types.h"
 #include "bus_uart.h"
 #include "spinel_buffer.h"
 
