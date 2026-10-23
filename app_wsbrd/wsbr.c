@@ -65,8 +65,6 @@ struct wsbr_ctxt g_ctxt = {
     .mac_api.phyMTU = 2043,
 };
 
-// See warning in common/os_types.h
-struct os_ctxt g_os_ctxt = { };
 
 static int get_fixed_channel(uint32_t bitmask[static 8])
 {
@@ -265,12 +263,12 @@ static void wsbr_tasklet(struct arm_event_s *event)
 }
 
 
-static int wsbr_uart_tx(struct os_ctxt *os_ctxt, const void *buf, unsigned int buf_len)
+static int wsbr_uart_tx(struct uart_ctxt *uart_ctxt, const void *buf, unsigned int buf_len)
 {
     struct wsbr_ctxt *ctxt = &g_ctxt;
     int ret;
 
-    ret = uart_tx(os_ctxt, buf, buf_len);
+    ret = uart_tx(uart_ctxt, buf, buf_len);
     // Old firmware may merge close Rx events
     if (fw_api_older_than(ctxt, 0, 4, 0))
         usleep(20000);
@@ -343,17 +341,17 @@ int main(int argc, char *argv[])
     parse_commandline(ctxt, argc, argv, print_help_br);
     if (!memcmp(ctxt->ipv6_prefix, ADDR_UNSPECIFIED, 16))
         FATAL(1, "You must specify a ipv6_prefix");
-    ctxt->os_ctxt->data_fd = uart_open(ctxt->uart_dev, ctxt->uart_baudrate, ctxt->uart_rtscts);
-    ctxt->os_ctxt->trig_fd = ctxt->os_ctxt->data_fd;
+    ctxt->uart.data_fd = uart_open(ctxt->uart_dev, ctxt->uart_baudrate, ctxt->uart_rtscts);
+    ctxt->uart.trig_fd = ctxt->uart.data_fd;
     wsbr_tun_init(ctxt);
 
     wsbr_rcp_reset(ctxt);
 
     for (int i = 0; i < ARRAY_SIZE(timeout_values); i++) {
         FD_ZERO(&rfds);
-        FD_SET(ctxt->os_ctxt->data_fd, &rfds);
+        FD_SET(ctxt->uart.data_fd, &rfds);
         ts.tv_sec = timeout_values[i];
-        ret = pselect(ctxt->os_ctxt->data_fd + 1, &rfds, NULL, NULL, &ts, NULL);
+        ret = pselect(ctxt->uart.data_fd + 1, &rfds, NULL, NULL, &ts, NULL);
         if (ret == 1)
             break;
         if (ret < 0)
@@ -391,11 +389,11 @@ int main(int argc, char *argv[])
             FD_SET(dbus_get_fd(ctxt), &rfds);
             maxfd = max(maxfd, dbus_get_fd(ctxt));
         }
-        if (ctxt->os_ctxt->trig_fd == ctxt->os_ctxt->data_fd)
-            FD_SET(ctxt->os_ctxt->trig_fd, &rfds); // UART
+        if (ctxt->uart.trig_fd == ctxt->uart.data_fd)
+            FD_SET(ctxt->uart.trig_fd, &rfds); // UART
         else
-            FD_SET(ctxt->os_ctxt->trig_fd, &efds); // SPI + GPIO
-        maxfd = max(maxfd, ctxt->os_ctxt->trig_fd);
+            FD_SET(ctxt->uart.trig_fd, &efds); // SPI + GPIO
+        maxfd = max(maxfd, ctxt->uart.trig_fd);
         FD_SET(ctxt->tun_fd, &rfds);
         maxfd = max(maxfd, ctxt->tun_fd);
         FD_SET(ctxt->os_ctxt->event_fd[0], &rfds);
@@ -405,7 +403,7 @@ int main(int argc, char *argv[])
             maxfd = max(maxfd, timer->fd);
         }
         // FIXME: consider poll() usage
-        if (ctxt->os_ctxt->uart_next_frame_ready)
+        if (ctxt->uart.uart_next_frame_ready)
             ret = pselect(maxfd + 1, &rfds, NULL, &efds, &ts, NULL);
         else
             ret = pselect(maxfd + 1, &rfds, NULL, &efds, NULL, NULL);
@@ -420,9 +418,9 @@ int main(int argc, char *argv[])
             WARN_ON(val != 'W');
             eventOS_scheduler_run_until_idle();
         }
-        if (FD_ISSET(ctxt->os_ctxt->trig_fd, &rfds) ||
-            FD_ISSET(ctxt->os_ctxt->trig_fd, &efds) ||
-            ctxt->os_ctxt->uart_next_frame_ready)
+        if (FD_ISSET(ctxt->uart.trig_fd, &rfds) ||
+            FD_ISSET(ctxt->uart.trig_fd, &efds) ||
+            ctxt->uart.uart_next_frame_ready)
             rcp_rx(ctxt);
         SLIST_FOR_EACH_ENTRY(ctxt->os_ctxt->timers, timer, node) {
             if (FD_ISSET(timer->fd, &rfds)) {

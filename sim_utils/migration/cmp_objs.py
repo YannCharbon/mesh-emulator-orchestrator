@@ -44,9 +44,16 @@ def new_obj(target, rel):
     m = re.match(r'app_wshwsim/(mac|fhss|ccm)/(.*)', rel)
     if m:
         return f'{orch}/CMakeFiles/nanostack_rcp.dir{stack}/rcp/{m.group(1)}/{m.group(2)}.o'
-    m = re.match(r'common/(hal_interrupt|os_timer|os_scheduler|log|rand|slist|backtrace_show)\.c', rel)
+    # Moved since the extraction: common/rand.c was split into the stack's
+    # source/ns_rand.c and the port's random.c (S2); app_wshwsim's
+    # hal_fhss_timer.c became the port's fhss_timer.c (S2).
+    if rel == 'common/rand.c':
+        return f'{orch}/nanostack-build/CMakeFiles/nanostack_libservice.dir/source/ns_rand.c.o'
+    if rel == 'app_wshwsim/hal_fhss_timer.c':
+        return f'{orch}/nanostack-build/CMakeFiles/nanostack_port_linux.dir/port/posix/common/fhss_timer.c.o'
+    m = re.match(r'common/(hal_interrupt|os_timer|os_scheduler|log|slist|backtrace_show)\.c', rel)
     if m:
-        return (f'{orch}/CMakeFiles/wssimserver.dir{stack}/port/linux/{rel}.o' if target == 'wssimserver' else f'{orch}/nanostack-build/CMakeFiles/nanostack_port_linux.dir/port/linux/{rel}.o')
+        return (f'{orch}/CMakeFiles/wssimserver.dir{stack}/port/posix/{rel}.o' if target == 'wssimserver' else f'{orch}/nanostack-build/CMakeFiles/nanostack_port_linux.dir/port/posix/{rel}.o')
     return f'{orch}/CMakeFiles/{target}.dir/{rel}.o'
 
 same = diff = missing = 0

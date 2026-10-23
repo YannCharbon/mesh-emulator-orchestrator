@@ -13,6 +13,7 @@
 #endif
 
 #include "common/slist.h"
+#include "common/bus_uart.h"
 #include "nanostack/mac/fhss_ws_extension.h"
 #include "mac/rf_driver_storage.h"
 
@@ -42,6 +43,7 @@ struct msdu_malloc_info {
 
 struct wsmac_ctxt {
     struct os_ctxt *os_ctxt;
+    struct uart_ctxt uart;
 
     bool rf_frame_cca_progress;
     int rf_fd;

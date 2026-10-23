@@ -10,7 +10,6 @@
 
 #include "common/log.h"
 #include "common/utils.h"
-#include "common/os_types.h"
 #include "bus_uart.h"
 #include "spinel_buffer.h"
 
@@ -120,7 +119,7 @@ int uart_tx_append(uint8_t *buf, uint8_t byte)
     }
 }
 
-int uart_tx(struct os_ctxt *ctxt, const void *buf, unsigned int buf_len)
+int uart_tx(struct uart_ctxt *ctxt, const void *buf, unsigned int buf_len)
 {
     static char trace_buffer[128];
     uint16_t crc = crc16(buf, buf_len);
@@ -147,7 +146,7 @@ int uart_tx(struct os_ctxt *ctxt, const void *buf, unsigned int buf_len)
     return frame_len;
 }
 
-int uart_rx(struct os_ctxt *ctxt, void *buf, unsigned int buf_len)
+int uart_rx(struct uart_ctxt *ctxt, void *buf, unsigned int buf_len)
 {
     static char trace_buffer[128];
     uint8_t *buf8 = buf;

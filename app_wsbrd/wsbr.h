@@ -18,6 +18,7 @@ typedef struct sd_bus sd_bus;
 #endif
 
 #include "common/utils.h"
+#include "common/bus_uart.h"
 #include "nanostack/mac/mac_api.h"
 #include "nanostack/mac/fhss_config.h"
 #include "nanostack/net_interface.h"
@@ -29,6 +30,7 @@ struct fhss_api;
 
 struct wsbr_ctxt {
     struct os_ctxt *os_ctxt;
+    struct uart_ctxt uart;
     sd_bus *dbus;
 
     char uart_dev[PATH_MAX];
@@ -54,8 +56,8 @@ struct wsbr_ctxt {
     bool fhss_conf_valid;
     struct fhss_ws_configuration fhss_conf;
 
-    int  (*rcp_tx)(struct os_ctxt *ctxt, const void *buf, unsigned int len);
-    int  (*rcp_rx)(struct os_ctxt *ctxt, void *buf, unsigned int len);
+    int  (*rcp_tx)(struct uart_ctxt *ctxt, const void *buf, unsigned int len);
+    int  (*rcp_rx)(struct uart_ctxt *ctxt, void *buf, unsigned int len);
     int  rcp_driver_id;
     int  rcp_if_id;
     int  rcp_time_diff;

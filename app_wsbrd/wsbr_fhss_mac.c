@@ -31,7 +31,7 @@ int ns_sw_mac_fhss_register(struct mac_api_s *mac_api, struct fhss_api *fhss_api
     BUG_ON(ctxt != &g_ctxt);
     BUG_ON(fhss_api != FHSS_API_PLACEHOLDER);
     spinel_push_hdr_set_prop(ctxt, buf, SPINEL_PROP_WS_FHSS_REGISTER);
-    ctxt->rcp_tx(ctxt->os_ctxt, buf->frame, buf->cnt);
+    ctxt->rcp_tx(&ctxt->uart, buf->frame, buf->cnt);
     // The original function initialize of the callback. But it useless now.
     ctxt->fhss_api = fhss_api;
     return 0;
@@ -52,7 +52,7 @@ int ns_sw_mac_fhss_unregister(struct mac_api_s *mac_api)
     BUG_ON(!mac_api);
     BUG_ON(ctxt != &g_ctxt);
     spinel_push_hdr_set_prop(ctxt, buf, SPINEL_PROP_WS_FHSS_UNREGISTER);
-    ctxt->rcp_tx(ctxt->os_ctxt, buf->frame, buf->cnt);
+    ctxt->rcp_tx(&ctxt->uart, buf->frame, buf->cnt);
     ctxt->fhss_api = NULL;
     return 0;
 }
@@ -79,7 +79,7 @@ int8_t ns_sw_mac_enable_frame_counter_per_key(struct mac_api_s *mac_api,
     BUG_ON(ctxt != &g_ctxt);
     spinel_push_hdr_set_prop(ctxt, buf, SPINEL_PROP_WS_ENABLE_FRAME_COUNTER_PER_KEY);
     spinel_push_bool(buf, enable_feature);
-    ctxt->rcp_tx(ctxt->os_ctxt, buf->frame, buf->cnt);
+    ctxt->rcp_tx(&ctxt->uart, buf->frame, buf->cnt);
 
     return 0;
 }

@@ -39,7 +39,7 @@
 #include "sl_rf_driver.h"
 #include <sys/time.h>
 #include "common/os_timer.h"
-#include "app_wshwsim/hal_fhss_timer.h"
+#include "common/fhss_timer.h"
 
 #include <signal.h>
 #include "fhss/fhss.h"

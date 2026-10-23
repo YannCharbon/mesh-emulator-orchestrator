@@ -60,8 +60,6 @@ struct wsbr_ctxt g_ctxt = {
     .mac_api.phyMTU = 2043,
 };
 
-// See warning in common/os_types.h
-struct os_ctxt g_os_ctxt = { };
 
 static int get_fixed_channel(uint32_t bitmask[static 8])
 {
@@ -243,8 +241,8 @@ int main(int argc, char *argv[])
     parse_commandline(ctxt, argc, argv, print_help_node);
     if (memcmp(ctxt->ipv6_prefix, ADDR_UNSPECIFIED, 16))
         WARN("ipv6_prefix is ignored");
-    ctxt->os_ctxt->data_fd = uart_open(ctxt->uart_dev, ctxt->uart_baudrate, ctxt->uart_rtscts);
-    ctxt->os_ctxt->trig_fd = ctxt->os_ctxt->data_fd;
+    ctxt->uart.data_fd = uart_open(ctxt->uart_dev, ctxt->uart_baudrate, ctxt->uart_rtscts);
+    ctxt->uart.trig_fd = ctxt->uart.data_fd;
 
     wsbr_rcp_reset(ctxt);
     while (!ctxt->hw_addr_done)
@@ -275,11 +273,11 @@ int main(int argc, char *argv[])
         maxfd = 0;
         FD_ZERO(&rfds);
         FD_ZERO(&efds);
-        if (ctxt->os_ctxt->trig_fd == ctxt->os_ctxt->data_fd)
-            FD_SET(ctxt->os_ctxt->trig_fd, &rfds); // UART
+        if (ctxt->uart.trig_fd == ctxt->uart.data_fd)
+            FD_SET(ctxt->uart.trig_fd, &rfds); // UART
         else
-            FD_SET(ctxt->os_ctxt->trig_fd, &efds); // SPI + GPIO
-        maxfd = max(maxfd, ctxt->os_ctxt->trig_fd);
+            FD_SET(ctxt->uart.trig_fd, &efds); // SPI + GPIO
+        maxfd = max(maxfd, ctxt->uart.trig_fd);
         FD_SET(ctxt->os_ctxt->event_fd[0], &rfds);
         maxfd = max(maxfd, ctxt->os_ctxt->event_fd[0]);
         SLIST_FOR_EACH_ENTRY(ctxt->os_ctxt->timers, timer, node) {
@@ -287,7 +285,7 @@ int main(int argc, char *argv[])
             maxfd = max(maxfd, timer->fd);
         }
         // FIXME: consider poll() usage
-        if (ctxt->os_ctxt->uart_next_frame_ready)
+        if (ctxt->uart.uart_next_frame_ready)
             ret = pselect(maxfd + 1, &rfds, NULL, &efds, &ts, NULL);
         else
             ret = pselect(maxfd + 1, &rfds, NULL, &efds, NULL, NULL);
@@ -298,9 +296,9 @@ int main(int argc, char *argv[])
             WARN_ON(val != 'W');
             eventOS_scheduler_run_until_idle();
         }
-        if (FD_ISSET(ctxt->os_ctxt->trig_fd, &rfds) ||
-            FD_ISSET(ctxt->os_ctxt->trig_fd, &efds) ||
-            ctxt->os_ctxt->uart_next_frame_ready)
+        if (FD_ISSET(ctxt->uart.trig_fd, &rfds) ||
+            FD_ISSET(ctxt->uart.trig_fd, &efds) ||
+            ctxt->uart.uart_next_frame_ready)
             rcp_rx(ctxt);
         SLIST_FOR_EACH_ENTRY(ctxt->os_ctxt->timers, timer, node) {
             if (FD_ISSET(timer->fd, &rfds)) {

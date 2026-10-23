@@ -207,7 +207,6 @@ if(COMPILE_SIMULATION_TOOLS)
         app_wshwsim/ringbufindex.c
         app_wshwsim/mac_helpers.c
         app_wshwsim/sl_rf_driver.c
-        app_wshwsim/hal_fhss_timer.c
     )
     target_include_directories(wshwsim PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -236,11 +235,11 @@ if(COMPILE_SIMULATION_TOOLS)
     # wssimserver only borrows the logger from the stack's Linux port. It is
     # compiled here, without the port's HAVE_BACKTRACE, as it was before.
     add_executable(wssimserver
-        ${NANOSTACK_ROOT}/port/linux/common/log.c
+        ${NANOSTACK_ROOT}/port/posix/common/log.c
         app_wssimserver/wssimserver.c)
     target_include_directories(wssimserver PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
-        ${NANOSTACK_ROOT}/port/linux/
+        ${NANOSTACK_ROOT}/port/posix/
     )
     install(TARGETS wssimserver RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 

@@ -43,7 +43,7 @@ struct fhss_api *ns_fhss_ws_create(const struct fhss_ws_configuration *config,
     spinel_push_fixed_u32_array(buf, config->unicast_channel_mask, 8);
     spinel_push_u16(buf, config->channel_mask_size);
     spinel_push_u8(buf, config->config_parameters.number_of_channel_retries);
-    ctxt->rcp_tx(ctxt->os_ctxt, buf->frame, buf->cnt);
+    ctxt->rcp_tx(&ctxt->uart, buf->frame, buf->cnt);
     ctxt->fhss_conf_valid = true;
     memcpy(&ctxt->fhss_conf, config, sizeof(*config));
     // Upper layers absolutly want something != NULL
@@ -57,7 +57,7 @@ int ns_fhss_delete(struct fhss_api *fhss_api)
 
     BUG_ON(fhss_api != FHSS_API_PLACEHOLDER);
     spinel_push_hdr_set_prop(ctxt, buf, SPINEL_PROP_WS_FHSS_DELETE);
-    ctxt->rcp_tx(ctxt->os_ctxt, buf->frame, buf->cnt);
+    ctxt->rcp_tx(&ctxt->uart, buf->frame, buf->cnt);
     ctxt->fhss_conf_valid = false;
     return 0;
 }
@@ -94,7 +94,7 @@ int ns_fhss_ws_configuration_set(const struct fhss_api *fhss_api,
     spinel_push_fixed_u32_array(buf, config->unicast_channel_mask, 8);
     spinel_push_u16(buf, config->channel_mask_size);
     spinel_push_u8(buf, config->config_parameters.number_of_channel_retries);
-    ctxt->rcp_tx(ctxt->os_ctxt, buf->frame, buf->cnt);
+    ctxt->rcp_tx(&ctxt->uart, buf->frame, buf->cnt);
     memcpy(&ctxt->fhss_conf, config, sizeof(*config));
     return 0;
 }
@@ -110,7 +110,7 @@ int ns_fhss_ws_set_tx_allowance_level(const fhss_api_t *fhss_api,
     spinel_push_hdr_set_prop(ctxt, buf, SPINEL_PROP_WS_FHSS_SET_TX_ALLOWANCE_LEVEL);
     spinel_push_uint(buf, global_level);
     spinel_push_uint(buf, ef_level);
-    ctxt->rcp_tx(ctxt->os_ctxt, buf->frame, buf->cnt);
+    ctxt->rcp_tx(&ctxt->uart, buf->frame, buf->cnt);
     return 0;
 }
 
@@ -132,7 +132,7 @@ int ns_fhss_ws_set_parent(const struct fhss_api *fhss_api, const uint8_t eui64[8
     spinel_push_u32(buf, bc_timing_info->broadcast_interval_offset);
     spinel_push_u32(buf, bc_timing_info->broadcast_interval);
     spinel_push_u32(buf, bc_timing_info->bt_rx_timestamp);
-    ctxt->rcp_tx(ctxt->os_ctxt, buf->frame, buf->cnt);
+    ctxt->rcp_tx(&ctxt->uart, buf->frame, buf->cnt);
     ctxt->fhss_conf.fhss_bc_dwell_interval = bc_timing_info->broadcast_dwell_interval;
     ctxt->fhss_conf.fhss_broadcast_interval = bc_timing_info->broadcast_interval;
     return 0;
@@ -156,7 +156,7 @@ void ns_fhss_ws_update_neighbor(const uint8_t eui64[8],
     spinel_push_u16(buf, fhss_data->uc_timing_info.fixed_channel);
     spinel_push_u32(buf, fhss_data->uc_timing_info.ufsi);
     spinel_push_u32(buf, fhss_data->uc_timing_info.utt_rx_timestamp);
-    ctxt->rcp_tx(ctxt->os_ctxt, buf->frame, buf->cnt);
+    ctxt->rcp_tx(&ctxt->uart, buf->frame, buf->cnt);
 }
 
 void ns_fhss_ws_drop_neighbor(const uint8_t eui64[8])
@@ -166,7 +166,7 @@ void ns_fhss_ws_drop_neighbor(const uint8_t eui64[8])
 
     spinel_push_hdr_set_prop(ctxt, buf, SPINEL_PROP_WS_FHSS_DROP_NEIGHBOR);
     spinel_push_fixed_u8_array(buf, eui64, 8);
-    ctxt->rcp_tx(ctxt->os_ctxt, buf->frame, buf->cnt);
+    ctxt->rcp_tx(&ctxt->uart, buf->frame, buf->cnt);
 }
 
 int ns_fhss_set_neighbor_info_fp(const struct fhss_api *fhss_api,
@@ -184,7 +184,7 @@ int ns_fhss_ws_set_hop_count(const struct fhss_api *fhss_api, const uint8_t hop_
 
     spinel_push_hdr_set_prop(ctxt, buf, SPINEL_PROP_WS_FHSS_SET_HOP_COUNT);
     spinel_push_u8(buf, hop_count);
-    ctxt->rcp_tx(ctxt->os_ctxt, buf->frame, buf->cnt);
+    ctxt->rcp_tx(&ctxt->uart, buf->frame, buf->cnt);
     return 0;
 }
 

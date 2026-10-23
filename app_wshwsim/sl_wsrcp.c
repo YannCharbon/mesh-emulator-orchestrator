@@ -32,7 +32,7 @@
 #include "common/os_timer.h"
 #include "common/slist.h"
 #include "common/log.h"
-#include "hal_fhss_timer.h"
+#include "common/fhss_timer.h"
 #include "sl_wsrcp.h"
 #include "sl_wsrcp_mac.h"
 #include "sl_rf_driver.h"
@@ -45,8 +45,6 @@
 
 // See warning in wsmac.h
 struct wsmac_ctxt g_ctxt = { };
-// See warning in common/os_types.h
-struct os_ctxt g_os_ctxt = { };
 // FIXME: should be const
 mac_description_storage_size_t g_storage_sizes = {
     .device_description_table_size = ARRAY_SIZE(g_ctxt.neighbor_timings),
@@ -253,8 +251,8 @@ void configure(struct wsmac_ctxt *ctxt, int argc, char *argv[])
     if (argc != optind + 2)
         print_help(stderr, 1);
     ctxt->rf_fd = socket_open(argv[optind + 1]);
-    ctxt->os_ctxt->data_fd = pty_open(argv[optind + 0], 115200, false);
-    ctxt->os_ctxt->trig_fd = ctxt->os_ctxt->data_fd;
+    ctxt->uart.data_fd = pty_open(argv[optind + 0], 115200, false);
+    ctxt->uart.trig_fd = ctxt->uart.data_fd;
 }
 
 struct mac_api_s *init_mac_api(int rcp_driver_id)
@@ -328,8 +326,8 @@ int main(int argc, char *argv[])
         FD_ZERO(&rfds);
         FD_SET(ctxt->rf_fd, &rfds);
         maxfd = max(maxfd, ctxt->rf_fd);
-        FD_SET(ctxt->os_ctxt->trig_fd, &rfds);
-        maxfd = max(maxfd, ctxt->os_ctxt->trig_fd);
+        FD_SET(ctxt->uart.trig_fd, &rfds);
+        maxfd = max(maxfd, ctxt->uart.trig_fd);
         FD_SET(ctxt->os_ctxt->event_fd[0], &rfds);
         maxfd = max(maxfd, ctxt->os_ctxt->event_fd[0]);
         SLIST_FOR_EACH_ENTRY(ctxt->os_ctxt->timers, timer, node) {
@@ -340,7 +338,7 @@ int main(int argc, char *argv[])
             FD_SET(fhss_timer->fd, &rfds);
             maxfd = max(maxfd, fhss_timer->fd);
         }
-        if (ctxt->os_ctxt->uart_next_frame_ready || ctxt->rf_frame_cca_progress)
+        if (ctxt->uart.uart_next_frame_ready || ctxt->rf_frame_cca_progress)
             ret = pselect(maxfd + 1, &rfds, NULL, NULL, &ts, NULL);
         else
             ret = pselect(maxfd + 1, &rfds, NULL, NULL, NULL, NULL);
@@ -349,7 +347,7 @@ int main(int argc, char *argv[])
         if (FD_ISSET(ctxt->rf_fd, &rfds)) {
             phy_rf_rx_now(ctxt);
         }
-        if (FD_ISSET(ctxt->os_ctxt->trig_fd, &rfds) || ctxt->os_ctxt->uart_next_frame_ready)
+        if (FD_ISSET(ctxt->uart.trig_fd, &rfds) || ctxt->uart.uart_next_frame_ready)
             wsmac_rx_host(ctxt);
         if (FD_ISSET(ctxt->os_ctxt->event_fd[0], &rfds)) {
             read(ctxt->os_ctxt->event_fd[0], &val, sizeof(val));
