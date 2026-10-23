@@ -50,10 +50,10 @@ def new_obj(target, rel):
     if rel == 'common/rand.c':
         return f'{orch}/nanostack-build/CMakeFiles/nanostack_libservice.dir/source/ns_rand.c.o'
     if rel == 'app_wshwsim/hal_fhss_timer.c':
-        return f'{orch}/nanostack-build/CMakeFiles/nanostack_port_linux.dir/port/posix/common/fhss_timer.c.o'
+        return f'{orch}/nanostack-build/CMakeFiles/nanostack_port_posix.dir/port/posix/common/fhss_timer.c.o'
     m = re.match(r'common/(hal_interrupt|os_timer|os_scheduler|log|slist|backtrace_show)\.c', rel)
     if m:
-        return (f'{orch}/CMakeFiles/wssimserver.dir{stack}/port/posix/{rel}.o' if target == 'wssimserver' else f'{orch}/nanostack-build/CMakeFiles/nanostack_port_linux.dir/port/posix/{rel}.o')
+        return (f'{orch}/CMakeFiles/wssimserver.dir{stack}/port/posix/{rel}.o' if target == 'wssimserver' else f'{orch}/nanostack-build/CMakeFiles/nanostack_port_posix.dir/port/posix/{rel}.o')
     return f'{orch}/CMakeFiles/{target}.dir/{rel}.o'
 
 same = diff = missing = 0
