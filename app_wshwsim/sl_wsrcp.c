@@ -28,7 +28,6 @@
 #include "common/hal_interrupt.h"
 #include "common/bus_uart.h"
 #include "common/os_scheduler.h"
-#include "common/os_types.h"
 #include "common/os_timer.h"
 #include "common/slist.h"
 #include "common/log.h"
@@ -119,22 +118,6 @@ void fill_random(void *dest, size_t len)
 
     read(rnd, dest, len);
     close(rnd);
-}
-
-int socket_open(const char *path)
-{
-    struct sockaddr_un addr = {
-        .sun_family = AF_UNIX
-    };
-    int fd;
-    int ret;
-
-    strcpy(addr.sun_path, path);
-    fd = socket(AF_UNIX, SOCK_SEQPACKET, 0); // use SOCK_SEQPACKET or SOCK_STREAM
-    FATAL_ON(fd < 0, 2, "socket %s: %m", path);
-    ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
-    FATAL_ON(ret < 0, 2, "connect %s: %m", path);
-    return fd;
 }
 
 int pty_open(const char *dest_path, int bitrate, bool hardflow)
@@ -250,9 +233,17 @@ void configure(struct wsmac_ctxt *ctxt, int argc, char *argv[])
     }
     if (argc != optind + 2)
         print_help(stderr, 1);
-    ctxt->rf_fd = socket_open(argv[optind + 1]);
+    ctxt->rf_fd = rf_sim_connect(argv[optind + 1]);
     ctxt->uart.data_fd = pty_open(argv[optind + 0], 115200, false);
     ctxt->uart.trig_fd = ctxt->uart.data_fd;
+    g_rf_host.rf_fd = ctxt->rf_fd;
+#ifdef HAVE_LIBPCAP
+    g_rf_host.pcap_dumper = ctxt->pcap_dumper;
+#endif
+    // The CCA looks at the neighbours the host pushed with
+    // ns_fhss_ws_update_neighbor() (sl_wsrcp_mac.c).
+    g_rf_host.neighbors = ctxt->neighbor_timings;
+    g_rf_host.neighbors_count = ARRAY_SIZE(ctxt->neighbor_timings);
 }
 
 struct mac_api_s *init_mac_api(int rcp_driver_id)
@@ -286,19 +277,32 @@ void kill_handler(int signal)
     exit(3);
 }
 
+static void wsmac_rf_ready(void)
+{
+    phy_rf_rx_now();
+}
+
+static void wsmac_uart_ready(void)
+{
+    wsmac_rx_host(&g_ctxt);
+}
+
+static bool wsmac_uart_pending(void)
+{
+    return g_ctxt.uart.uart_next_frame_ready;
+}
+
+static bool wsmac_cca_in_progress(void)
+{
+    return g_ctxt.rf_frame_cca_progress;
+}
+
 int main(int argc, char *argv[])
 {
     struct wsmac_ctxt *ctxt = &g_ctxt;
-    struct fhss_timer_entry *fhss_timer;
-    struct callback_timer *timer;
-    struct timespec ts = { };
-    int maxfd, ret;
-    uint64_t val;
-    fd_set rfds;
 
     signal(SIGINT, kill_handler);
     signal(SIGHUP, kill_handler);
-    ctxt->os_ctxt = &g_os_ctxt;
 
     /* cpu_set_t my_set;
     CPU_ZERO(&my_set);
@@ -308,7 +312,7 @@ int main(int argc, char *argv[])
     mbed_trace_init();
     mbed_trace_config_set(TRACE_ACTIVE_LEVEL_ALL | TRACE_MODE_COLOR);
     platform_critical_init();
-    eventOS_scheduler_os_init(ctxt->os_ctxt);
+    ns_port_init();
     eventOS_scheduler_init();
     INFO("Silicon Labs Wi-SUN RCP simulation %s", version_fw_str);
     configure(ctxt, argc, argv);
@@ -321,59 +325,14 @@ int main(int argc, char *argv[])
     ctxt->rcp_mac_api = init_mac_api(ctxt->rcp_driver_id);
 
     wsmac_reset_ind(ctxt, true);
-    for (;;) {
-        maxfd = 0;
-        FD_ZERO(&rfds);
-        FD_SET(ctxt->rf_fd, &rfds);
-        maxfd = max(maxfd, ctxt->rf_fd);
-        FD_SET(ctxt->uart.trig_fd, &rfds);
-        maxfd = max(maxfd, ctxt->uart.trig_fd);
-        FD_SET(ctxt->os_ctxt->event_fd[0], &rfds);
-        maxfd = max(maxfd, ctxt->os_ctxt->event_fd[0]);
-        SLIST_FOR_EACH_ENTRY(ctxt->os_ctxt->timers, timer, node) {
-            FD_SET(timer->fd, &rfds);
-            maxfd = max(maxfd, timer->fd);
-        }
-        SLIST_FOR_EACH_ENTRY(ctxt->os_ctxt->fhss_timers, fhss_timer, node) {
-            FD_SET(fhss_timer->fd, &rfds);
-            maxfd = max(maxfd, fhss_timer->fd);
-        }
-        if (ctxt->uart.uart_next_frame_ready || ctxt->rf_frame_cca_progress)
-            ret = pselect(maxfd + 1, &rfds, NULL, NULL, &ts, NULL);
-        else
-            ret = pselect(maxfd + 1, &rfds, NULL, NULL, NULL, NULL);
-        if (ret < 0)
-            FATAL(2, "pselect: %m");
-        if (FD_ISSET(ctxt->rf_fd, &rfds)) {
-            phy_rf_rx_now(ctxt);
-        }
-        if (FD_ISSET(ctxt->uart.trig_fd, &rfds) || ctxt->uart.uart_next_frame_ready)
-            wsmac_rx_host(ctxt);
-        if (FD_ISSET(ctxt->os_ctxt->event_fd[0], &rfds)) {
-            read(ctxt->os_ctxt->event_fd[0], &val, sizeof(val));
-            WARN_ON(val != 'W');
-            // You may use eventOS_scheduler_run_until_idle() instead of
-            // eventOS_scheduler_dispatch_event() identify tasks that shcedule
-            // themselves.
-            // eventOS_scheduler_run_until_idle();
-            if (eventOS_scheduler_dispatch_event())
-                eventOS_scheduler_signal();
-        }
-        SLIST_FOR_EACH_ENTRY(ctxt->os_ctxt->timers, timer, node) {
-            if (FD_ISSET(timer->fd, &rfds)) {
-                ret = read(timer->fd, &val, sizeof(val));
-                WARN_ON(ret < sizeof(val) || val != 1, "cancelled timer?");
-                timer->fn(timer->fd, 0);
-            }
-        }
-        SLIST_FOR_EACH_ENTRY(ctxt->os_ctxt->fhss_timers, fhss_timer, node) {
-            if (FD_ISSET(fhss_timer->fd, &rfds)) {
-                ret = read(fhss_timer->fd, &val, sizeof(val));
-                WARN_ON(ret < sizeof(val) || val != 1, "cancelled timer?");
-                fhss_timer->fn(fhss_timer->arg, 0);
-            }
-        }
-    }
+    // Same inputs, in the same order, as the loop that was here: the event
+    // loop dispatches one event per iteration, so radio and UART input is
+    // served in between.
+    ns_port_posix_add_fd(ctxt->rf_fd, false, wsmac_rf_ready, NULL);
+    ns_port_posix_add_fd(ctxt->uart.trig_fd, false, wsmac_uart_ready, wsmac_uart_pending);
+    ns_port_posix_add_scheduler(true);
+    ns_port_posix_set_busy(wsmac_cca_in_progress);
+    ns_port_run();
 
     return 0;
 }

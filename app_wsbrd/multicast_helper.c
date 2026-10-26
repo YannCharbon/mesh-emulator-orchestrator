@@ -6,7 +6,6 @@
 #include "multicast_helper.h"
 #include "nanostack/socket_api.h"
 #include "nanostack/net_interface.h"
-#include "common/os_types.h"
 #include "common/os_timer.h"
 #include "mbed-client-libservice/mbed-client-libservice/ip6string.h"
 

@@ -16,14 +16,9 @@
 #include "common/bus_uart.h"
 #include "nanostack/mac/fhss_ws_extension.h"
 #include "mac/rf_driver_storage.h"
+#include "sl_rf_driver.h"
 
-struct os_ctxt;
 struct mac_api_s;
-
-struct neighbor_timings {
-    uint8_t eui64[8];
-    struct fhss_ws_neighbor_timing_info val;
-};
 
 // When MAC receive an MSDU to send, it may be queued if the RF driver is busy.
 // In this case, lifetime of MSDU is longer and therefore, can't be stored on
@@ -42,7 +37,6 @@ struct msdu_malloc_info {
 };
 
 struct wsmac_ctxt {
-    struct os_ctxt *os_ctxt;
     struct uart_ctxt uart;
 
     bool rf_frame_cca_progress;

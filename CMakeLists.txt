@@ -74,6 +74,8 @@ if(COMPILE_SIMULATION_TOOLS)
     # nanostack_add_rcp_library(nanostack_rcp DEFINITIONS TIMING_TOOL_TRACES)
     # nanostack_add_rcp_library(nanostack_rcp DEFINITIONS EXTRA_DEBUG_INFO)
     nanostack_add_rcp_library(nanostack_rcp)
+    # The same MAC for nodes that run it in-process (wsnode-inproc, wsbrd-inproc)
+    nanostack_add_rcp_library(nanostack_rcp_inproc INPROCESS)
 endif()
 
 add_custom_target(check_git
@@ -231,6 +233,71 @@ if(COMPILE_SIMULATION_TOOLS)
         target_link_libraries(wshwsim PRIVATE ${CMAKE_DL_LIBS})
     endif()
     install(TARGETS wshwsim RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+    # wsnode and wsbrd with the MAC in the same process, on the simulated radio
+    # of wshwsim (GENERICITY_PLAN.md S5). -u names the wssimserver socket, and
+    # --eui64 the node's address (wshwsim's -m).
+    foreach(variant wsnode-inproc wsbrd-inproc)
+        if(variant STREQUAL "wsnode-inproc")
+            set(app_sources app_wsbrd/wsrouter.c)
+            set(nslib nanostack_ws_router)
+        else()
+            set(app_sources app_wsbrd/wsbr.c app_wsbrd/tun.c app_wsbrd/os_whiteboard.c
+                            app_wsbrd/mbedtls_config_check.c)
+            set(nslib nanostack_ws_border_router)
+        endif()
+        add_executable(${variant}
+            version.c
+            ${app_sources}
+            app_wsbrd/multicast_helper.c
+            app_wsbrd/commandline.c
+            app_wsbrd/named_values.c
+            application_protocols/mqtt/MQTTClient-C/src/MQTTClient.c
+            application_protocols/mqtt/MQTTClient-C/src/mbed/MQTTMbed.c
+            application_protocols/mqtt/MQTTPacket/src/MQTTPacket.c
+            application_protocols/mqtt/MQTTPacket/src/MQTTConnectClient.c
+            application_protocols/mqtt/MQTTPacket/src/MQTTConnectServer.c
+            application_protocols/mqtt/MQTTPacket/src/MQTTDeserializePublish.c
+            application_protocols/mqtt/MQTTPacket/src/MQTTFormat.c
+            application_protocols/mqtt/MQTTPacket/src/MQTTSerializePublish.c
+            application_protocols/mqtt/MQTTPacket/src/MQTTSubscribeClient.c
+            application_protocols/mqtt/MQTTPacket/src/MQTTSubscribeServer.c
+            application_protocols/mqtt/MQTTPacket/src/MQTTUnsubscribeClient.c
+            application_protocols/mqtt/MQTTPacket/src/MQTTUnsubscribeServer.c
+            app_wshwsim/sl_rf_driver.c
+            app_wshwsim/sl_rf_inproc.c
+            app_wshwsim/ringbufindex.c
+            app_wshwsim/mac_helpers.c
+        )
+        target_include_directories(${variant} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            app_wshwsim/
+            app_wssimserver/
+            application_protocols/mqtt/MQTTClient-C/src/
+            application_protocols/mqtt/MQTTClient-C/src/linux/
+            application_protocols/mqtt/MQTTClient-C/src/mbed/
+            application_protocols/mqtt/MQTTPacket/
+        )
+        target_compile_definitions(${variant} PRIVATE MAC_INPROCESS MQTTCLIENT_PLATFORM_HEADER=MQTTMbed.h)
+        target_link_libraries(${variant} PRIVATE ${nslib} nanostack_rcp_inproc m util Threads::Threads
+                              MbedTLS::mbedtls MbedTLS::mbedcrypto MbedTLS::mbedx509)
+        # sl_rf_inproc.c keeps the neighbour list the CCA uses.
+        target_link_options(${variant} PRIVATE
+            -Wl,--wrap=ns_fhss_ws_update_neighbor,--wrap=ns_fhss_ws_drop_neighbor)
+        if(LIBSYSTEMD_FOUND)
+            target_link_libraries(${variant} PRIVATE PkgConfig::LIBSYSTEMD)
+        endif()
+        if(LIBDL_FOUND)
+            target_compile_definitions(${variant} PRIVATE HAVE_LIBDL)
+            target_link_libraries(${variant} PRIVATE ${CMAKE_DL_LIBS})
+        endif()
+    endforeach()
+    target_compile_definitions(wsbrd-inproc PRIVATE EXTRA_DEBUG_INFO)
+    if(LIBSYSTEMD_FOUND)
+        target_compile_definitions(wsbrd-inproc PRIVATE HAVE_LIBSYSTEMD)
+        target_sources(wsbrd-inproc PRIVATE app_wsbrd/dbus.c)
+    endif()
+    target_link_libraries(wsbrd-inproc PRIVATE PkgConfig::LIBNL_ROUTE)
 
     # wssimserver only borrows the logger from the stack's Linux port. It is
     # compiled here, without the port's HAVE_BACKTRACE, as it was before.

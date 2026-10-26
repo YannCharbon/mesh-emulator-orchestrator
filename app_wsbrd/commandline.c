@@ -17,7 +17,6 @@
 #include "nanostack/source/6lowpan/ws/ws_common_defines.h"
 #include "nanostack/ws_management_api.h"
 #include "nanostack/ns_file_system.h"
-#include "common/os_types.h"
 #include "common/utils.h"
 #include "common/log.h"
 #include "named_values.h"

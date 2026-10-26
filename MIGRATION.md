@@ -13,7 +13,7 @@ stays untouched as the reference.
 | --- | --- |
 | `nanostack/`, `nanostack-event-loop/`, `mbed-client-libservice/` | stack: same paths |
 | `app_wshwsim/mac/`, `app_wshwsim/fhss/`, `app_wshwsim/ccm/` | stack: `rcp/mac/`, `rcp/fhss/`, `rcp/ccm/` |
-| `common/` OS layer: `hal_interrupt`, `os_timer`, `os_scheduler`, `os_types.h`, `log`, `rand`, `slist`, `utils.h`, `backtrace_show` | stack: `port/linux/common/` |
+| `common/` OS layer: `hal_interrupt`, `os_timer`, `os_scheduler`, `os_types.h`, `log`, `rand`, `slist`, `utils.h`, `backtrace_show` | stack: `port/linux/common/`, renamed `port/posix/common/` in step S2 (see below) |
 | `common/` transport: `bus_uart`, `spinel_buffer`, `spinel_defs.h` | orchestrator: `common/` |
 | `app_wsbrd/`, `app_wshwsim/` (rest), `app_wssimserver/`, `application_protocols/`, scripts, examples, docker, `sim_utils/` | orchestrator: same paths |
 
@@ -33,7 +33,7 @@ Both repositories were created with `git filter-repo` from the reference, so
   `../nanostack-generic-standalone`.
 - **`CMAKE_BUILD_TYPE Debug` moved before `add_subdirectory()`,** so that the
   stack is compiled with the same flags as before.
-- **`wssimserver` compiles `port/linux/common/log.c` itself.** It used to have
+- **`wssimserver` compiles the port's `log.c` itself** (`port/linux/common/log.c` then, `port/posix/common/log.c` since S2). It used to have
   its own copy of `log.c` without `HAVE_BACKTRACE`. Linking the port library
   would have switched backtraces on.
 - **Transport includes.** `common/bus_uart.c`, `common/spinel_buffer.[ch]`:
@@ -124,6 +124,57 @@ groups. `headless_run.sh` now waits 0.1 s between MAC starts, as
 `run_orchestrator.py` does, and `analyze.py` flags any parent that isn't a
 `dag_simple` link. This is an existing emulator defect (the node-ID handshake
 in the pre-study's fix list), not something the migration introduced.
+
+## After the split: the genericity steps
+
+The stack then went through steps S1–S5 of its
+[`docs/GENERICITY_PLAN.md`](../nanostack-generic-standalone/docs/GENERICITY_PLAN.md).
+What changed here:
+
+- **S2.** The UART fields of the port's `struct os_ctxt` became
+  `struct uart_ctxt` (`common/bus_uart.h`), embedded in the wsbrd, wsnode and
+  wshwsim contexts. The FHSS timer `app_wshwsim/hal_fhss_timer.c` moved into the
+  stack's port as `ns_port_fhss_timer`. `cmp_objs.py` maps the moved files.
+- **S4.** The `pselect()` loops in `main()` of `wsbr.c`, `wsrouter.c` and
+  `sl_wsrcp.c` are gone. Each program registers its inputs with the port's
+  `ns_port_run()` in the order its loop handled them, and the port runs the
+  callback timers and FHSS timers. wshwsim still dispatches one event per
+  iteration; wsbrd keeps the poll timeout its loop had (the leftover of its
+  wait for the RCP). Callback timer IDs are now small indices, not timerfds.
+- **S5.** Two more programs run the MAC in the same process as the stack, on
+  wshwsim's simulated radio: `wsnode-inproc` and `wsbrd-inproc` (`MAC_INPROCESS`
+  in `wsrouter.c` and `wsbr.c`, `app_wshwsim/sl_rf_inproc.c`).
+  - They take `--eui64=ADDR` (wshwsim's `-m`), and `-u` names the wssimserver
+    socket instead of a UART.
+  - They connect to wssimserver themselves, so start them in node order, with
+    the border router (node 0) first.
+  - `sl_rf_driver.c` now reads its socket, pcap output and the neighbour list
+    of its CCA from `g_rf_host` instead of wshwsim's context. In-process, the
+    neighbour list is filled by wrapping the stack's
+    `ns_fhss_ws_update_neighbor()` (`-Wl,--wrap`), as wshwsim fills it from
+    Spinel.
+  - Run them as a normal user, like the non-root wsbrd below: their radio
+    registers on the user D-Bus, and the shared memory (`/wssimcca`,
+    `/wssimnodesinfos`) must stay writable by the wshwsim processes.
+  - `headless_run.sh` takes a fifth argument: `split` (default), `mixed` (split
+    border router, in-process routers) or `inproc`.
+
+Gates:
+
+| Step | Build | Runtime (`dag_simple`, 300 s runs) |
+| --- | --- | --- |
+| S2 | Stack objects identical to the reference | 5 reference + 5 new runs: 64/70 vs 66/70 routers ready, median ready time 152 s vs 144 s, no parent outside the topology, same message types |
+| S4 | Stack objects identical to the reference | 5 split runs: 63/70 routers ready, median 152 s, no parent outside the topology. The only message types missing are rare reference ones (under 1 per run) that depend on which node became a parent |
+| S5, mixed | — | 5 runs (split BR, in-process routers): 66/70 ready, median 137 s, no parent outside the topology |
+| S5, in-process | — | 5 runs: 66/70 ready, median 148 s, no parent outside the topology |
+
+All runs were on 2026-10-23/26 against the same 5 reference runs (64/70 ready,
+median 152 s). In the in-process groups the node logs also hold the radio
+driver's messages, so their message histograms are not comparable with the
+split ones. In-process mode is expected to differ slightly (GENERICITY_PLAN.md
+§2.2: exact timestamps, MTU starting at 127); no difference shows at this
+scale. The emulator's default stays the split mode; `run.sh`, the GUI and
+`run_orchestrator.py` still start wsbrd/wsnode with wshwsim.
 
 ## Running without root
 

@@ -29,7 +29,6 @@ struct eth_mac_api_s;
 struct fhss_api;
 
 struct wsbr_ctxt {
-    struct os_ctxt *os_ctxt;
     struct uart_ctxt uart;
     sd_bus *dbus;
 

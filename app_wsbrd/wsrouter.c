@@ -32,7 +32,6 @@
 #include "common/hal_interrupt.h"
 #include "common/bus_uart.h"
 #include "common/os_scheduler.h"
-#include "common/os_types.h"
 #include "common/os_timer.h"
 #include "common/slist.h"
 #include "common/log.h"
@@ -40,8 +39,16 @@
 #include "version.h"
 #include "wsbr.h"
 #include "wsbr_mac.h"
+#ifdef MAC_INPROCESS
+#include "common/fhss_timer.h"
+#include "app_wshwsim/sl_rf_inproc.h"
+#endif
 
 // See warning in wsbr.h
+#ifdef MAC_INPROCESS
+// wsnode-inproc: the MAC runs in this process (sl_rf_inproc.h).
+struct wsbr_ctxt g_ctxt = { };
+#else
 struct wsbr_ctxt g_ctxt = {
     .mac_api.mac_initialize = wsbr_mac_init,
     .mac_api.mac_mode_switch_resolver_set = wsbr_mac_mode_switch_resolver_set,
@@ -59,6 +66,7 @@ struct wsbr_ctxt g_ctxt = {
 
     .mac_api.phyMTU = 2043,
 };
+#endif
 
 
 static int get_fixed_channel(uint32_t bitmask[static 8])
@@ -85,8 +93,13 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
     uint8_t *gtks[4] = { };
     bool gtk_force = false;
 
+#ifdef MAC_INPROCESS
+    ret = ws_management_node_init(ctxt->rcp_if_id, ctxt->ws_domain,
+                                  ctxt->ws_name, (struct fhss_timer *)&ns_port_fhss_timer);
+#else
     ret = ws_management_node_init(ctxt->rcp_if_id, ctxt->ws_domain,
                                   ctxt->ws_name, (struct fhss_timer *)-1);
+#endif
     WARN_ON(ret);
 
     WARN_ON(ctxt->ws_domain == 0xFE, "Not supported");
@@ -178,6 +191,7 @@ static void wsbr_tasklet(struct arm_event_s *event)
     }
 }
 
+#ifndef MAC_INPROCESS
 void wsbr_handle_reset(struct wsbr_ctxt *ctxt, const char *version_fw_str)
 {
     if (ctxt->reset_done && ctxt->hw_addr_done)
@@ -194,6 +208,7 @@ void wsbr_handle_reset(struct wsbr_ctxt *ctxt, const char *version_fw_str)
     ctxt->reset_done = true;
     wsbr_rcp_get_hw_addr(ctxt);
 }
+#endif
 
 void kill_handler(int signal)
 {
@@ -216,31 +231,56 @@ void mbed_trace_print_and_log(const char *str)
 }
 
 
+#ifndef MAC_INPROCESS
+static void wsrouter_uart_ready(void)
+{
+    rcp_rx(&g_ctxt);
+}
+
+static bool wsrouter_uart_pending(void)
+{
+    return g_ctxt.uart.uart_next_frame_ready;
+}
+#endif
+
 int main(int argc, char *argv[])
 {
     struct wsbr_ctxt *ctxt = &g_ctxt;
-    struct callback_timer *timer;
-    fd_set rfds, efds;
-    int maxfd, ret;
-    uint64_t val;
-    struct timespec ts = { };
-
+#ifdef MAC_INPROCESS
+    struct mac_api_s *mac;
+    uint8_t eui64[8];
+#endif
     mbed_trace_print_function_set(&mbed_trace_print_and_log);
 
     INFO("Silicon Labs Wi-SUN router %s", version_daemon);
     signal(SIGINT, kill_handler);
     signal(SIGHUP, kill_handler);
-    ctxt->os_ctxt = &g_os_ctxt;
+#ifndef MAC_INPROCESS
     ctxt->rcp_tx = uart_tx;
     ctxt->rcp_rx = uart_rx;
+#endif
     mbed_trace_init();
     mbed_trace_config_set(TRACE_ACTIVE_LEVEL_ALL | TRACE_MODE_COLOR);
     platform_critical_init();
-    eventOS_scheduler_os_init(ctxt->os_ctxt);
+    ns_port_init();
     eventOS_scheduler_init();
+#ifdef MAC_INPROCESS
+    rf_inproc_take_eui64(&argc, argv, eui64);
+#endif
     parse_commandline(ctxt, argc, argv, print_help_node);
     if (memcmp(ctxt->ipv6_prefix, ADDR_UNSPECIFIED, 16))
         WARN("ipv6_prefix is ignored");
+#ifdef MAC_INPROCESS
+    // -u names the wssimserver socket instead of the RCP's UART.
+    mac = rf_inproc_init(ctxt->uart_dev, eui64);
+    memcpy(ctxt->hw_mac, eui64, sizeof(ctxt->hw_mac));
+    memcpy(ctxt->dynamic_mac, ctxt->hw_mac, sizeof(ctxt->dynamic_mac));
+
+    if (net_init_core())
+        BUG("net_init_core");
+
+    ctxt->rcp_if_id = arm_nwk_interface_lowpan_init(mac, "ws0");
+#else
     ctxt->uart.data_fd = uart_open(ctxt->uart_dev, ctxt->uart_baudrate, ctxt->uart_rtscts);
     ctxt->uart.trig_fd = ctxt->uart.data_fd;
 
@@ -253,6 +293,7 @@ int main(int argc, char *argv[])
         BUG("net_init_core");
 
     ctxt->rcp_if_id = arm_nwk_interface_lowpan_init(&ctxt->mac_api, "ws0");
+#endif
     if (ctxt->rcp_if_id < 0)
         BUG("arm_nwk_interface_lowpan_init: %d", ctxt->rcp_if_id);
 
@@ -269,45 +310,18 @@ int main(int argc, char *argv[])
     multicast_add_address(multi_cast_addr, 1);
 
 
-    for (;;) {
-        maxfd = 0;
-        FD_ZERO(&rfds);
-        FD_ZERO(&efds);
-        if (ctxt->uart.trig_fd == ctxt->uart.data_fd)
-            FD_SET(ctxt->uart.trig_fd, &rfds); // UART
-        else
-            FD_SET(ctxt->uart.trig_fd, &efds); // SPI + GPIO
-        maxfd = max(maxfd, ctxt->uart.trig_fd);
-        FD_SET(ctxt->os_ctxt->event_fd[0], &rfds);
-        maxfd = max(maxfd, ctxt->os_ctxt->event_fd[0]);
-        SLIST_FOR_EACH_ENTRY(ctxt->os_ctxt->timers, timer, node) {
-            FD_SET(timer->fd, &rfds);
-            maxfd = max(maxfd, timer->fd);
-        }
-        // FIXME: consider poll() usage
-        if (ctxt->uart.uart_next_frame_ready)
-            ret = pselect(maxfd + 1, &rfds, NULL, &efds, &ts, NULL);
-        else
-            ret = pselect(maxfd + 1, &rfds, NULL, &efds, NULL, NULL);
-        if (ret < 0)
-            FATAL(2, "pselect: %m");
-        if (FD_ISSET(ctxt->os_ctxt->event_fd[0], &rfds)) {
-            read(ctxt->os_ctxt->event_fd[0], &val, sizeof(val));
-            WARN_ON(val != 'W');
-            eventOS_scheduler_run_until_idle();
-        }
-        if (FD_ISSET(ctxt->uart.trig_fd, &rfds) ||
-            FD_ISSET(ctxt->uart.trig_fd, &efds) ||
-            ctxt->uart.uart_next_frame_ready)
-            rcp_rx(ctxt);
-        SLIST_FOR_EACH_ENTRY(ctxt->os_ctxt->timers, timer, node) {
-            if (FD_ISSET(timer->fd, &rfds)) {
-                ret = read(timer->fd, &val, sizeof(val));
-                WARN_ON(ret < sizeof(val) || val != 1, "cancelled timer?");
-                timer->fn(timer->fd, 0);
-            }
-        }
-    }
+#ifdef MAC_INPROCESS
+    // As wshwsim's loop: radio input first, then one event per iteration,
+    // so that frames are served between the stack's events.
+    rf_inproc_add_to_run_loop();
+    ns_port_posix_add_scheduler(true);
+#else
+    // Same inputs, in the same order, as the loop that was here.
+    ns_port_posix_add_scheduler(false);
+    ns_port_posix_add_fd(ctxt->uart.trig_fd, ctxt->uart.trig_fd != ctxt->uart.data_fd,
+                         wsrouter_uart_ready, wsrouter_uart_pending);
+#endif
+    ns_port_run();
     close(logfile);
     return 0;
 }

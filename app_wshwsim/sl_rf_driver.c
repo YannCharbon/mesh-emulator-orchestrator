@@ -35,7 +35,6 @@
 #include "common/utils.h"
 #include "common/hal_interrupt.h"
 #include "mac/rf_driver_storage.h"
-#include "sl_wsrcp.h"
 #include "sl_rf_driver.h"
 #include <sys/time.h>
 #include "common/os_timer.h"
@@ -49,6 +48,8 @@
 
 #include <sys/mman.h>
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 #include "mac_helpers.h"
 #include "nodes_infos.h"
@@ -57,6 +58,8 @@
 #define TRACE_GROUP "vrf"
 
 #define FHSS_ON
+
+struct rf_sim_host g_rf_host = { .rf_fd = -1 };
 
 static phy_device_driver_s device_driver;
 static uint8_t rf_mac_address[8];
@@ -245,19 +248,35 @@ static int8_t phy_rf_state_control(phy_interface_state_e new_state, uint8_t rf_c
     return 0;
 }
 
-void write_pcap(struct wsmac_ctxt *ctxt, uint8_t *buf, int len)
+void write_pcap(uint8_t *buf, int len)
 {
 #ifdef HAVE_LIBPCAP
     struct pcap_pkthdr pcap_hdr;
 
-    if (ctxt->pcap_dumper) {
+    if (g_rf_host.pcap_dumper) {
         gettimeofday(&pcap_hdr.ts, NULL);
         pcap_hdr.caplen = len;
         pcap_hdr.len = len;
-        pcap_dump((uint8_t *)ctxt->pcap_dumper, &pcap_hdr, buf);
-        pcap_dump_flush(ctxt->pcap_dumper);
+        pcap_dump((uint8_t *)g_rf_host.pcap_dumper, &pcap_hdr, buf);
+        pcap_dump_flush(g_rf_host.pcap_dumper);
     }
 #endif
+}
+
+int rf_sim_connect(const char *path)
+{
+    struct sockaddr_un addr = {
+        .sun_family = AF_UNIX
+    };
+    int fd;
+    int ret;
+
+    strcpy(addr.sun_path, path);
+    fd = socket(AF_UNIX, SOCK_SEQPACKET, 0); // use SOCK_SEQPACKET or SOCK_STREAM
+    FATAL_ON(fd < 0, 2, "socket %s: %m", path);
+    ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    FATAL_ON(ret < 0, 2, "connect %s: %m", path);
+    return fd;
 }
 
 bool fhss_on = false;
@@ -276,7 +295,7 @@ void * set_fhss_status() {
 }
 
 //int dbg_i_rx = 0;
-void phy_rf_rx_now(struct wsmac_ctxt *ctxt) // Here to pass x and y
+void phy_rf_rx_now(void)
 {
     //WARN("RX_Counter %d", dbg_i_rx++);
     static char trace_buffer[128];
@@ -286,7 +305,7 @@ void phy_rf_rx_now(struct wsmac_ctxt *ctxt) // Here to pass x and y
     int pkt_chan;
     int len;
     int pkt_seq;
-    len = read(ctxt->rf_fd, hdr, PHY_EXTRA_HDR_SIZE);
+    len = read(g_rf_host.rf_fd, hdr, PHY_EXTRA_HDR_SIZE);
     FATAL_ON(!len, 2, "RF server has gone");
     FATAL_ON(len < 0, 2, "RF socket: %m");
     if (len != PHY_EXTRA_HDR_SIZE || hdr[0] != 'x' || hdr[1] != 'x') {
@@ -307,7 +326,7 @@ void phy_rf_rx_now(struct wsmac_ctxt *ctxt) // Here to pass x and y
         }
     }
 
-    len = read(ctxt->rf_fd, buf, pkt_len);
+    len = read(g_rf_host.rf_fd, buf, pkt_len);
     WARN_ON(len != pkt_len);
 
     // Simulate RSSI
@@ -407,7 +426,6 @@ static int8_t phy_rf_tx_now()
 {
     static char trace_buffer[128];
     uint8_t hdr[PHY_EXTRA_HDR_SIZE];
-    struct wsmac_ctxt *ctxt = &g_ctxt;
 
     // Get the next packet to transmit and remore it from ring buffer
     int16_t output_index = ringbufindex_get(&output_ringbuf);
@@ -446,15 +464,14 @@ static int8_t phy_rf_tx_now()
            bytes_str(data_ptr, data_len, NULL, trace_buffer, sizeof(trace_buffer), DELIM_SPACE | ELLIPSIS_STAR), data_len);
     __PRINT(35, "Transmitting ... chan=%d, len=%u, txseq=%d ts=%u", channel, data_len, phy_seq, rf_get_timestamp());
     phy_seq++;
-    write(ctxt->rf_fd, hdr, PHY_EXTRA_HDR_SIZE);
-    write(ctxt->rf_fd, data_ptr, data_len);
-    write_pcap(ctxt, data_ptr, data_len);
+    write(g_rf_host.rf_fd, hdr, PHY_EXTRA_HDR_SIZE);
+    write(g_rf_host.rf_fd, data_ptr, data_len);
+    write_pcap(data_ptr, data_len);
     return 0;
 }
 
 static void _rf_handle_rx_end(){
     _rf_stop_backup_timer();
-    struct wsmac_ctxt *ctxt = &g_ctxt;
 
     int16_t buffed_index = ringbufindex_get(&input_ringbuf);
     if (buffed_index == -1) {
@@ -469,7 +486,7 @@ static void _rf_handle_rx_end(){
     driver_state = DRVSTATE_IDLE_WAITING_RX;
     set_shm_cca_state();
     if (device_driver.phy_rx_cb)
-        ctxt->rf_driver->phy_driver->phy_rx_cb(buf, len, 200, buffed_packet->rssi, ctxt->rcp_driver_id);
+        device_driver.phy_rx_cb(buf, len, 200, buffed_packet->rssi, rf_radio_driver_id);
 }
 
 /**
@@ -557,13 +574,13 @@ static bool _rf_check_cca(){
     if(!_rf_set_rx()){
         WARN("Could not start RX mode");
     }
-    struct wsmac_ctxt *ctxt = &g_ctxt;
+    struct neighbor_timings *neighbors = g_rf_host.neighbors;
     int i;
 
-    for (i = 0; i < ARRAY_SIZE(ctxt->neighbor_timings); i++) {
-        if(ctxt->neighbor_timings[i].eui64[1] != 0) {
-            WARN("neigh %d: mac[last]: %d",i, ctxt->neighbor_timings[i].eui64[7]);
-            /* uint8_t * cca_res = rf_request_rf_state_dbus(&ctxt->neighbor_timings[i].eui64[0]);
+    for (i = 0; i < g_rf_host.neighbors_count; i++) {
+        if(neighbors[i].eui64[1] != 0) {
+            WARN("neigh %d: mac[last]: %d",i, neighbors[i].eui64[7]);
+            /* uint8_t * cca_res = rf_request_rf_state_dbus(&neighbors[i].eui64[0]);
             if (cca_res != NULL) {
                 if(cca_res[0] == DRVSTATE_TX && (uint16_t)cca_res[1] == channel) {
                     __PRINT(36,"CCA: CANNEL BUSY");
@@ -572,7 +589,7 @@ static bool _rf_check_cca(){
                 }
             } */
             // using shm
-            int des_pos_shm = (ctxt->neighbor_timings[i].eui64[7])*3;
+            int des_pos_shm = (neighbors[i].eui64[7])*3;
             uint8_t tmp_st = *(uint8_t*)(shm_ptr+des_pos_shm);
             uint16_t tmp_ch = *(uint16_t*)(shm_ptr+des_pos_shm+1);
             WARN("tmp_st %d, tmp_ch: %d", tmp_st, tmp_ch);
