@@ -10,7 +10,9 @@
 > (`wshwsim`), the node applications (`wsbrd`, `wsnode`), the Spinel/UART
 > transport and the run scripts. The stack is built from the sibling
 > repository and linked as static libraries. Behaviour is unchanged; see
-> [MIGRATION.md](MIGRATION.md).
+> [MIGRATION.md](MIGRATION.md). The stack has since been made portable, and
+> this repo uses its POSIX port's run loop and offers in-process nodes
+> (`wsnode-inproc`, `wsbrd-inproc`); see the stack's `docs/ARCHITECTURE.md`.
 >
 > Status (2026-10-23): none of the planned emulator improvements has been made
 > yet: the defect fixes, sleep/energy states, drift and the central medium.
