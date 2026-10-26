@@ -25,7 +25,7 @@
 #include "nanostack-event-loop/eventOS_scheduler.h"
 #include "nanostack/mac/sw_mac.h"
 
-#include "common/hal_interrupt.h"
+#include "ns_port/critical.h"
 #include "common/bus_uart.h"
 #include "common/os_scheduler.h"
 #include "common/os_timer.h"

@@ -33,7 +33,7 @@
 #include "nanostack/mac/mac_api.h"
 #include "common/log.h"
 #include "common/utils.h"
-#include "common/hal_interrupt.h"
+#include "ns_port/critical.h"
 #include "mac/rf_driver_storage.h"
 #include "sl_rf_driver.h"
 #include <sys/time.h>

@@ -29,7 +29,7 @@
 #include "multicast_helper.h"
 #include "nanostack/multicast_api.h"
 
-#include "common/hal_interrupt.h"
+#include "ns_port/critical.h"
 #include "common/bus_uart.h"
 #include "common/os_scheduler.h"
 #include "common/os_timer.h"
