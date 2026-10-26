@@ -11,6 +11,8 @@ nanostack-build/
 /wsnode
 /wshwsim
 /wssimserver
+/wsnode-inproc
+/wsbrd-inproc
 # Out-of-source builds and a locally cloned mbedtls
 /build*/
 /mbedtls/
