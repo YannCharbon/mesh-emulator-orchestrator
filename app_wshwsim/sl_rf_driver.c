@@ -1176,10 +1176,13 @@ void shm_init()
     sim_shm_name(shm_name, sizeof(shm_name), "wssimcca", sim_socket_path);
     sim_shm_name(shm_infos_name, sizeof(shm_infos_name), "wssimnodesinfos", sim_socket_path);
 
-    // Create shared memory
-    int shm_fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
-    FATAL_ON(shm_fd < 0, 2, "shm open faild!");
-    ftruncate(shm_fd, shm_size);
+    // wssimserver creates both tables before it listens. A missing one means
+    // this node and the server spelled the socket path differently (the names
+    // come from the path string): creating it here would give this node
+    // tables of its own, with perfect links and no shared CCA.
+    int shm_fd = shm_open(shm_name, O_RDWR, 0);
+    FATAL_ON(shm_fd < 0, 2, "shm_open %s: %m (is wssimserver's socket path spelled the same: %s?)",
+             shm_name, sim_socket_path);
 
     // Map shared memory
     shm_ptr = mmap(0, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
@@ -1187,9 +1190,9 @@ void shm_init()
 
 
     // Shared memory for nodes and edges information
-    // Create shared memory
-    int shm_infos_fd = shm_open(shm_infos_name, O_CREAT | O_RDWR, 0666);
-    ftruncate(shm_infos_fd, shm_infos_size);
+    int shm_infos_fd = shm_open(shm_infos_name, O_RDWR, 0);
+    FATAL_ON(shm_infos_fd < 0, 2, "shm_open %s: %m (is wssimserver's socket path spelled the same: %s?)",
+             shm_infos_name, sim_socket_path);
 
     // Map shared memory
     void* infos_ptr = mmap(0, shm_infos_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_infos_fd, 0);

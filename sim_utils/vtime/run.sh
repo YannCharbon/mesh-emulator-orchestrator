@@ -86,15 +86,16 @@ start_wall=$(date +%s.%N)
 EOF
 
 declare -A NAME   # pid -> log name
+declare -A ACTIVE # pids started and not yet reaped: the only ones signalled
 PIDS=()
 WATCHDOG=; SAMPLER=
 cleanup() {
 	local p
 	[ -n "$WATCHDOG" ] && kill "$WATCHDOG" 2>/dev/null
 	[ -n "$SAMPLER" ] && kill "$SAMPLER" 2>/dev/null
-	for p in "${PIDS[@]}"; do kill -TERM "$p" 2>/dev/null; done
+	for p in "${!ACTIVE[@]}"; do kill -TERM "$p" 2>/dev/null; done
 	sleep 1
-	for p in "${PIDS[@]}"; do kill -KILL "$p" 2>/dev/null; done
+	for p in "${!ACTIVE[@]}"; do kill -KILL "$p" 2>/dev/null; done
 	rm -f "$SOCK"
 }
 abort() {
@@ -115,7 +116,7 @@ mac() { printf '01:02:03:04:05:06:%02X:%02X' $(($1 >> 8)) $(($1 & 0xFF)); }
 start() {   # start <log name> <program and args...>
 	local log=$1; shift
 	"${PRE[@]}" "$@" > "$OUT/$log.log" 2>&1 &
-	PIDS+=($!); NAME[$!]=$log
+	PIDS+=($!); NAME[$!]=$log; ACTIVE[$!]=1
 }
 
 start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1)) --vtime-end="$DUR" --dump "$SOCK"
@@ -135,7 +136,9 @@ for (( i = 1; i <= NODES; i++ )); do
 done
 
 if [ "${WALL_TIMEOUT:-0}" -gt 0 ]; then
-	( sleep "$WALL_TIMEOUT"; echo "run.sh: wall-clock timeout, SIGTERM to wssimserver" >&2; kill -TERM $SIM_PID ) &
+	# The run is then incomplete: wall_timeout marks it, and run.sh fails.
+	( sleep "$WALL_TIMEOUT"; touch "$OUT/wall_timeout"
+	  echo "run.sh: wall-clock timeout, SIGTERM to wssimserver" >&2; kill -TERM $SIM_PID ) &
 	WATCHDOG=$!
 fi
 if [ "${RSS:-0}" = 1 ]; then
@@ -156,8 +159,6 @@ fi
 
 # Wait for the processes as they end. wssimserver ends the run; a node that
 # fails before that stops the run.
-declare -A ACTIVE
-for p in "${PIDS[@]}"; do ACTIVE[$p]=1; done
 SIM_RC=
 while (( ${#ACTIVE[@]} > 0 )); do
 	DONE=
@@ -181,7 +182,7 @@ done
 # a moment, then stop them.
 for (( i = 0; i < 50; i++ )); do
 	ALIVE=0
-	for p in "${PIDS[@]}"; do kill -0 "$p" 2>/dev/null && ALIVE=1; done
+	for p in "${!ACTIVE[@]}"; do [ "$p" != "$SIM_PID" ] && kill -0 "$p" 2>/dev/null && ALIVE=1; done
 	(( ALIVE )) || break
 	sleep 0.1
 done
@@ -198,5 +199,9 @@ done
 rm -f "$SOCK"
 echo "end_wall=$(date +%s.%N)" >> "$OUT/run_info.txt"
 sort -V -o "$OUT/exit_codes.txt" "$OUT/exit_codes.txt"
+if [ -e "$OUT/wall_timeout" ]; then
+	echo "run stopped by WALL_TIMEOUT=$WALL_TIMEOUT s before its end: $OUT" >&2
+	exit 1
+fi
 echo "run finished: $OUT (wssimserver status ${SIM_RC:-?})"
 [ "${SIM_RC:-1}" = 0 ]

@@ -177,31 +177,28 @@ static int rssi_map_parse_for_one_group(char *str)
                 if (i != j)
                     sim_link(nodes_infos_flat_map, i, j)->rssi = rssi;
     } else {
+        // A list of IDs: count them, at most MAX_NODES (more is malformed)
         nodes_in_group[nodes_in_group_idx++] = start_node;
         while ((range = strtok(NULL, ","))) {
-            unsigned long cur_node = strtoul(range, &endptr, 0);
-            nodes_in_group[nodes_in_group_idx++] = cur_node;
-        }
-
-        int i = 0, j = 0;
-        while (nodes_in_group[i] != -1) {
-            if (nodes_in_group[i] >= MAX_NODES) {
+            if (nodes_in_group_idx >= MAX_NODES) {
                 free(str_copy);
                 return -1;
             }
-            i++;
+            nodes_in_group[nodes_in_group_idx++] = strtoul(range, &endptr, 0);
         }
-        i = 0;
-        while (nodes_in_group[i] != -1) {
-            while (nodes_in_group[j] != -1) {
+        for (int i = 0; i < nodes_in_group_idx; i++) {
+            if (nodes_in_group[i] < 0 || nodes_in_group[i] >= MAX_NODES) {
+                free(str_copy);
+                return -1;
+            }
+        }
+        for (int i = 0; i < nodes_in_group_idx; i++) {
+            for (int j = 0; j < nodes_in_group_idx; j++) {
                 if (i != j) {
                     sim_link(nodes_infos_flat_map, nodes_in_group[i], nodes_in_group[j])->rssi = rssi;
                     sim_link(nodes_infos_flat_map, nodes_in_group[j], nodes_in_group[i])->rssi = rssi;
                 }
-                j++;
             }
-            j = 0;
-            i++;
         }
     }
 
@@ -428,10 +425,12 @@ static void conn_close(int slot)
 }
 
 // A hello must say whether its node runs on virtual time, and that must match
-// the server's mode.
-static void conn_hello(int slot, const void *buf, int len, bool vtime)
+// the server's mode. In virtual time (vtime_nodes > 0), hellos beyond the
+// expected number are refused: several can arrive in one poll() pass.
+static void conn_hello(int slot, const void *buf, int len, int vtime_nodes)
 {
     const struct sim_hello *hello = buf;
+    bool vtime = vtime_nodes > 0;
 
     if (len != sizeof(*hello) || memcmp(hello->magic, "xh", 2)) {
         WARN("fd %d: expected a hello, dropping the connection", fds[slot].fd);
@@ -446,6 +445,10 @@ static void conn_hello(int slot, const void *buf, int len, bool vtime)
         WARN("fd %d: node %d runs on %s time, this server on %s time: refused", fds[slot].fd,
              hello->node_id, (hello->flags & SIM_HELLO_VTIME) ? "virtual" : "wall-clock",
              vtime ? "virtual" : "wall-clock");
+        conn_close(slot);
+    } else if (vtime && num_connected >= vtime_nodes) {
+        WARN("fd %d: node %d: the %d nodes of --vtime are already connected: refused",
+             fds[slot].fd, hello->node_id, vtime_nodes);
         conn_close(slot);
     } else {
         conns[slot].node = hello->node_id;
@@ -559,7 +562,7 @@ static void serve(struct ctxt *ctxt)
             if (len < 1)
                 conn_close(i);
             else if (conns[i].node < 0)
-                conn_hello(i, buf, len, vtime);
+                conn_hello(i, buf, len, ctxt->vtime_nodes);
             else
                 relay(ctxt->node_graph, i, buf, len);
         }

@@ -14,7 +14,7 @@ docs/VIRTUAL_TIME.md), so it is expected to differ.
 the environment (for example the TUN device's name), not on what the run did.
 
 Exit status: 0 if all the compared files (simserver.log aside) are identical,
-1 otherwise.
+1 if not, 2 on an error (a run directory that cannot be read, for example).
 """
 import os, re, sys
 
@@ -82,5 +82,11 @@ if __name__ == '__main__':
     args = [x for x in sys.argv[1:] if x not in ('--quiet', '--mask-pointers')]
     mask = '--mask-pointers' in sys.argv
     if len(args) != 2:
-        sys.exit(__doc__)
-    sys.exit(0 if compare(args[0], args[1], '--quiet' in sys.argv) else 1)
+        print(__doc__, file=sys.stderr)
+        sys.exit(2)
+    try:
+        same = compare(args[0], args[1], '--quiet' in sys.argv)
+    except Exception as e:
+        print(f'compare_logs.py: {e}', file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0 if same else 1)

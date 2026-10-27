@@ -25,11 +25,16 @@ for r in "a $SEED" "b $SEED" "c $OTHER"; do
 done
 
 echo; echo "== a vs b (seed $SEED twice: must be identical)"
-python3 "$HERE/compare_logs.py" "$OUT/a" "$OUT/b"; SAME=$?
+python3 "$HERE/compare_logs.py" "$OUT/a" "$OUT/b"; AB=$?
 echo; echo "== a vs c (seed $SEED vs $OTHER: must differ)"
-python3 "$HERE/compare_logs.py" --quiet "$OUT/a" "$OUT/c"; OTHER_SAME=$((1 - $?))
+python3 "$HERE/compare_logs.py" --quiet "$OUT/a" "$OUT/c"; AC=$?
 
+# compare_logs.py: 0 identical, 1 different, anything else an error
 echo
+if (( AB > 1 || AC > 1 )); then
+	echo "determinism: ERROR, compare_logs.py failed"; exit 2
+fi
+SAME=$AB; OTHER_SAME=$((1 - AC))
 if (( SAME == 0 && OTHER_SAME == 0 )); then
 	echo "determinism: PASS"; exit 0
 fi

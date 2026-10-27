@@ -10,7 +10,7 @@
 # plus 20%. If JOBS such runs do not fit in the available memory minus
 # RESERVE_GB (4), JOBS is lowered to what fits, and the campaign says so.
 # FORCE=1 keeps JOBS as given. The check is made once, at the start.
-# Exit status: the number of runs that failed.
+# Exit status: 0 if every run succeeded, 1 otherwise (the count is printed).
 set -u
 BIN=$1; WORK=$2; OUT=$3; DUR=$4; shift 4
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -69,4 +69,4 @@ for seed in "$@"; do
 done
 while (( ${#busy[@]} )); do reap; done
 echo "campaign: $# runs, $JOBS at a time, $(echo "$(date +%s.%N) - $start" | bc) s, $failed failed"
-exit "$failed"
+(( failed == 0 ))
