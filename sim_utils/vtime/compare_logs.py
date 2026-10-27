@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Compare the logs of two runs byte for byte.
 
-usage: compare_logs.py <run A> <run B> [--quiet]
+usage: compare_logs.py <run A> <run B> [--quiet] [--mask-pointers]
 
 Compares every node<i>.log, br.log, log_wsbr and exit_codes.txt that is in
 either run, and reports, per file, "same", "missing in A/B", or the first line
 that differs (line number and both lines). simserver.log is compared too but
 only for information: wssimserver prints wall-clock figures (§3 of
 docs/VIRTUAL_TIME.md), so it is expected to differ.
+
+--mask-pointers replaces printed addresses (0x and 8 or more hex digits) with
+"PTR" before comparing. They depend on the memory layout, which changes with
+the environment (for example the TUN device's name), not on what the run did.
 
 Exit status: 0 if all the compared files (simserver.log aside) are identical,
 1 otherwise.
@@ -23,6 +27,10 @@ def sort_key(name):
     return (1, int(m.group(1)), '') if m else (0, 0, name)
 
 
+POINTER = re.compile(rb'0x[0-9a-fA-F]{8,}')
+mask = False
+
+
 def first_diff(pa, pb):
     """None if the files are identical, else (line number, line A, line B)."""
     with open(pa, 'rb') as fa, open(pb, 'rb') as fb:
@@ -30,6 +38,8 @@ def first_diff(pa, pb):
         while True:
             la, lb = fa.readline(), fb.readline()
             n += 1
+            if mask:
+                la, lb = POINTER.sub(b'PTR', la), POINTER.sub(b'PTR', lb)
             if la != lb:
                 return n, la, lb
             if not la:
@@ -69,7 +79,8 @@ def compare(a, b, quiet=False):
 
 
 if __name__ == '__main__':
-    args = [x for x in sys.argv[1:] if x != '--quiet']
+    args = [x for x in sys.argv[1:] if x not in ('--quiet', '--mask-pointers')]
+    mask = '--mask-pointers' in sys.argv
     if len(args) != 2:
         sys.exit(__doc__)
     sys.exit(0 if compare(args[0], args[1], '--quiet' in sys.argv) else 1)

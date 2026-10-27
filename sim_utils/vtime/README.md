@@ -8,6 +8,8 @@ Scripts for the step-1 gate of `docs/VIRTUAL_TIME.md` (§7). They need a virtual
 | `compare_logs.py` | Compares two runs' logs byte for byte; prints the first differing line of each file |
 | `determinism.sh` | Same seed twice and another seed once (§7.2) |
 | `gen_topology.py` | Connected topologies (random geometric graph or grid), deterministic from a seed |
+| `tun_setup.sh` | Creates `tunvt0`… (run once per boot with sudo): one TUN per border router running at the same time, all with the same fixed link-local address |
+| `campaign.sh` | Several runs at once, one per `tunvt` device: `campaign.sh <bindir> <workdir> <outdir> <seconds> <seed>...` (`JOBS` limits how many at a time) |
 | `speed.sh` | Wall time per simulated second and peak RSS at several sizes (§7.4) |
 
 Analysis: `sim_utils/migration/analyze.py` reads these runs as it reads the wall-clock ones (`brtree` lines of `br.log` instead of `dbus_nodes.txt`).
@@ -45,3 +47,16 @@ What each run gets of its own, and what it shares:
 | Process names | **no** | `sim_utils/migration/headless_run.sh` runs `pkill -x wsbrd-inproc`, `wsnode-inproc` and `wssimserver`: it kills every run on the PC, virtual-time runs included |
 
 `/tmp/wsbrd/` is not used by any program (`headless_run.sh` only creates it). The default `storage_prefix` of the programs is `/var/lib/wsbrd/`, shared by all runs, which is why `run.sh` always sets it.
+
+## Campaigns: several runs at once
+
+Each run uses about 1.4 CPU cores (the conductor and the one node it is running), so a PC runs many at once. Virtual time does not depend on the CPU load, so a run gives the same logs alone or in a campaign.
+
+```bash
+sudo sim_utils/vtime/tun_setup.sh 12        # once per boot: tunvt0..tunvt11
+SETARCH=1 sim_utils/vtime/campaign.sh build-vt $(pwd) runs/vt/campaign 300 $(seq 1 12)
+```
+
+Measured on a 24-core PC (2026-10-27, `dag_simple`, 300 virtual seconds, 12 seeds): 48.0 s one at a time, 10.5 s six at a time, 7.0 s twelve at a time (6.8×). Every seed's logs were identical in the three cases, and identical to earlier runs on `tun0` (`compare_logs.py --mask-pointers`: only printed heap addresses depend on the TUN's name).
+
+The `tunvt` devices carry no generated addresses and the same fixed link-local address, because `wsbrd` reads and logs it: with tun0's random address a run would log a different address on each device.
