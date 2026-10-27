@@ -310,3 +310,10 @@ if(COMPILE_SIMULATION_TOOLS)
     install(TARGETS wssimserver RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 endif()
+
+# Virtual-time build (docs/VIRTUAL_TIME.md): only the in-process programs and
+# wssimserver run on the simulation port for now; the split programs follow in
+# EM3 step 2.
+if(NANOSTACK_PORT STREQUAL "nanostack_port_sim" AND COMPILE_SIMULATION_TOOLS)
+    set_target_properties(wsbrd wsnode wshwsim PROPERTIES EXCLUDE_FROM_ALL TRUE)
+endif()

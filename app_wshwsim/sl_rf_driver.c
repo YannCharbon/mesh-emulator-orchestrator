@@ -52,6 +52,9 @@
 #include <sys/un.h>
 
 #include "sim_proto.h"
+#ifdef NS_PORT_SIM
+#include "ns_port_sim.h"
+#endif
 #include <math.h>
 
 #define TRACE_GROUP "vrf"
@@ -283,12 +286,16 @@ static double rf_rng_uniform(void)
     return (rf_rng_next() >> 11) * 0x1.0p-53;
 }
 
-// The base seed comes from WSSIM_SEED, or else from the clock. Each node
-// draws from base + node ID, and logs both so a run can be replayed.
+// The base seed comes from WSSIM_SEED, or else from the clock; in virtual
+// time, from the conductor. Each node draws from base + node ID, and logs both
+// so a run can be replayed.
 static void rf_rng_seed(int node_id)
 {
-    const char *env = getenv("WSSIM_SEED");
     uint64_t base;
+#ifdef NS_PORT_SIM
+    base = ns_port_sim_seed();
+#else
+    const char *env = getenv("WSSIM_SEED");
 
     if (env) {
         base = strtoull(env, NULL, 0);
@@ -298,6 +305,7 @@ static void rf_rng_seed(int node_id)
         clock_gettime(CLOCK_REALTIME, &tp);
         base = (uint64_t)tp.tv_sec * 1000000000 + tp.tv_nsec;
     }
+#endif
     rf_rng_state = base + node_id;
     INFO("loss model: WSSIM_SEED=%llu, node %d", (unsigned long long)base, node_id);
 }
@@ -314,7 +322,6 @@ int rf_sim_connect(const char *path, const uint8_t eui64[8])
     g_rf_host.node_id = sim_node_id(eui64);
     FATAL_ON(g_rf_host.node_id >= SIM_MAX_NODES, 2, "node ID %d (from the EUI-64) is above %d",
              g_rf_host.node_id, SIM_MAX_NODES - 1);
-    rf_rng_seed(g_rf_host.node_id);
     FATAL_ON(strlen(path) >= sizeof(addr.sun_path), 2, "socket path too long: %s", path);
     strcpy(addr.sun_path, path);
     strcpy(sim_socket_path, path);
@@ -324,8 +331,16 @@ int rf_sim_connect(const char *path, const uint8_t eui64[8])
     FATAL_ON(ret < 0, 2, "connect %s: %m", path);
     // The server numbers nodes by this ID
     hello.node_id = g_rf_host.node_id;
+#ifdef NS_PORT_SIM
+    hello.flags = SIM_HELLO_VTIME;
+#endif
     ret = write(fd, &hello, sizeof(hello));
     FATAL_ON(ret != sizeof(hello), 2, "write %s: %m", path);
+#ifdef NS_PORT_SIM
+    // Virtual time: this socket is also the conductor's (docs/VIRTUAL_TIME.md)
+    ns_port_sim_attach(fd, g_rf_host.node_id);
+#endif
+    rf_rng_seed(g_rf_host.node_id);
     return fd;
 }
 
@@ -1043,7 +1058,9 @@ static int8_t phy_rf_address_write(phy_address_type_e address_type, uint8_t *add
                 break;
         }
     }
-    // Now we have the MAC address, we can register to DBus
+    // Now we have the MAC address, we can register to DBus. Not in virtual
+    // time: its thread would answer at wall-clock times (step 3 brings it back).
+#ifndef NS_PORT_SIM
     if (rf_dbus_registered == 0) {
         rf_dbus_registered = 1;
         if(rf_dbus_register() < 0) {
@@ -1051,6 +1068,7 @@ static int8_t phy_rf_address_write(phy_address_type_e address_type, uint8_t *add
         }
         pthread_create(&rf_dbus_proces_thread, NULL, rf_dbus_process, NULL);
     }
+#endif
     return 0;
 }
 
