@@ -32,9 +32,9 @@ Node side: `ns_port_sim.h`. Summary:
 ```
 node                                   conductor (wssimserver --vtime)
 connect; "xh"{id, flags=VTIME} ---->
-                               <---- "xw"{version, seed}       (when all N nodes said hello)
+                               <---- "xw"{version, seed}       (when all N nodes said hello; one node at a time)
 run until idle; "xi"{next} ------->
-                               <---- "xa"{t} [+ frames for this node at t]
+                               <---- "xa"{t, frames=k} + k frames for this node at t
 deliver frames; fire timers due at t; run until idle;
 any "xx" frames it sends ------->   (queued for the neighbours at t)
 "xi"{next} ---------------------->
@@ -44,10 +44,10 @@ any "xx" frames it sends ------->   (queued for the neighbours at t)
 
 Rules:
 
-- **Start.** `--vtime=N` makes the conductor wait for N hellos before it sends any welcome, so start order and start time do not matter. All nodes start at virtual time 0. A hello without `SIM_HELLO_VTIME` is refused in `--vtime` mode, and one with it is refused in wall-clock mode.
+- **Start.** `--vtime=N` makes the conductor wait for N hellos before it sends any welcome, so start order and start time do not matter. All nodes start at virtual time 0. Welcomes go out one node at a time in node-ID order, and the conductor reads each node's first run up to its `"xi"` before welcoming the next, so frames queued at t = 0 are in a deterministic order. A node that disconnects before the run starts is dropped and the conductor waits for another hello. A hello without `SIM_HELLO_VTIME` is refused in `--vtime` mode, and one with it is refused in wall-clock mode.
 - **Seeds.** The conductor reads `WSSIM_SEED` (default 1) and sends it in the welcome. The radio's loss generator uses `seed + node ID`, as in EM1, so a seed means the same loss draws in both modes. The port's random source uses its own stream: splitmix64 seeded with `seed ^ 0x9E3779B97F4A7C15 * (node ID + 1)`.
 - **Order.** The conductor waits until no node is running. It then takes the earliest event by `(time, node ID, sequence)`. The sequence number grows with every event queued, so ties are ordered by when they were queued. Two kinds of event: a node's deadline (from its last `"xi"`; a new `"xi"` replaces it) and a frame delivery.
-- **Wake.** For the chosen node and time t, the conductor sends `"xa"{t}`, then every frame queued for that node at time t, in queue order, and waits for its `"xi"`. Messages the node sends before that `"xi"` are frames: each goes to the sender's neighbours in the graph (as `relay()` does today) with delivery time t. A node is never woken at a time earlier than its last wake.
+- **Wake.** For the chosen node and time t, the conductor sends `"xa"{t, frames = k}`, then the k frames queued for that node at time t, in queue order, and waits for its `"xi"`. Messages the node sends before that `"xi"` are frames: each goes to the sender's neighbours in the graph (as `relay()` does today) with delivery time t. A node is never woken at a time earlier than its last wake; a deadline earlier than now in an `"xi"` is moved to now, with a warning.
 - **Same-time loops.** If more than 100 000 wakes in a row happen without time moving forward, the conductor logs the queue head and stops.
 - **End.** `--vtime-end=<seconds>`: when the next event is later than that, the conductor sends `"xq"` to every node, waits for them to close, and exits 0. SIGINT and SIGTERM also send `"xq"`.
 - **Frames.** Unchanged from EM1 (`sim_frame_hdr`, server-stamped `src`). Delivery at TX start; the receiver's airtime and RX-end timers run on virtual time.
@@ -61,7 +61,7 @@ Rules:
   2. The callback timers due at `now`, in order of deadline then timer ID, each disarmed before its callback runs; then the FHSS timers due, in the same order.
   3. The poll hooks.
 
-  Idle: no event signalled, nothing pending, no timer due. It then sends `"xi"` and blocks on the conductor socket. On `"xa"` it sets `now`; it then reads every message already queued on the socket (`MSG_PEEK | MSG_DONTWAIT`): control messages are consumed by the port, any other message is left for the callback registered for the conductor fd, which is called once per message. `ns_port_posix_set_busy()` is not supported (split mode, step 2): FATAL if called.
+  Idle: no event signalled, nothing pending, no timer due. It then sends `"xi"` and blocks on the conductor socket. On `"xa"` it sets `now`; then, k times (`frames` in the `"xa"`), it waits until the next message is readable (blocking `poll()`; it may not have arrived yet) and calls the callback registered for the conductor fd, which reads it. `ns_port_posix_set_busy()` is not supported (split mode, step 2): FATAL if called.
 - **`eventOS_scheduler_signal()`** sets a flag; there is no pipe.
 - **Random.** `ns_port_random_bytes()` draws from the seeded splitmix64 stream. Calling it before `ns_port_sim_attach()` is FATAL, so no unseeded draw goes unnoticed.
 - **Logs.** At attach, the port replaces `stdout` and `stderr` with `fopencookie()` streams that write whole lines to fds 1 and 2, each prefixed with `"%llu.%06llu "` of `NSIM_EPOCH_S` + virtual time. Lines printed before attach get virtual time 0. The run scripts then need no timestamping wrapper, and `analyze.py` reads the same format as today's (`<seconds> <message>`), with `t0` = `NSIM_EPOCH_S`.
