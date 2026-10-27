@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdbool.h>
+#include <inttypes.h>
 #include <poll.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -754,11 +755,9 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
 }
 
 // Wake node at time t: "xa", then its frames due at t in queue order (they
-// are at the head of the heap). The number of frames that follow is in the
-// advance's reserved[0]. The node may read the "xa" before the frames that
-// follow it are in its socket, as they are separate messages: a port that
-// reads only what is already queued (MSG_DONTWAIT) can miss some, and one
-// that knows the count can wait for exactly that many.
+// are at the head of the heap). The advance says how many frames follow: the
+// node may read the "xa" before they are in its socket, as they are separate
+// messages, so it waits for exactly that many.
 static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
 {
     static struct vt_frame **frames;
@@ -782,7 +781,8 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
         }
         frames[num++] = ev.frame;
     }
-    adv.reserved[0] = num > UINT16_MAX ? UINT16_MAX : num;
+    FATAL_ON(num > UINT16_MAX, 1, "node %d: %zu frames due at %" PRIu64 " us", node, num, t);
+    adv.frames = num;
     vt_now = t;
     vt_wakes++;
     if (vt_send(node, &adv, sizeof(adv)))

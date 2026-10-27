@@ -26,7 +26,7 @@ HELLO_VTIME = 0x0001
 HELLO = struct.Struct("=2sHHH")      # magic, node_id, flags, reserved
 FRAME = struct.Struct("=2sHHHH")     # magic, len, chan, seq, src
 WELCOME = struct.Struct("=2sHIQ")    # magic, version, reserved, seed
-ADVANCE = struct.Struct("=2s3HQ")    # magic, reserved[3], now_us
+ADVANCE = struct.Struct("=2s3HQ")    # magic, frames, reserved[2], now_us
 IDLE = struct.Struct("=2s3HQ")       # magic, reserved[3], next_us
 
 
