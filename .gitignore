@@ -16,3 +16,4 @@ nanostack-build/
 # Out-of-source builds and a locally cloned mbedtls
 /build*/
 /mbedtls/
+__pycache__/

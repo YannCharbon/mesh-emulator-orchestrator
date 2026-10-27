@@ -22,6 +22,7 @@
 #include "common/log.h"
 #include "named_values.h"
 #include "dbus.h"
+#include "node_table.h"
 #include "wsbr.h"
 
 void dbus_emit_keys_change(struct wsbr_ctxt *ctxt)
@@ -203,18 +204,6 @@ static int dbus_revoke_apply(sd_bus_message *m, void *userdata, sd_bus_error *re
     return 0;
 }
 
-static int route_info_compare(const void *obj_a, const void *obj_b)
-{
-    const bbr_route_info_t *a = obj_a, *b = obj_b;
-    int ret;
-
-    ret = memcmp(a->parent, b->parent, sizeof(a->parent));
-    if (ret)
-        return ret;
-    ret = memcmp(a->target, b->target, sizeof(a->target));
-    return ret;
-}
-
 int dbus_get_nodes(sd_bus *bus, const char *path, const char *interface,
                        const char *property, sd_bus_message *reply,
                        void *userdata, sd_bus_error *ret_error)
@@ -223,10 +212,9 @@ int dbus_get_nodes(sd_bus *bus, const char *path, const char *interface,
     bbr_route_info_t table[4096];
     int ret, len, i;
 
-    len = ws_bbr_routing_table_get(rcp_if_id, table, ARRAY_SIZE(table));
+    len = wsbr_node_table_get(rcp_if_id, table, ARRAY_SIZE(table));
     if (len < 0)
         return sd_bus_error_set_errno(ret_error, EAGAIN);
-    qsort(table, len, sizeof(table[0]), route_info_compare);
     ret = sd_bus_message_open_container(reply, 'a', "(aya{sv})");
     WARN_ON(ret < 0, "%s: %s", property, strerror(-ret));
     for (i = 0; i < len; i++) {

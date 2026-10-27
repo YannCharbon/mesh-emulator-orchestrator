@@ -34,6 +34,8 @@
 #include "common/log.h"
 #include "common/utils.h"
 #include "ns_port/critical.h"
+#include "ns_port/sched.h"
+#include "ns_port/time.h"
 #include "mac/rf_driver_storage.h"
 #include "sl_rf_driver.h"
 #include <sys/time.h>
@@ -52,6 +54,9 @@
 #include <sys/un.h>
 
 #include "sim_proto.h"
+#ifdef NS_PORT_SIM
+#include "ns_port_sim.h"
+#endif
 #include <math.h>
 
 #define TRACE_GROUP "vrf"
@@ -66,19 +71,10 @@ static int8_t rf_radio_driver_id = (-1);
 static bool data_request_pending_flag = false;
 
 
+// The port's timebase: CLOCK_MONOTONIC in µs, modulo 2^32, on the POSIX port.
 static uint32_t rf_get_timestamp(void)
 {
-    struct timespec tp;
-    clock_gettime(CLOCK_MONOTONIC, &tp);
-    return (((uint32_t)tp.tv_sec) * 1000000 + tp.tv_nsec / 1000);
-}
-
-
-int64_t get_sys_time_ms(void) {
-    struct timeval tv;
-
-    gettimeofday(&tv,NULL);
-    return (((int64_t)tv.tv_sec)*1000)+(tv.tv_usec/1000);
+    return ns_port_time_us();
 }
 
 
@@ -200,15 +196,15 @@ bool rf_dbus_registered = false;
 void set_shm_cca_state();
 void get_shm_cca_state();
 
-/* Variables shm */
-const char* shm_name = "/wssimcca";
+/* Variables shm. The names belong to the server socket (sim_shm_name()),
+ * which rf_sim_connect() records before shm_init() runs. */
+static char sim_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 const int shm_size = SIM_SHM_CCA_SIZE;
 int shm_fd = -1;
 void* shm_ptr = NULL;
 
 /* Shared memory for RSSI infos */
 struct node_infos *nodes_infos_flat_map;
-const char* shm_infos_name = "/wssimnodesinfos";
 const long shm_infos_size = SIM_SHM_INFOS_SIZE;
 
 /* Loss model */
@@ -219,7 +215,7 @@ const long shm_infos_size = SIM_SHM_INFOS_SIZE;
 static uint64_t rf_rng_state;
 
 /* Threads */
-pthread_t rf_dbus_proces_thread, fhss_on_timer;
+pthread_t rf_dbus_proces_thread;
 
 /* Extra PHY defines, Helper functions */
 #define CALC_SLEEP_TIME(x)  (unsigned int)(((uint64_t)x*8*1000000)/(phy_subghz.datarate))
@@ -283,12 +279,16 @@ static double rf_rng_uniform(void)
     return (rf_rng_next() >> 11) * 0x1.0p-53;
 }
 
-// The base seed comes from WSSIM_SEED, or else from the clock. Each node
-// draws from base + node ID, and logs both so a run can be replayed.
+// The base seed comes from WSSIM_SEED, or else from the clock; in virtual
+// time, from the conductor. Each node draws from base + node ID, and logs both
+// so a run can be replayed.
 static void rf_rng_seed(int node_id)
 {
-    const char *env = getenv("WSSIM_SEED");
     uint64_t base;
+#ifdef NS_PORT_SIM
+    base = ns_port_sim_seed();
+#else
+    const char *env = getenv("WSSIM_SEED");
 
     if (env) {
         base = strtoull(env, NULL, 0);
@@ -298,6 +298,7 @@ static void rf_rng_seed(int node_id)
         clock_gettime(CLOCK_REALTIME, &tp);
         base = (uint64_t)tp.tv_sec * 1000000000 + tp.tv_nsec;
     }
+#endif
     rf_rng_state = base + node_id;
     INFO("loss model: WSSIM_SEED=%llu, node %d", (unsigned long long)base, node_id);
 }
@@ -314,32 +315,38 @@ int rf_sim_connect(const char *path, const uint8_t eui64[8])
     g_rf_host.node_id = sim_node_id(eui64);
     FATAL_ON(g_rf_host.node_id >= SIM_MAX_NODES, 2, "node ID %d (from the EUI-64) is above %d",
              g_rf_host.node_id, SIM_MAX_NODES - 1);
-    rf_rng_seed(g_rf_host.node_id);
+    FATAL_ON(strlen(path) >= sizeof(addr.sun_path), 2, "socket path too long: %s", path);
     strcpy(addr.sun_path, path);
+    strcpy(sim_socket_path, path);
     fd = socket(AF_UNIX, SOCK_SEQPACKET, 0); // use SOCK_SEQPACKET or SOCK_STREAM
     FATAL_ON(fd < 0, 2, "socket %s: %m", path);
     ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
     FATAL_ON(ret < 0, 2, "connect %s: %m", path);
     // The server numbers nodes by this ID
     hello.node_id = g_rf_host.node_id;
+#ifdef NS_PORT_SIM
+    hello.flags = SIM_HELLO_VTIME;
+#endif
     ret = write(fd, &hello, sizeof(hello));
     FATAL_ON(ret != sizeof(hello), 2, "write %s: %m", path);
+#ifdef NS_PORT_SIM
+    // Virtual time: this socket is also the conductor's (docs/VIRTUAL_TIME.md)
+    ns_port_sim_attach(fd, g_rf_host.node_id);
+#endif
+    rf_rng_seed(g_rf_host.node_id);
     return fd;
 }
 
 bool fhss_on = false;
 
-void * set_fhss_status() {
-    while (1) {
-        if(fhss_synch_global_state_get()) {
-            fhss_on = true;
-            WARN("FHSS : on");
-            return NULL;
-        } else {
-            fhss_on = false;
-            sleep(1);
-        }
-    }
+// Poll hook of the run loop: FHSS is on once the stack has synchronised its
+// hopping, and stays on (fhss_on is never cleared).
+static void rf_fhss_status_poll(void)
+{
+    if (fhss_on || !fhss_synch_global_state_get())
+        return;
+    fhss_on = true;
+    WARN("FHSS : on");
 }
 
 //int dbg_i_rx = 0;
@@ -1041,7 +1048,9 @@ static int8_t phy_rf_address_write(phy_address_type_e address_type, uint8_t *add
                 break;
         }
     }
-    // Now we have the MAC address, we can register to DBus
+    // Now we have the MAC address, we can register to DBus. Not in virtual
+    // time: its thread would answer at wall-clock times (step 3 brings it back).
+#ifndef NS_PORT_SIM
     if (rf_dbus_registered == 0) {
         rf_dbus_registered = 1;
         if(rf_dbus_register() < 0) {
@@ -1049,6 +1058,7 @@ static int8_t phy_rf_address_write(phy_address_type_e address_type, uint8_t *add
         }
         pthread_create(&rf_dbus_proces_thread, NULL, rf_dbus_process, NULL);
     }
+#endif
     return 0;
 }
 
@@ -1160,10 +1170,19 @@ static int8_t phy_rf_extension(phy_extension_type_e extension_type, uint8_t *dat
 
 void shm_init()
 {
-    // Create shared memory
-    int shm_fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
-    FATAL_ON(shm_fd < 0, 2, "shm open faild!");
-    ftruncate(shm_fd, shm_size);
+    char shm_name[192], shm_infos_name[192];
+
+    FATAL_ON(!sim_socket_path[0], 2, "shm_init() before rf_sim_connect()");
+    sim_shm_name(shm_name, sizeof(shm_name), "wssimcca", sim_socket_path);
+    sim_shm_name(shm_infos_name, sizeof(shm_infos_name), "wssimnodesinfos", sim_socket_path);
+
+    // wssimserver creates both tables before it listens. A missing one means
+    // this node and the server spelled the socket path differently (the names
+    // come from the path string): creating it here would give this node
+    // tables of its own, with perfect links and no shared CCA.
+    int shm_fd = shm_open(shm_name, O_RDWR, 0);
+    FATAL_ON(shm_fd < 0, 2, "shm_open %s: %m (is wssimserver's socket path spelled the same: %s?)",
+             shm_name, sim_socket_path);
 
     // Map shared memory
     shm_ptr = mmap(0, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
@@ -1171,9 +1190,9 @@ void shm_init()
 
 
     // Shared memory for nodes and edges information
-    // Create shared memory
-    int shm_infos_fd = shm_open(shm_infos_name, O_CREAT | O_RDWR, 0666);
-    ftruncate(shm_infos_fd, shm_infos_size);
+    int shm_infos_fd = shm_open(shm_infos_name, O_RDWR, 0);
+    FATAL_ON(shm_infos_fd < 0, 2, "shm_open %s: %m (is wssimserver's socket path spelled the same: %s?)",
+             shm_infos_name, sim_socket_path);
 
     // Map shared memory
     void* infos_ptr = mmap(0, shm_infos_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_infos_fd, 0);
@@ -1190,7 +1209,7 @@ void rf_driver_local_init(void)
     tx_sleep_handler_timer = eventOS_callback_timer_register(_rf_tx_sleep_timeout_timer_cb);
     rx_sleep_handler_timer = eventOS_callback_timer_register(_rf_rx_sleep_timeout_timer_cb);
     backup_timeout_timer = eventOS_callback_timer_register(_rf_backup_timer_cb);
-    pthread_create(&fhss_on_timer, NULL, set_fhss_status, NULL);
+    ns_port_add_poll_hook(rf_fhss_status_poll);
 
     driver_state = DRVSTATE_IDLE;
     set_shm_cca_state();

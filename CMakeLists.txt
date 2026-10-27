@@ -65,6 +65,13 @@ endif()
 set(CMAKE_BUILD_TYPE Debug)
 set(NANOSTACK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../nanostack-generic-standalone
     CACHE PATH "Path to the nanostack-generic-standalone repository")
+# All TLS randomness comes from the port (ns_port_random_bytes(): /dev/urandom
+# on the POSIX port, the conductor's seed under virtual time). mbedTLS must be
+# built without its own platform entropy (README, "Compile mbedtls"), so the
+# port's source has to be registered as strong. A normal variable, so that it
+# also applies to build directories configured before (the stack's option()
+# honours it, policy CMP0077).
+set(NANOSTACK_TLS_STRONG_PORT_ENTROPY ON)
 add_subdirectory(${NANOSTACK_DIR} nanostack-build)
 nanostack_add_library(nanostack_ws_border_router CONFIG ws_border_router BORDER_ROUTER
                       DEFINITIONS EXTRA_DEBUG_INFO)
@@ -87,6 +94,7 @@ add_custom_target(check_git
 add_executable(wsbrd
     version.c
     app_wsbrd/wsbr.c
+    app_wsbrd/node_table.c
     app_wsbrd/multicast_helper.c
     app_wsbrd/wsbr_mac.c
     app_wsbrd/wsbr_fhss_mac.c
@@ -241,7 +249,7 @@ if(COMPILE_SIMULATION_TOOLS)
             set(app_sources app_wsbrd/wsrouter.c)
             set(nslib nanostack_ws_router)
         else()
-            set(app_sources app_wsbrd/wsbr.c app_wsbrd/tun.c app_wsbrd/os_whiteboard.c
+            set(app_sources app_wsbrd/wsbr.c app_wsbrd/node_table.c app_wsbrd/tun.c app_wsbrd/os_whiteboard.c
                             app_wsbrd/mbedtls_config_check.c)
             set(nslib nanostack_ws_border_router)
         endif()
@@ -282,6 +290,11 @@ if(COMPILE_SIMULATION_TOOLS)
         # sl_rf_inproc.c keeps the neighbour list the CCA uses.
         target_link_options(${variant} PRIVATE
             -Wl,--wrap=ns_fhss_ws_update_neighbor,--wrap=ns_fhss_ws_drop_neighbor)
+        if(NANOSTACK_PORT STREQUAL "nanostack_port_sim")
+            # mbedTLS puts time() in the TLS hello randoms: virtual time instead
+            # (sl_rf_inproc.c).
+            target_link_options(${variant} PRIVATE -Wl,--wrap=time)
+        endif()
         if(LIBSYSTEMD_FOUND)
             target_link_libraries(${variant} PRIVATE PkgConfig::LIBSYSTEMD)
         endif()
@@ -305,7 +318,15 @@ if(COMPILE_SIMULATION_TOOLS)
     target_include_directories(wssimserver PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${NANOSTACK_ROOT}/port/posix/
+        ${NANOSTACK_ROOT}/port/sim/
     )
     install(TARGETS wssimserver RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+endif()
+
+# Virtual-time build (docs/VIRTUAL_TIME.md): only the in-process programs and
+# wssimserver run on the simulation port for now; the split programs follow in
+# EM3 step 2.
+if(NANOSTACK_PORT STREQUAL "nanostack_port_sim" AND COMPILE_SIMULATION_TOOLS)
+    set_target_properties(wsbrd wsnode wshwsim PROPERTIES EXCLUDE_FROM_ALL TRUE)
 endif()

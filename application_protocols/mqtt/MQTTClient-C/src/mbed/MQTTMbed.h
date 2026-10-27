@@ -16,6 +16,7 @@
 
 #include "nanostack/socket_api.h"
 #include <sys/types.h>
+#include <stdint.h>
 
 #include <sys/param.h>
 #include <sys/time.h>
@@ -29,9 +30,10 @@
 #include <string.h>
 #include <signal.h>
 
+// End time in µs on the port's clock (MQTTMbed.c); 0 means expired.
 typedef struct Timer
 {
-	struct timeval end_time;
+	uint64_t end_us;
 } Timer;
 
 void TimerInit(Timer*);

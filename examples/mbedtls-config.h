@@ -49,6 +49,11 @@
 // Needed for entropy
 #define MBEDTLS_CTR_DRBG_C
 #define MBEDTLS_ENTROPY_C
+// The only entropy source is the one the stack registers: the porting API's
+// random source (ns_port_random_bytes()), built with
+// NANOSTACK_TLS_STRONG_PORT_ENTROPY=ON. This keeps every random draw under
+// the port's control (virtual time replays runs from a seed).
+#define MBEDTLS_NO_PLATFORM_ENTROPY
 
 // Allow to check mbedTLS features during runtime
 #define MBEDTLS_VERSION_FEATURES

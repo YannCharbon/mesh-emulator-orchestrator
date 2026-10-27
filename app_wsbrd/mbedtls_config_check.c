@@ -53,4 +53,8 @@ void wsbr_check_mbedtls_features()
             FATAL(1, "MbedTLS is not compiled with %s", "MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8");
     if (!mbedtls_ecp_curve_info_from_name("secp256r1"))
             FATAL(1, "MbedTLS is not compiled with %s", "MBEDTLS_ECP_DP_SECP256R1_ENABLED");
+    // TLS randomness should come from the port only (examples/mbedtls-config.h).
+    // With platform entropy, TLS still works but also reads /dev/urandom.
+    if (mbedtls_version_check_feature("MBEDTLS_NO_PLATFORM_ENTROPY"))
+        WARN("MbedTLS is compiled with platform entropy: TLS randomness does not come from the port only");
 }

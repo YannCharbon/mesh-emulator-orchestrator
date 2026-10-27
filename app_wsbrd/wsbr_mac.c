@@ -4,7 +4,6 @@
  *     - Jérôme Pouiller <jerome.pouiller@silabs.com>
  */
 /* MAC API imlementation */
-#include <time.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -18,17 +17,16 @@
 #include "common/spinel_defs.h"
 #include "common/spinel_buffer.h"
 #include "common/log.h"
+#include "ns_port/time.h"
 
 static void adjust_rcp_time_diff(struct wsbr_ctxt *ctxt, uint32_t rcp_time)
 {
-    struct timespec tp;
     int rcp_time_diff;
 
     // FIXME: explain hy and when this case happens
     if (!rcp_time)
         return;
-    clock_gettime(CLOCK_MONOTONIC, &tp);
-    rcp_time_diff = (tp.tv_sec * 1000000 + tp.tv_nsec / 1000) - rcp_time;
+    rcp_time_diff = ns_port_time_us() - rcp_time;
     if (!ctxt->rcp_time_diff)
         ctxt->rcp_time_diff = rcp_time_diff;
     rcp_time_diff = rcp_time_diff * 0.10 + ctxt->rcp_time_diff * 0.9; // smooth adjustement
