@@ -30,8 +30,17 @@ sudo apt-get install libnl-3-dev libnl-route-3-dev libcap-dev \
     libsystemd-dev libdbus-1-dev cargo cmake ninja-build pkg-config lrzsz
    ```
 1) Clone mbetls (ver.3) in the pwd `git clone --branch=v3.0.0 https://github.com/ARMmbed/mbedtls`
-2) Do cd into mbedtls dir and `cmake -G Ninja .`
+2) Do cd into mbedtls dir and `cmake -G Ninja -DCMAKE_C_FLAGS=-DMBEDTLS_NO_PLATFORM_ENTROPY -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF .`
 3) Then do: `ninja`
+
+mbedtls is built without its own entropy source (`MBEDTLS_NO_PLATFORM_ENTROPY`,
+as in `examples/mbedtls-config.h`): all TLS randomness comes from the stack's
+porting API (`ns_port_random_bytes()`, `/dev/urandom` on the POSIX port), which
+this repo's build registers as a strong source
+(`NANOSTACK_TLS_STRONG_PORT_ENTROPY`, ON by default here). This is needed for
+virtual time (`docs/VIRTUAL_TIME.md`). An mbedtls built with the default
+configuration, such as the one in `wisun-mbed-simulator`, still works: TLS then
+also reads `/dev/urandom` itself, and `wsbrd` warns about it at start-up.
 
 ## Compile mbed OS
 

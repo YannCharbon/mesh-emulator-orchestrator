@@ -34,6 +34,8 @@
 #include "common/log.h"
 #include "common/utils.h"
 #include "ns_port/critical.h"
+#include "ns_port/sched.h"
+#include "ns_port/time.h"
 #include "mac/rf_driver_storage.h"
 #include "sl_rf_driver.h"
 #include <sys/time.h>
@@ -69,19 +71,10 @@ static int8_t rf_radio_driver_id = (-1);
 static bool data_request_pending_flag = false;
 
 
+// The port's timebase: CLOCK_MONOTONIC in µs, modulo 2^32, on the POSIX port.
 static uint32_t rf_get_timestamp(void)
 {
-    struct timespec tp;
-    clock_gettime(CLOCK_MONOTONIC, &tp);
-    return (((uint32_t)tp.tv_sec) * 1000000 + tp.tv_nsec / 1000);
-}
-
-
-int64_t get_sys_time_ms(void) {
-    struct timeval tv;
-
-    gettimeofday(&tv,NULL);
-    return (((int64_t)tv.tv_sec)*1000)+(tv.tv_usec/1000);
+    return ns_port_time_us();
 }
 
 
@@ -222,7 +215,7 @@ const long shm_infos_size = SIM_SHM_INFOS_SIZE;
 static uint64_t rf_rng_state;
 
 /* Threads */
-pthread_t rf_dbus_proces_thread, fhss_on_timer;
+pthread_t rf_dbus_proces_thread;
 
 /* Extra PHY defines, Helper functions */
 #define CALC_SLEEP_TIME(x)  (unsigned int)(((uint64_t)x*8*1000000)/(phy_subghz.datarate))
@@ -346,17 +339,14 @@ int rf_sim_connect(const char *path, const uint8_t eui64[8])
 
 bool fhss_on = false;
 
-void * set_fhss_status() {
-    while (1) {
-        if(fhss_synch_global_state_get()) {
-            fhss_on = true;
-            WARN("FHSS : on");
-            return NULL;
-        } else {
-            fhss_on = false;
-            sleep(1);
-        }
-    }
+// Poll hook of the run loop: FHSS is on once the stack has synchronised its
+// hopping, and stays on (fhss_on is never cleared).
+static void rf_fhss_status_poll(void)
+{
+    if (fhss_on || !fhss_synch_global_state_get())
+        return;
+    fhss_on = true;
+    WARN("FHSS : on");
 }
 
 //int dbg_i_rx = 0;
@@ -1216,7 +1206,7 @@ void rf_driver_local_init(void)
     tx_sleep_handler_timer = eventOS_callback_timer_register(_rf_tx_sleep_timeout_timer_cb);
     rx_sleep_handler_timer = eventOS_callback_timer_register(_rf_rx_sleep_timeout_timer_cb);
     backup_timeout_timer = eventOS_callback_timer_register(_rf_backup_timer_cb);
-    pthread_create(&fhss_on_timer, NULL, set_fhss_status, NULL);
+    ns_port_add_poll_hook(rf_fhss_status_poll);
 
     driver_state = DRVSTATE_IDLE;
     set_shm_cca_state();

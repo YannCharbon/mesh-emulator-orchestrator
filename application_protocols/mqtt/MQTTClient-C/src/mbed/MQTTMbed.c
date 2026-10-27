@@ -6,51 +6,56 @@
 #include "mbed-client-libservice/ip6string.h"
 #include "common/log.h"
 #include "mbed-client-libservice/ns_trace.h"
+#include "ns_port/time.h"
 
 int rpl_socket_id = -1;
 uint8_t rpl_tcp_buf[20];
 
 
 
+// The port's clock (ns_port_time_us(), 32 bits) extended to 64 bits. A wrap
+// (every 71.6 min) is seen as long as the MQTT timers are used at least once
+// per wrap period, which the client's keep-alive loop does.
+static uint64_t mqtt_time_us(void)
+{
+	static uint32_t last;
+	static uint64_t high;
+	uint32_t now = ns_port_time_us();
+
+	if (now < last)
+		high += 1ULL << 32;
+	last = now;
+	return high | now;
+}
+
 void TimerInit(Timer* timer)
 {
-	timer->end_time = (struct timeval){0, 0};
+	timer->end_us = 0;
 }
 
 char TimerIsExpired(Timer* timer)
 {
-	struct timeval now, res;
-	gettimeofday(&now, NULL);
-	timersub(&timer->end_time, &now, &res);
-	return res.tv_sec < 0 || (res.tv_sec == 0 && res.tv_usec <= 0);
+	return timer->end_us <= mqtt_time_us();
 }
 
 
 void TimerCountdownMS(Timer* timer, unsigned int timeout)
 {
-	struct timeval now;
-	gettimeofday(&now, NULL);
-	struct timeval interval = {timeout / 1000, (timeout % 1000) * 1000};
-	timeradd(&now, &interval, &timer->end_time);
+	timer->end_us = mqtt_time_us() + (uint64_t)timeout * 1000;
 }
 
 
 void TimerCountdown(Timer* timer, unsigned int timeout)
 {
-	struct timeval now;
-	gettimeofday(&now, NULL);
-	struct timeval interval = {timeout, 0};
-	timeradd(&now, &interval, &timer->end_time);
+	timer->end_us = mqtt_time_us() + (uint64_t)timeout * 1000000;
 }
 
 
 int TimerLeftMS(Timer* timer)
 {
-	struct timeval now, res;
-	gettimeofday(&now, NULL);
-	timersub(&timer->end_time, &now, &res);
-	//printf("left %d ms\n", (res.tv_sec < 0) ? 0 : res.tv_sec * 1000 + res.tv_usec / 1000);
-	return (res.tv_sec < 0) ? 0 : res.tv_sec * 1000 + res.tv_usec / 1000;
+	uint64_t now = mqtt_time_us();
+
+	return (timer->end_us <= now) ? 0 : (timer->end_us - now) / 1000;
 }
 
 
