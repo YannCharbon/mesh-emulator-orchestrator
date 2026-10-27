@@ -4,7 +4,14 @@
 usage: analyze.py ref_run1 ref_run2 -- new_run1 new_run2
 Per node: time (s after launch) of the Wi-SUN join milestones, the selected
 Wi-SUN parent, the last RPL preferred parent; per run: message-type histogram
-(numbers/addresses masked) and the BR's D-Bus node list at the end.
+(numbers/addresses masked) and the BR's node list at the end.
+
+Reads wall-clock runs (sim_utils/migration/headless_run.sh) and virtual-time
+runs (sim_utils/vtime/run.sh) alike: every log line is "<seconds> <message>"
+and t0 holds the start time. The routers are the node<i>.log files present.
+The BR's node list comes from dbus_nodes.txt (D-Bus snapshots, wall clock) or,
+without it, from the "brtree" lines of br.log (virtual time). The topology is
+topology.txt ("a,b:rssi" per line) when the run has one, dag_simple otherwise.
 """
 import os, re, sys, statistics, collections
 
@@ -27,11 +34,70 @@ def mask(s):
     s = re.sub(r'\b(0x)?[0-9a-fA-F]*[0-9][0-9a-fA-F]*\b', 'N', s)
     return s
 
+def node_ids(d):
+    ids = []
+    for f in os.listdir(d):
+        m = re.fullmatch(r'node(\d+)\.log', f)
+        if m:
+            ids.append(int(m.group(1)))
+    return sorted(ids)
+
+def run_links(d):
+    """The run's topology (set of frozenset edges) and its name."""
+    try:
+        txt = open(os.path.join(d, 'topology.txt')).read()
+    except OSError:
+        return LINKS, 'dag_simple'
+    links = set()
+    for e in txt.split():
+        if e.startswith('#'):
+            continue
+        # wssimserver -g syntax: a group of IDs and ranges, all linked together
+        group = set()
+        for part in e.split(':')[0].split(','):
+            lo, _, hi = part.partition('-')
+            group.update(range(int(lo), int(hi or lo) + 1))
+        links.update(frozenset((a, b)) for a in group for b in group if a < b)
+    return links, 'dag_simple' if links == LINKS else 'topology'
+
+def br_tree(d):
+    """BR's view at its last snapshot: node -> RPL parent (node IDs)."""
+    tree = {}
+    try:
+        # D-Bus "Nodes" printed by busctl: IIDs (U/L bit flipped), last byte = ID
+        txt = open(os.path.join(d, 'dbus_nodes.txt')).read().split('== t=')[-1]
+        for n, par in re.findall(r'8 3 2 3 4 5 6 0 (\d+) 1 "parent" ay 8 3 2 3 4 5 6 0 (\d+)', txt):
+            tree[int(n)] = int(par)
+        return tree
+    except OSError:
+        pass
+    # brtree t=<s> node=<eui64> parent=<eui64> (wsbr.c, virtual-time builds)
+    last_t = None
+    try:
+        for line in open(os.path.join(d, 'br.log'), errors='replace'):
+            m = BRTREE.search(line)
+            if not m:
+                continue
+            if m.group(1) != last_t:
+                last_t = m.group(1)
+                tree = {}
+            if m.group(2) is not None:
+                tree[mac_id(m.group(2))] = mac_id(m.group(3))
+    except OSError:
+        pass
+    return tree
+
+BRTREE = re.compile(r'brtree t=(\S+) (?:node=(\S+) parent=(\S+)|nodes=)')
+
+def mac_id(mac):
+    b = mac.split(':')
+    return int(b[6], 16) << 8 | int(b[7], 16)
+
 def run_summary(d):
     t0 = float(open(os.path.join(d, 't0')).read())
     nodes = {}
     hist = collections.Counter()
-    for i in range(1, 15):
+    for i in node_ids(d):
         p = os.path.join(d, f'node{i}.log')
         info = {k: None for k, _ in MILESTONES}
         info['wisun_parent'] = None
@@ -58,14 +124,7 @@ def run_summary(d):
             if m:
                 info['rpl_parent'] = m.group(1)
         nodes[i] = info
-    # BR's view at the last D-Bus snapshot: node -> RPL parent (last MAC byte)
-    tree = {}
-    try:
-        txt = open(os.path.join(d, 'dbus_nodes.txt')).read().split('== t=')[-1]
-        for n, par in re.findall(r'8 3 2 3 4 5 6 0 (\d+) 1 "parent" ay 8 3 2 3 4 5 6 0 (\d+)', txt):
-            tree[int(n)] = int(par)
-    except OSError:
-        pass
+    tree = br_tree(d)
     for i in nodes:
         nodes[i]['br_tree_parent'] = tree.get(i)
     return nodes, hist
@@ -92,11 +151,12 @@ for d, (nodes, hist) in all_runs.items():
     for i, info in nodes.items():
         print(f'{i:>4} ' + ' '.join(f'{fmt(info[k]):>11}' for k in keys)
               + f'  {fmt(info["wisun_parent"]):>9} {fmt(info["rpl_parent"]):>14} {fmt(info["br_tree_parent"])}')
+    links, topo = run_links(d)
     bad = [(i, n['br_tree_parent']) for i, n in nodes.items()
-           if n['br_tree_parent'] is not None and frozenset((i, n['br_tree_parent'])) not in LINKS]
-    print(f'parents that are not dag_simple neighbours (scrambled node IDs): {bad or "none"}')
+           if n['br_tree_parent'] is not None and frozenset((i, n['br_tree_parent'])) not in links]
+    print(f'parents that are not {topo} neighbours (scrambled node IDs): {bad or "none"}')
     joined = sum(1 for i in nodes.values() if i['ready'] is not None)
-    print(f'joined (BOOTSTRAP_READY): {joined}/14')
+    print(f'joined (BOOTSTRAP_READY): {joined}/{len(nodes)}')
 
 def stat(vals):
     vals = [v for v in vals if v is not None]
