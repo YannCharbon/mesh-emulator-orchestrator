@@ -59,4 +59,6 @@ SETARCH=1 sim_utils/vtime/campaign.sh build-vt $(pwd) runs/vt/campaign 300 $(seq
 
 Measured on a 24-core PC (2026-10-27, `dag_simple`, 300 virtual seconds, 12 seeds): 48.0 s one at a time, 10.5 s six at a time, 7.0 s twelve at a time (6.8×). Every seed's logs were identical in the three cases, and identical to earlier runs on `tun0` (`compare_logs.py --mask-pointers`: only printed heap addresses depend on the TUN's name).
 
+**Memory.** A run needs about 5 MB per node (measured: 71 MB at 15 nodes, 0.5 GB at 100, 2.5 GB at 500), so a campaign needs about `JOBS` times that. Before starting, `campaign.sh` estimates it (5 MB per node plus 20%, `MB_PER_NODE`) and compares it with the available memory minus a reserve (`RESERVE_GB`, default 4). If `JOBS` runs do not fit, it lowers `JOBS` to what fits and prints why, for example `campaign: JOBS=12 needs ~36 GB, 24 GB usable: running 6 at a time (FORCE=1 to keep 12)`. If not even one run fits, it does not start. `FORCE=1` keeps `JOBS` as given. The check is made once, at the start, and the estimate is from `dag_simple` and generated topologies: denser networks may need more.
+
 The `tunvt` devices carry no generated addresses and the same fixed link-local address, because `wsbrd` reads and logs it: with tun0's random address a run would log a different address on each device.
