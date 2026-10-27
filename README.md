@@ -138,6 +138,21 @@ The following table presents the probability of packet loss of a 100 bytes frame
 - **Frames.** A frame goes to the server as one socket message (a header, then the frame), and the server stamps the sender's ID on it. The receiver takes the link's RSSI from that ID, so frames without a source address (acknowledgements) get the right RSSI too. The messages are defined in `app_wssimserver/sim_proto.h`.
 - **Losses.** Each node draws its losses from its own generator, seeded with a base seed plus its node ID. Set `WSSIM_SEED=<n>` in the environment of the node processes to choose the base seed; otherwise it comes from the clock. Each node logs `loss model: WSSIM_SEED=<n>, node <id>` at start. This replays the loss draws only: the timing still comes from the host clock, so two runs with the same seed still differ.
 - **Shutdown.** `wssimserver` stops on SIGINT or SIGTERM, and removes its socket and its shared memory (`/dev/shm/wssimcca`, `/dev/shm/wssimnodesinfos`). It also recreates both at start, so a run never sees the tables of the previous one. `run_orchestrator.py` starts each process in its own session and stops the whole session at the end.
+- **Several runs on one PC.** The shared-memory names belong to the socket path: the default `/tmp/sim_socket` keeps the names above, and any other path gets its own (`/dev/shm/wssimcca._tmp_my_sock` for `/tmp/my_sock`). Give `wssimserver` and the nodes (`wshwsim`, `-u` of the in-process programs) the same path.
+
+### Virtual time
+
+With `--vtime=N`, `wssimserver` is also the conductor of a virtual-time run (EM3, design in `docs/VIRTUAL_TIME.md`): it waits for N nodes built on the simulation port, then wakes them one at a time in virtual-time order, and the run takes no account of the host clock.
+
+```bash
+WSSIM_SEED=7 wssimserver --vtime=15 --vtime-end=300 -g 0-2 ... /tmp/vt_socket
+```
+
+- `--vtime=N`: the number of nodes. Nodes start in any order; the run starts when all N said hello. A node without the virtual-time flag is refused (and a node with it is refused without `--vtime`).
+- `--vtime-end=SECONDS`: the run ends at this virtual time. Without it, it ends when no event is left, or on SIGINT/SIGTERM.
+- `WSSIM_SEED` (default 1) is read by the server and sent to the nodes, for the loss draws and the stack's random source.
+- At the end, the server logs the virtual time reached, the number of wakes and frames, the wall time and the wall seconds per simulated second. It exits 1 if a node disconnects during the run or if more than 100 000 wakes happen at one virtual time.
+- `sim_utils/vtime/test_conductor.py <wssimserver>` tests the conductor with fake nodes (`sim_utils/vtime/fake_node.py`), on its own socket and with a renamed copy of the binary.
 
 ### Run with python orchestrator
 A Python script (`run_orchestrator.py`) has been created to streamline the use of this simulator by minimizing user interaction, making it easier to automate multiple test runs (e.g., batch testing of network topologies). This implementation also reduces the number of terminal windows opened during simulations, which lower CPU usage overhead.
