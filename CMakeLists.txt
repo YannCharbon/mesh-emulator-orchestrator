@@ -305,6 +305,7 @@ if(COMPILE_SIMULATION_TOOLS)
     target_include_directories(wssimserver PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${NANOSTACK_ROOT}/port/posix/
+        ${NANOSTACK_ROOT}/port/sim/
     )
     install(TARGETS wssimserver RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
