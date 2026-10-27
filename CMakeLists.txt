@@ -65,6 +65,12 @@ endif()
 set(CMAKE_BUILD_TYPE Debug)
 set(NANOSTACK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../nanostack-generic-standalone
     CACHE PATH "Path to the nanostack-generic-standalone repository")
+# All TLS randomness comes from the port (ns_port_random_bytes(): /dev/urandom
+# on the POSIX port, the conductor's seed under virtual time). mbedTLS must be
+# built without its own platform entropy (README, "Compile mbedtls"), so the
+# port's source has to be registered as strong.
+set(NANOSTACK_TLS_STRONG_PORT_ENTROPY ON CACHE BOOL
+    "The port's random source is a TRNG: strong TLS entropy source")
 add_subdirectory(${NANOSTACK_DIR} nanostack-build)
 nanostack_add_library(nanostack_ws_border_router CONFIG ws_border_router BORDER_ROUTER
                       DEFINITIONS EXTRA_DEBUG_INFO)
