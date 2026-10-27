@@ -289,6 +289,11 @@ if(COMPILE_SIMULATION_TOOLS)
         # sl_rf_inproc.c keeps the neighbour list the CCA uses.
         target_link_options(${variant} PRIVATE
             -Wl,--wrap=ns_fhss_ws_update_neighbor,--wrap=ns_fhss_ws_drop_neighbor)
+        if(NANOSTACK_PORT STREQUAL "nanostack_port_sim")
+            # mbedTLS puts time() in the TLS hello randoms: virtual time instead
+            # (sl_rf_inproc.c).
+            target_link_options(${variant} PRIVATE -Wl,--wrap=time)
+        endif()
         if(LIBSYSTEMD_FOUND)
             target_link_libraries(${variant} PRIVATE PkgConfig::LIBSYSTEMD)
         endif()

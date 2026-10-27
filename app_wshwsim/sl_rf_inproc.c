@@ -17,6 +17,10 @@
 #include "common/log.h"
 #include "sl_rf_driver.h"
 #include "sl_rf_inproc.h"
+#ifdef NS_PORT_SIM
+#include <time.h>
+#include "ns_port/time.h"
+#endif
 
 // The same table and sizes as wshwsim (sl_wsrcp.h, g_storage_sizes).
 static struct neighbor_timings neighbors[255];
@@ -122,3 +126,17 @@ void __wrap_ns_fhss_ws_drop_neighbor(const uint8_t eui64[8])
     memset(neighbors[i].eui64, 0, 8);
     __real_ns_fhss_ws_drop_neighbor(eui64);
 }
+
+#ifdef NS_PORT_SIM
+// Linked with -Wl,--wrap=time in virtual-time builds: time() is virtual wall
+// time, so that mbedTLS (the TLS hello randoms, certificate dates) and any
+// other caller stay reproducible.
+time_t __wrap_time(time_t *t)
+{
+    time_t now = ns_port_time_wall_s();
+
+    if (t)
+        *t = now;
+    return now;
+}
+#endif

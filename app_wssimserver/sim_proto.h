@@ -77,6 +77,8 @@ static inline void sim_shm_name(char *buf, size_t size, const char *base, const 
         return;
     }
     n = snprintf(buf, size, "/%s.", base);
+    if (n >= size)
+        n = size - 1;
     for (p = sock_path; *p && n + 1 < size; p++)
         buf[n++] = (*p == '/') ? '_' : *p;
     buf[n] = '\0';

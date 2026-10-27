@@ -26,7 +26,7 @@ struct node_infos *nodes_infos_flat_map;
 struct ctxt {
     struct sockaddr_un addr;
     uint64_t node_graph[MAX_NODES][MAX_NODES / 64];
-    char *groups[1024];         // the -g options, applied once the shared memory exists
+    char **groups;              // the -g options (into argv), applied once the shared memory exists
     int num_groups;
     bool dump, dump2file;
     char dump_path[4096];
@@ -324,7 +324,9 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         switch (opt) {
             case 'g':
                 FATAL_ON(bitmap_parse(optarg, mask, MAX_NODES / 64), 1, "Bad mask: %s", optarg);
-                FATAL_ON(ctxt->num_groups >= ARRAY_SIZE(ctxt->groups), 1, "Too many -g options");
+                if (!ctxt->groups)
+                    ctxt->groups = calloc(argc, sizeof(*ctxt->groups));
+                FATAL_ON(!ctxt->groups, 1, "calloc: %m");
                 ctxt->groups[ctxt->num_groups++] = optarg;
                 break;
             case 'f':

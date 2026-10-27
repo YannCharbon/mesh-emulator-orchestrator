@@ -292,7 +292,8 @@ static void wsbr_tasklet(struct arm_event_s *event)
                                                                NET_IPV6_BOOTSTRAP_STATIC,
                                                                ctxt->ipv6_prefix);
             WARN_ON(ret, "arm_nwk_interface_configure_ipv6_bootstrap_set: %d", ret);
-            get_link_local_addr(ctxt->tun_dev, ipv6);
+            memset(ipv6, 0, sizeof(ipv6));
+            WARN_ON(get_link_local_addr(ctxt->tun_dev, ipv6), "%s has no link-local address", ctxt->tun_dev);
             arm_net_route_add(NULL, 0, ipv6, 0xFFFFFFFF, 0, ctxt->tun_if_id);
             multicast_fwd_full_for_scope(ctxt->tun_if_id, 3);
             multicast_fwd_full_for_scope(ctxt->rcp_if_id, 3);
