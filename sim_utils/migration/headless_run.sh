@@ -5,8 +5,10 @@
 # mode: split (default): wsbrd and wsnode, each behind its own wshwsim;
 #       mixed: split border router, routers with the MAC in-process (wsnode-inproc);
 #       inproc: border router and routers with the MAC in-process.
-# In-process nodes connect to wssimserver themselves, in node order, so node i
-# keeps the index i of the topology.
+# Every node tells wssimserver its ID (the last two bytes of its MAC), so the
+# start order does not matter. The 0.1 s pauses are kept so that the runs stay
+# comparable with the reference's.
+# WSSIM_SEED=<n> in the environment replays the radio losses of a run.
 BIN=$1; WORK=$2; OUT=$3; DUR=$4; MODE=${5:-split}
 NODES=14
 TPG="-g 0,1:-34.0 -g 0,2:-36.0 -g 0,3:-71.0 -g 2,4:-21.0 -g 2,5:-45.0 -g 4,6:-2.0 -g 0,7:-80.0 -g 1,7:-39.0 -g 4,7:-67.0 -g 0,8:-16.0 -g 3,8:-41.0 -g 5,8:-80.0 -g 7,8:-12.0 -g 3,9:-56.0 -g 4,9:-20.0 -g 7,9:-33.0 -g 8,9:-21.0 -g 7,10:-29.0 -g 8,11:-22.0 -g 9,12:-30.0 -g 9,13:-74.0 -g 10,14:-59.0"
@@ -20,12 +22,12 @@ PIDS=()
 date +%s.%N > "$OUT/t0"
 stdbuf -oL -eL $BIN/wssimserver $TPG /tmp/sim_socket --dump 2>&1 | TS "$OUT/simserver.log" & PIDS+=($!)
 sleep 0.5
-mac() { printf '01:02:03:04:05:06:00:%02X' $1; }
+mac() { printf '01:02:03:04:05:06:%02X:%02X' $(($1 >> 8)) $(($1 & 0xFF)); }
 case $MODE in
 split)
 	for (( i=0; i<=NODES; i++ )); do
 		stdbuf -oL -eL $BIN/wshwsim -m $(mac $i) "/tmp/uart$i" /tmp/sim_socket 2>&1 | TS "$OUT/mac$i.log" & PIDS+=($!)
-		sleep 0.1   # wssimserver numbers nodes by connection order: keep it = MAC index (as run_orchestrator.py)
+		sleep 0.1
 	done
 	sleep 0.5   # gnome-terminal spawning latency in run.sh; ptys must exist before readlink
 	for (( i=1; i<=NODES; i++ )); do

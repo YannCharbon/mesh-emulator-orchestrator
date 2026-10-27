@@ -6,11 +6,11 @@ DIR=$(pwd)
 DIR_G="/home/wsbr_mounted"
 
 
-ihex=$(printf '0x%02X' $1) # we get the value of i in hex and we will use the 2 chars after 0x
-./wshwsim -m 01:02:03:04:05:06:00:${ihex: -2} "/tmp/uart$1" /tmp/sim_socket
+ihex=$(printf '%02X:%02X' $(($1 >> 8)) $(($1 & 0xFF))) # node ID = the last two bytes of the MAC
+./wshwsim -m 01:02:03:04:05:06:${ihex} "/tmp/uart$1" /tmp/sim_socket
 #for (( i=0; i<=$NODES; i++ ))
 #do
-#	ihex=$(printf '0x%02X' $i) # we get the value of i in hex and we will use the 2 chars after 0x
-#	./wshwsim -m 01:02:03:04:05:06:00:${ihex: -2} "/tmp/uart$i" /tmp/sim_socket
+#	ihex=$(printf '%02X:%02X' $((i >> 8)) $((i & 0xFF)))
+#	./wshwsim -m 01:02:03:04:05:06:${ihex} "/tmp/uart$i" /tmp/sim_socket
 #	sleep 0.05
 #done

@@ -168,8 +168,9 @@ Gates:
 | S5, mixed | — | 5 runs (split BR, in-process routers): 66/70 ready, median 137 s, no parent outside the topology |
 | S5, in-process | — | 5 runs: 66/70 ready, median 148 s, no parent outside the topology |
 | Stack fixes (workspace GS6) | Only `ws_bootstrap.c`, `fhss_ws.c` and the `rand` helpers differ from the reference | 5 + 3 split runs: 68/70 and 38/42 ready, median 152 s and 144 s. With `allowed_channels = 0-15` on every node, which failed before (0/14 joined, unicast frames sent to excluded channels): 3 split runs 41/42, 3 in-process runs 40/42 |
+| Emulator fixes (workspace EM1) | Stack unchanged; `wssimserver` and the radio driver changed (README, "Node IDs, frames and losses") | `WSSIM_SEED` 1–5: 5 split runs 64/70 ready, median 154 s [55–288]; 5 in-process runs 65/70, median 154 s [50–286]; no parent outside the topology. In-process nodes started all at once in reverse order: no parent outside the topology |
 
-All runs were on 2026-10-23/26 against the same 5 reference runs (64/70 ready,
+All runs were on 2026-10-23/27 against the same 5 reference runs (64/70 ready,
 median 152 s). In the in-process groups the node logs also hold the radio
 driver's messages, so their message histograms are not comparable with the
 split ones. In-process mode is expected to differ slightly (GENERICITY_PLAN.md

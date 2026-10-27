@@ -84,8 +84,8 @@ sleep 0.5
 # Create 10 mac/phy (node 0 is BR, 1-9 are Router nodes)
 for (( i=0; i<=$NODES; i++ ))
 do
-	ihex=$(printf '0x%02X' $i) # we get the value of i in hex string format and we will use the 2 chars after 0x
-	gnome-terminal --tab --title "MAC_N $i" -- $DIR/wshwsim -m 01:02:03:04:05:06:00:${ihex: -2} "/tmp/uart$i" /tmp/sim_socket
+	ihex=$(printf '%02X:%02X' $((i >> 8)) $((i & 0xFF))) # node ID = the last two bytes of the MAC
+	gnome-terminal --tab --title "MAC_N $i" -- $DIR/wshwsim -m 01:02:03:04:05:06:${ihex} "/tmp/uart$i" /tmp/sim_socket
 	#sleep 0.1
 done
 

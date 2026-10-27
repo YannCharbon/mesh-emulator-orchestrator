@@ -14,9 +14,12 @@
 > this repo uses its POSIX port's run loop and offers in-process nodes
 > (`wsnode-inproc`, `wsbrd-inproc`); see the stack's `docs/ARCHITECTURE.md`.
 >
-> Status (2026-10-23): none of the planned emulator improvements has been made
-> yet: the defect fixes, sleep/energy states, drift and the central medium.
-> They are tracked in `documents/pre-study/STATUS.md` of
+> Status (2026-10-27): the first emulator fixes (workspace item EM1) are in:
+> node IDs that no longer depend on the start order, one socket message per
+> frame, correct RSSI indexing up to 4096 nodes, a corrected loss formula with
+> a seeded generator per node, and a clean shutdown. See "Node IDs, frames and
+> losses" below. Sleep/energy states, virtual time and the central medium are
+> still to come. They are tracked in `documents/pre-study/STATUS.md` of
 > [`mesh-emulator-rework`](https://github.com/YannCharbon/mesh-emulator-rework).
 
 ## Compile mbedtls
@@ -46,7 +49,7 @@ and then: `ninja`
 
 ## Run
 
-### Script for running the simulations up to 255 nodes
+### Script for running the simulations
 
 Run `bash tunup.sh` to setup a TUN interface (This needs sudo). Then run `bash run.sh <topology>`. This will open the simulation server and MAC layer processes in new tabs, and the mbed nanostack in separate windows.
 
@@ -99,17 +102,19 @@ But the result of `-g 0-2 -g 1-3` will be:
      3
 ```
 
-The `-g` option also supports providing an RSSI value for a specified edge. The format `-g 2,5:-67.0` will create an edge from node 2 to 5 with an RSSI of -67.0 [dBm]. By default, if no value is provided, the RSSI value is `1 [dBm]` to guarantee a very good link quality.
+The `-g` option also supports providing an RSSI value for a specified edge. The format `-g 2,5:-67.0` will create an edge from node 2 to 5 with an RSSI of -67.0 [dBm], and `-g 0-3:-70` gives every pair of nodes 0 to 3 that RSSI. By default, if no value is provided, the RSSI value is `0 [dBm]` to guarantee a very good link quality.
 
-The RSSI is used within the simulator to calculate a frame transmission error rate at PHY layer. The formula used to compute the frame error rate is based on the non-coherente FSK-2 BER formula and is the following:
+The RSSI is used within the simulator to calculate a frame transmission error rate at PHY layer. The bit error rate is based on the non-coherent 2-FSK BER formula, and a frame is lost if any of its bits is:
 
-$FER(P_r) = \frac{1}{2} e^{\frac{1}{2} (10 \cdot \log_{10}(kTB) + 30 + NF_{LNA} + 10\cdot \log_{10}​(\frac{B}{R_b} ) - P_{r})} \cdot 8 \cdot L_{frame}$
+$BER(P_r) = \frac{1}{2} e^{\frac{1}{2} (10 \cdot \log_{10}(kTB) + 30 + NF_{LNA} + 10\cdot \log_{10}(\frac{B}{R_b} ) - P_{r})}$
 
-where $P_{r} \approx RSSI$ [dBm], $k$ = Bolzman constant ($k = 1.3806 \cdot 10^{−23}$ [J/K]), $T$ = temperature [K], $B$ = channel bandwith [Hz], $NF_{LNA}$ = noise figure of the LNA, $R_b$ = transmission bitrate [bit/s], $L_{frame}$ = frame byte count
+$FER = 1 - (1 - BER)^{8 \cdot (L_{frame} + 6)}$
 
-In this simulator, we use $T$ = 293 [K], a channel $B$ = 100 [kHz], a $R_b$ 100 [kbit/s] and $NF_{LNA}$ = 4 [dB] (the formula can be edited in `sl_rf_driver.c`).
+where $P_{r} \approx RSSI$ [dBm], $k$ = Bolzman constant ($k = 1.3806 \cdot 10^{−23}$ [J/K]), $T$ = temperature [K], $B$ = channel bandwith [Hz], $NF_{LNA}$ = noise figure of the LNA, $R_b$ = transmission bitrate [bit/s], $L_{frame}$ = frame byte count. The 6 bytes are the PHY header (2) and the FCS (4), which the receiver decodes too.
 
-The following table presents the probability of packet loss of a 100 bytes frame depending on the RSSI value:
+In this simulator, we use $T$ = 293 [K], a channel $B$ = 100 [kHz], a $R_b$ 100 [kbit/s] and $NF_{LNA}$ = 4 [dB] (the formula can be edited in `sl_rf_driver.c`). Before 2026-10-27 the frame error rate was $BER \cdot 8 \cdot L_{frame}$, which is the same at small BER but can exceed 1.
+
+The following table presents the probability of packet loss of a 100 bytes frame depending on the RSSI value (it was computed with the earlier formula; the values differ by under 10 %):
 
 | RSSI [dBm] | Frame error rate [-] |
 |------|------------------|
@@ -126,6 +131,13 @@ The following table presents the probability of packet loss of a 100 bytes frame
 | -100.0  | 1.88e-02 |
 
 > **_NOTE:_** be aware that, by default, Wi-SUN does not accept a neighbour as a parent if the RSSI is below -80 dBm (edit `DEVICE_MIN_SENS` variable to change the limit).
+
+### Node IDs, frames and losses
+
+- **Node ID.** A node's ID is the last two bytes of its MAC, big-endian: `01:02:03:04:05:06:01:2C` is node 300. IDs go up to 4095. Each radio (`wshwsim`, or `wsnode-inproc`/`wsbrd-inproc`) sends its ID to `wssimserver` when it connects, and the server places it in the topology by that ID. So the processes can start in any order and in parallel; the server refuses a second node with the same ID. The run scripts build the MAC from the node index (`run.sh`, `run_orchestrator.py`, `sim_utils/migration/headless_run.sh`, and the GUI's `confgen.py`).
+- **Frames.** A frame goes to the server as one socket message (a header, then the frame), and the server stamps the sender's ID on it. The receiver takes the link's RSSI from that ID, so frames without a source address (acknowledgements) get the right RSSI too. The messages are defined in `app_wssimserver/sim_proto.h`.
+- **Losses.** Each node draws its losses from its own generator, seeded with a base seed plus its node ID. Set `WSSIM_SEED=<n>` in the environment of the node processes to choose the base seed; otherwise it comes from the clock. Each node logs `loss model: WSSIM_SEED=<n>, node <id>` at start. This replays the loss draws only: the timing still comes from the host clock, so two runs with the same seed still differ.
+- **Shutdown.** `wssimserver` stops on SIGINT or SIGTERM, and removes its socket and its shared memory (`/dev/shm/wssimcca`, `/dev/shm/wssimnodesinfos`). It also recreates both at start, so a run never sees the tables of the previous one. `run_orchestrator.py` starts each process in its own session and stops the whole session at the end.
 
 ### Run with python orchestrator
 A Python script (`run_orchestrator.py`) has been created to streamline the use of this simulator by minimizing user interaction, making it easier to automate multiple test runs (e.g., batch testing of network topologies). This implementation also reduces the number of terminal windows opened during simulations, which lower CPU usage overhead.

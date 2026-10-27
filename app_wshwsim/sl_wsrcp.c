@@ -233,7 +233,7 @@ void configure(struct wsmac_ctxt *ctxt, int argc, char *argv[])
     }
     if (argc != optind + 2)
         print_help(stderr, 1);
-    ctxt->rf_fd = rf_sim_connect(argv[optind + 1]);
+    ctxt->rf_fd = rf_sim_connect(argv[optind + 1], ctxt->eui64);
     ctxt->uart.data_fd = pty_open(argv[optind + 0], 115200, false);
     ctxt->uart.trig_fd = ctxt->uart.data_fd;
     g_rf_host.rf_fd = ctxt->rf_fd;

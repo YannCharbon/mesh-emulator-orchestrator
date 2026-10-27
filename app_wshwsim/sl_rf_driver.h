@@ -24,6 +24,7 @@ struct neighbor_timings {
 // (sl_rf_inproc.c). Fill it before virtual_rf_device_register().
 struct rf_sim_host {
     int rf_fd;                          // connection to wssimserver
+    int node_id;                        // from the EUI-64 (sim_proto.h)
     void *pcap_dumper;                  // pcap_dumper_t *, or NULL
     // The CCA looks at the radio state of these nodes (shared memory)
     struct neighbor_timings *neighbors;
@@ -31,8 +32,8 @@ struct rf_sim_host {
 };
 extern struct rf_sim_host g_rf_host;
 
-// Connect to wssimserver; returns the socket.
-int rf_sim_connect(const char *path);
+// Connect to wssimserver as the node of this EUI-64; returns the socket.
+int rf_sim_connect(const char *path, const uint8_t eui64[8]);
 int8_t virtual_rf_device_register(phy_link_type_e link_type, uint16_t mtu_size);
 // Call when g_rf_host.rf_fd is readable.
 void phy_rf_rx_now(void);

@@ -207,7 +207,6 @@ if(COMPILE_SIMULATION_TOOLS)
         app_wshwsim/sl_wsrcp.c
         app_wshwsim/sl_wsrcp_mac.c
         app_wshwsim/ringbufindex.c
-        app_wshwsim/mac_helpers.c
         app_wshwsim/sl_rf_driver.c
     )
     target_include_directories(wshwsim PRIVATE
@@ -267,7 +266,6 @@ if(COMPILE_SIMULATION_TOOLS)
             app_wshwsim/sl_rf_driver.c
             app_wshwsim/sl_rf_inproc.c
             app_wshwsim/ringbufindex.c
-            app_wshwsim/mac_helpers.c
         )
         target_include_directories(${variant} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}

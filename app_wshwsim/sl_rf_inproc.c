@@ -58,7 +58,7 @@ struct mac_api_s *rf_inproc_init(const char *sim_socket, const uint8_t eui64[8])
     struct mac_api_s *mac;
     int8_t rf_id;
 
-    g_rf_host.rf_fd = rf_sim_connect(sim_socket);
+    g_rf_host.rf_fd = rf_sim_connect(sim_socket, eui64);
     g_rf_host.neighbors = neighbors;
     g_rf_host.neighbors_count = ARRAY_SIZE(neighbors);
     rf_id = virtual_rf_device_register(PHY_LINK_15_4_SUBGHZ_TYPE, 2043);

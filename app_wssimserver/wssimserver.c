@@ -11,10 +11,11 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <signal.h>
+#include <errno.h>
 
-#include "nodes_infos.h"
+#include "sim_proto.h"
 
-#define MAX_NODES 4096
+#define MAX_NODES SIM_MAX_NODES
 
 struct node_infos *nodes_infos_flat_map;
 
@@ -72,11 +73,10 @@ static int bitmap_parse(char *str, uint64_t *out, int size)
     char *endptr;
     unsigned long cur, end;
 
-    char *str_copy = (char *)malloc(strlen(str));
+    char *str_copy = strdup(str);
     if (str_copy == NULL) {
         return -1;
     }
-    strcpy(str_copy, str);
 
     char *indexes_part = strtok(str_copy, ":");
 
@@ -122,11 +122,10 @@ static int rssi_map_parse_for_one_group(char *str)
     memset(nodes_in_group, -1, sizeof(nodes_in_group));
     int nodes_in_group_idx = 0;
 
-    char *str_copy = (char *)malloc(strlen(str));
+    char *str_copy = strdup(str);
     if (str_copy == NULL) {
         return -1;
     }
-    strcpy(str_copy, str);
 
     char *rest = str_copy;
     char *indexes_part, *rssi_part;
@@ -158,16 +157,14 @@ static int rssi_map_parse_for_one_group(char *str)
         range = ++endptr;
         end_node = strtoul(range, &endptr, 0);
 
-        if (end_node > start_node) {
-            for (int i = start_node + 1; i <= end_node; i++) {
-                for (int j = start_node + 1; j <= end_node; j++) {
-                    if (i != j) {
-                        (nodes_infos_flat_map + i * sizeof(nodes_infos_flat_map) + j)->rssi = rssi;
-                        (nodes_infos_flat_map + j * sizeof(nodes_infos_flat_map) + i)->rssi = rssi;
-                    }
-                }
-            }
+        if (end_node >= MAX_NODES) {
+            free(str_copy);
+            return -1;
         }
+        for (int i = start_node; i <= end_node; i++)
+            for (int j = start_node; j <= end_node; j++)
+                if (i != j)
+                    sim_link(nodes_infos_flat_map, i, j)->rssi = rssi;
     } else {
         nodes_in_group[nodes_in_group_idx++] = start_node;
         while ((range = strtok(NULL, ","))) {
@@ -177,10 +174,18 @@ static int rssi_map_parse_for_one_group(char *str)
 
         int i = 0, j = 0;
         while (nodes_in_group[i] != -1) {
+            if (nodes_in_group[i] >= MAX_NODES) {
+                free(str_copy);
+                return -1;
+            }
+            i++;
+        }
+        i = 0;
+        while (nodes_in_group[i] != -1) {
             while (nodes_in_group[j] != -1) {
                 if (i != j) {
-                    (nodes_infos_flat_map + nodes_in_group[i] * sizeof(nodes_infos_flat_map) * MAX_NODES + nodes_in_group[j])->rssi = rssi;
-                    (nodes_infos_flat_map + nodes_in_group[j] * sizeof(nodes_infos_flat_map) * MAX_NODES + nodes_in_group[i])->rssi = rssi;
+                    sim_link(nodes_infos_flat_map, nodes_in_group[i], nodes_in_group[j])->rssi = rssi;
+                    sim_link(nodes_infos_flat_map, nodes_in_group[j], nodes_in_group[i])->rssi = rssi;
                 }
                 j++;
             }
@@ -246,7 +251,7 @@ static void graph_dump(struct ctxt *ctxt)
     for (i = 0; i < max; i++) {
         printf("%*d ", 5, i);
         for (j = 0; j < max; j++) {
-            printf("%*.*g ", 5, 6, (nodes_infos_flat_map + i * sizeof(nodes_infos_flat_map) * MAX_NODES + j)->rssi);
+            printf("%*.*g ", 5, 6, sim_link(nodes_infos_flat_map, i, j)->rssi);
         }
         printf("\n");
     }
@@ -257,33 +262,17 @@ static void graph_dump_to_file(struct ctxt *ctxt, char * file_path)
     int max = graph_get_num_nodes(ctxt);
     int i, j;
 
-    int fd = open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
+    FILE *f = fopen(file_path, "w");
+    if (f == NULL) {
         perror("open");
         exit(-1);
     }
-
-    char *ptr = (char*)calloc(1024*1028, sizeof(char));
-    if (ptr == NULL) {
-        perror("memalloc");
-        exit(-1);
-    }
-    char *bptr = ptr;
-
-    for (i = 0; i < max; i++) {
-        for (j = 0; j < max; j++) {
-            if(bitmap_get(j, ctxt->node_graph[i], MAX_NODES / 64)) {
-                sprintf(bptr, "%04d,%04d\n", i, j);
-                bptr = bptr + 4 + 4 + 2; // MAX_NODES is 4096 which is 4 chars * 2 plus 2 for a "\n" and a ","
-            }
-        }
-    }
-    char buf[15] = {0};
-    snprintf(buf, 15, "%04d\n", max);
-    write(fd, &buf, 5);
-    write(fd, ptr, bptr - ptr);
-    close(fd);
-    free(ptr);
+    fprintf(f, "%04d\n", max);
+    for (i = 0; i < max; i++)
+        for (j = 0; j < max; j++)
+            if (bitmap_get(j, ctxt->node_graph[i], MAX_NODES / 64))
+                fprintf(f, "%04d,%04d\n", i, j);
+    fclose(f);
 }
 
 void print_help(FILE *stream, int exit_code) {
@@ -363,95 +352,149 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     strcpy(ctxt->addr.sun_path, argv[optind]);
 }
 
-static void broadcast(uint64_t *node_graph, struct pollfd *fds, int fds_len, void *buf, int buf_len)
-{
-    int j;
-    int ret;
+// A connection, and the node it carries once its hello arrived.
+struct conn {
+    int node;                   // -1 until the hello
+};
 
-    for (j = 0; j < fds_len; j++) {
-        if (fds[j].fd >= 0 && bitmap_get(j, node_graph, MAX_NODES / 64)) {
-            ret = write(fds[j].fd, buf, buf_len);
-            FATAL_ON(ret != buf_len, 1, "write: %m");
+static struct pollfd fds[MAX_NODES + 1];
+static struct conn conns[MAX_NODES + 1];
+static int slot_of_node[MAX_NODES];   // index in fds, or 0 if not connected
+static int fd_limit;
+
+static void conn_close(int slot)
+{
+    if (conns[slot].node >= 0) {
+        INFO("node %d disconnected", conns[slot].node);
+        slot_of_node[conns[slot].node] = 0;
+    } else {
+        DEBUG("Disconnect fd %d", fds[slot].fd);
+    }
+    close(fds[slot].fd);
+    fds[slot].fd = -1;
+    fds[slot].events = 0;
+    conns[slot].node = -1;
+}
+
+static void conn_hello(int slot, const void *buf, int len)
+{
+    const struct sim_hello *hello = buf;
+
+    if (len != sizeof(*hello) || memcmp(hello->magic, "xh", 2)) {
+        WARN("fd %d: expected a hello, dropping the connection", fds[slot].fd);
+        conn_close(slot);
+    } else if (hello->node_id >= MAX_NODES) {
+        WARN("fd %d: node ID %d out of range (max %d)", fds[slot].fd, hello->node_id, MAX_NODES - 1);
+        conn_close(slot);
+    } else if (slot_of_node[hello->node_id]) {
+        WARN("fd %d: node %d is already connected", fds[slot].fd, hello->node_id);
+        conn_close(slot);
+    } else {
+        conns[slot].node = hello->node_id;
+        slot_of_node[hello->node_id] = slot;
+        INFO("node %d connected", hello->node_id);
+    }
+}
+
+// Relay a frame to the sender's neighbours, stamped with the sender's ID.
+static void relay(uint64_t node_graph[MAX_NODES][MAX_NODES / 64], int slot, void *buf, int len)
+{
+    struct sim_frame_hdr *hdr = buf;
+    int src = conns[slot].node;
+    int j, dst, ret;
+
+    if (len < (int)sizeof(*hdr) || memcmp(hdr->magic, "xx", 2) ||
+        hdr->len != len - sizeof(*hdr)) {
+        WARN("node %d: malformed frame (%d bytes), dropped", src, len);
+        return;
+    }
+    hdr->src = src;
+    for (dst = 0; dst < MAX_NODES; dst++) {
+        j = slot_of_node[dst];
+        if (!j || !bitmap_get(dst, node_graph[src], MAX_NODES / 64))
+            continue;
+        ret = send(fds[j].fd, buf, len, MSG_NOSIGNAL);
+        if (ret != len) {
+            WARN("node %d: send: %m", dst);
+            conn_close(j);
         }
     }
 }
 
-bool stop = false;
-void signal_handler(int signal) {
-    if (signal == SIGINT) {
-        stop = true;
-    }
+static volatile sig_atomic_t stop = false;
+static void signal_handler(int signal)
+{
+    stop = true;
 }
 
 int main(int argc, char **argv)
 {
-    signal(SIGINT, signal_handler);
+    struct sigaction sa = { .sa_handler = signal_handler };
 
-    // Shared memory for CCA
+    // No SA_RESTART, so that poll() returns on SIGINT and SIGTERM
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    signal(SIGPIPE, SIG_IGN);
+
+    // Shared memory for CCA. Unlink first, so that a new run never sees the
+    // tables of the previous one: a new object is created zero-filled.
     const char* shm_name = "/wssimcca";
-    const int shm_size = 4096*3; // 4096 nodes, 1 byte state + 2 bytes channel
+    const int shm_size = SIM_SHM_CCA_SIZE;
 
-    // Create shared memory
+    shm_unlink(shm_name);
     int shm_fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
-    ftruncate(shm_fd, shm_size);
-
-    // Map shared memory
+    FATAL_ON(shm_fd < 0, 1, "shm_open %s: %m", shm_name);
+    FATAL_ON(ftruncate(shm_fd, shm_size) < 0, 1, "ftruncate %s: %m", shm_name);
     void* ptr = mmap(0, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    memset(ptr, 0, shm_size);
+    FATAL_ON(ptr == MAP_FAILED, 1, "mmap %s: %m", shm_name);
 
     // Shared memory for nodes and edges information
     const char* shm_infos_name = "/wssimnodesinfos";
-    const int shm_infos_size = MAX_NODES*MAX_NODES*sizeof(struct node_infos);
+    const long shm_infos_size = SIM_SHM_INFOS_SIZE;
 
-    // Create shared memory
+    shm_unlink(shm_infos_name);
     int shm_infos_fd = shm_open(shm_infos_name, O_CREAT | O_RDWR, 0666);
-    ftruncate(shm_infos_fd, shm_infos_size);
-
-    // Map shared memory
+    FATAL_ON(shm_infos_fd < 0, 1, "shm_open %s: %m", shm_infos_name);
+    FATAL_ON(ftruncate(shm_infos_fd, shm_infos_size) < 0, 1, "ftruncate %s: %m", shm_infos_name);
     void* infos_ptr = mmap(0, shm_infos_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_infos_fd, 0);
-
+    FATAL_ON(infos_ptr == MAP_FAILED, 1, "mmap %s: %m", shm_infos_name);
     nodes_infos_flat_map = (struct node_infos *)infos_ptr;
-    for (int i = 0; i < MAX_NODES; i++) {
-        for (int j = 0; j < MAX_NODES; j++) {
-            (nodes_infos_flat_map + i * sizeof(nodes_infos_flat_map) + j)->rssi = 0.0;
-        }
-    }
 
-    char buf[4096];
+    static char buf[sizeof(struct sim_frame_hdr) + 4096];
     int i;
     int on = 1;
     int ret, len;
-    int fd_limit;
-    struct pollfd fds[MAX_NODES + 1] = { };
-    struct ctxt ctxt = {
+    static struct ctxt ctxt = {
         .addr.sun_family = AF_UNIX
     };
 
     fd_limit = min(increase_limit_fd(), ARRAY_SIZE(fds));
     parse_commandline(&ctxt, argc, argv);
-    for (i = 0; i < fd_limit; i++)
+    for (i = 0; i < fd_limit; i++) {
         fds[i].fd = -1;
+        conns[i].node = -1;
+    }
 
     fds[0].events = POLLIN;
     fds[0].fd = socket(AF_UNIX, SOCK_SEQPACKET, 0); // use SOCK_SEQPACKET or SOCK_STREAM
     FATAL_ON(fds[0].fd < 0, 1, "socket: %s: %m", ctxt.addr.sun_path);
     ret = setsockopt(fds[0].fd, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on));
     FATAL_ON(ret < 0, 1, "setsockopt: %s: %m", ctxt.addr.sun_path);
+    unlink(ctxt.addr.sun_path);
     ret = bind(fds[0].fd, (struct sockaddr *)&ctxt.addr, sizeof(ctxt.addr));
     FATAL_ON(ret < 0, 1, "bind: %s: %m", ctxt.addr.sun_path);
     ret = listen(fds[0].fd, 4096);
     FATAL_ON(ret < 0, 1, "listen: %s: %m", ctxt.addr.sun_path);
 
-    while (stop == false) {
+    while (!stop) {
         ret = poll(fds, fd_limit, -1);
-        //FATAL_ON(ret < 0, 1, "poll: %m");
-        if (ret < 0)
-        {
-            WARN("Poll error");
+        if (ret < 0) {
+            if (errno != EINTR)
+                WARN("poll: %m");
             break;
         }
         if (fds[0].revents) {
-            for (i = 0; i < fd_limit; i++) {
+            for (i = 1; i < fd_limit; i++) {
                 if (fds[i].fd == -1) {
                     fds[i].events = POLLIN;
                     fds[i].fd = accept(fds[0].fd, NULL, NULL);
@@ -464,32 +507,30 @@ int main(int argc, char **argv)
                 FATAL(1, "can't accept new node %d %d", i, fd_limit);
         }
         for (i = 1; i < fd_limit; i++) {
-            if (fds[i].revents) {
-                len = read(fds[i].fd, buf, sizeof(buf));
-                if (len < 1) {
-                    DEBUG("Disconnect fd %d", fds[i].fd);
-                    close(fds[i].fd);
-                    fds[i].fd = -1;
-                    fds[i].events = 0;
-                } else {
-                    broadcast(ctxt.node_graph[i - 1], fds + 1, fd_limit - 1, buf, len);
-                    if (len == 6 && buf[0] == 'x' && buf[1] == 'x') {
-                        len = read(fds[i].fd, buf, sizeof(buf));
-                        broadcast(ctxt.node_graph[i - 1], fds + 1, fd_limit - 1, buf, len);
-                    }
-                }
-            }
+            if (fds[i].fd < 0 || !fds[i].revents)
+                continue;
+            len = read(fds[i].fd, buf, sizeof(buf));
+            if (len < 1)
+                conn_close(i);
+            else if (conns[i].node < 0)
+                conn_hello(i, buf, len);
+            else
+                relay(ctxt.node_graph, i, buf, len);
         }
     }
 
     // Graceful teardown
-    DEBUG("Graceful teardown");
+    INFO("Graceful teardown");
+    for (i = 1; i < fd_limit; i++)
+        if (fds[i].fd >= 0)
+            close(fds[i].fd);
+    close(fds[0].fd);
+    unlink(ctxt.addr.sun_path);
     munmap(ptr, shm_size);
     munmap(infos_ptr, shm_infos_size);
     close(shm_fd);
     close(shm_infos_fd);
     shm_unlink(shm_name);
     shm_unlink(shm_infos_name);
+    return 0;
 }
-
-

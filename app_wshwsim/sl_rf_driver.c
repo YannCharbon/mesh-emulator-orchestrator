@@ -51,8 +51,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
-#include "mac_helpers.h"
-#include "nodes_infos.h"
+#include "sim_proto.h"
 #include <math.h>
 
 #define TRACE_GROUP "vrf"
@@ -203,27 +202,32 @@ void get_shm_cca_state();
 
 /* Variables shm */
 const char* shm_name = "/wssimcca";
-const int shm_size = 4096*3; // 4096 nodes, 1 byte state + 2 bytes channel
+const int shm_size = SIM_SHM_CCA_SIZE;
 int shm_fd = -1;
 void* shm_ptr = NULL;
 
 /* Shared memory for RSSI infos */
-#define MAX_NODES 4096
 struct node_infos *nodes_infos_flat_map;
 const char* shm_infos_name = "/wssimnodesinfos";
-const int shm_infos_size = MAX_NODES*MAX_NODES*sizeof(struct node_infos);
+const long shm_infos_size = SIM_SHM_INFOS_SIZE;
+
+/* Loss model */
+// Bytes on air around the frame that the receiver must decode too: the PHY
+// header and the 4-byte FCS (the frame given to the driver has no FCS).
+#define PHY_PHR_LEN 2
+#define PHY_FCS_LEN 4
+static uint64_t rf_rng_state;
 
 /* Threads */
 pthread_t rf_dbus_proces_thread, fhss_on_timer;
 
 /* Extra PHY defines, Helper functions */
-#define PHY_EXTRA_HDR_SIZE 8
 #define CALC_SLEEP_TIME(x)  (unsigned int)(((uint64_t)x*8*1000000)/(phy_subghz.datarate))
 
 /*----------------------SHM-------------------------------------------------------------*/
 void set_shm_cca_state()
 {
-    int pos = rf_mac_address[7]*(3);
+    int pos = g_rf_host.node_id * 3;
     memcpy(shm_ptr+pos, (uint8_t *)&driver_state, 1);
     memcpy(shm_ptr+pos+1, &channel, 2);
 }
@@ -263,19 +267,63 @@ void write_pcap(uint8_t *buf, int len)
 #endif
 }
 
-int rf_sim_connect(const char *path)
+// splitmix64: a small generator with a state of its own, so that the losses
+// of each node can be replayed from a seed.
+static uint64_t rf_rng_next(void)
+{
+    uint64_t z = (rf_rng_state += 0x9e3779b97f4a7c15ULL);
+
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+
+static double rf_rng_uniform(void)
+{
+    return (rf_rng_next() >> 11) * 0x1.0p-53;
+}
+
+// The base seed comes from WSSIM_SEED, or else from the clock. Each node
+// draws from base + node ID, and logs both so a run can be replayed.
+static void rf_rng_seed(int node_id)
+{
+    const char *env = getenv("WSSIM_SEED");
+    uint64_t base;
+
+    if (env) {
+        base = strtoull(env, NULL, 0);
+    } else {
+        struct timespec tp;
+
+        clock_gettime(CLOCK_REALTIME, &tp);
+        base = (uint64_t)tp.tv_sec * 1000000000 + tp.tv_nsec;
+    }
+    rf_rng_state = base + node_id;
+    INFO("loss model: WSSIM_SEED=%llu, node %d", (unsigned long long)base, node_id);
+}
+
+int rf_sim_connect(const char *path, const uint8_t eui64[8])
 {
     struct sockaddr_un addr = {
         .sun_family = AF_UNIX
     };
+    struct sim_hello hello = { .magic = "xh" };
     int fd;
     int ret;
 
+    g_rf_host.node_id = sim_node_id(eui64);
+    FATAL_ON(g_rf_host.node_id >= SIM_MAX_NODES, 2, "node ID %d (from the EUI-64) is above %d",
+             g_rf_host.node_id, SIM_MAX_NODES - 1);
+    rf_rng_seed(g_rf_host.node_id);
     strcpy(addr.sun_path, path);
     fd = socket(AF_UNIX, SOCK_SEQPACKET, 0); // use SOCK_SEQPACKET or SOCK_STREAM
     FATAL_ON(fd < 0, 2, "socket %s: %m", path);
     ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
     FATAL_ON(ret < 0, 2, "connect %s: %m", path);
+    // The server numbers nodes by this ID
+    hello.node_id = g_rf_host.node_id;
+    ret = write(fd, &hello, sizeof(hello));
+    FATAL_ON(ret != sizeof(hello), 2, "write %s: %m", path);
     return fd;
 }
 
@@ -299,23 +347,24 @@ void phy_rf_rx_now(void)
 {
     //WARN("RX_Counter %d", dbg_i_rx++);
     static char trace_buffer[128];
-    uint8_t buf[MAC_IEEE_802_15_4G_MAX_PHY_PACKET_SIZE];
-    uint8_t hdr[PHY_EXTRA_HDR_SIZE];
+    static uint8_t msg[sizeof(struct sim_frame_hdr) + MAC_IEEE_802_15_4G_MAX_PHY_PACKET_SIZE];
+    struct sim_frame_hdr *hdr = (struct sim_frame_hdr *)msg;
+    uint8_t *buf = msg + sizeof(*hdr);
     uint16_t pkt_len;
     int pkt_chan;
     int len;
     int pkt_seq;
-    len = read(g_rf_host.rf_fd, hdr, PHY_EXTRA_HDR_SIZE);
+    len = read(g_rf_host.rf_fd, msg, sizeof(msg));
     FATAL_ON(!len, 2, "RF server has gone");
     FATAL_ON(len < 0, 2, "RF socket: %m");
-    if (len != PHY_EXTRA_HDR_SIZE || hdr[0] != 'x' || hdr[1] != 'x') {
+    if (len < (int)sizeof(*hdr) || memcmp(hdr->magic, "xx", 2) || hdr->len != len - sizeof(*hdr)) {
         TRACE(TR_RF, " rf drop: chan=%2d/%2d %s", -1, channel,
-            bytes_str(hdr, len, NULL, trace_buffer, sizeof(trace_buffer), DELIM_SPACE | ELLIPSIS_STAR));
+            bytes_str(msg, len, NULL, trace_buffer, sizeof(trace_buffer), DELIM_SPACE | ELLIPSIS_STAR));
         goto CANCEL_RX;
     }
-    pkt_len = ((uint16_t *)hdr)[1];
-    pkt_chan= ((uint16_t *)hdr)[2];
-    pkt_seq = ((uint16_t *)hdr)[3];
+    pkt_len = hdr->len;
+    pkt_chan = hdr->chan;
+    pkt_seq = hdr->seq;
     if ((channel != pkt_chan) && !fhss_on) {
         WARN("YET FHSS OFF & WRONG CHANNEL ... rf rx: chan=%d, curr chan=%d len=%d rxseq=%d", pkt_chan, channel, pkt_len, pkt_seq);
     }
@@ -325,35 +374,23 @@ void phy_rf_rx_now(void)
             goto CANCEL_RX;
         }
     }
+    len = pkt_len;
 
-    len = read(g_rf_host.rf_fd, buf, pkt_len);
-    WARN_ON(len != pkt_len);
-
-    // Simulate RSSI
-    uint8_t dest_addr[8] = {0};
-    uint8_t src_addr[8] = {0};
-
-    extract_mac_addresses(buf, dest_addr, src_addr);
-
-    uint16_t dst_node_id = (dest_addr[6] << 8) + dest_addr[7];
-    uint16_t src_node_id = (src_addr[6] << 8) + src_addr[7];
-    uint16_t own_node_id = (rf_mac_address[6] << 8) + rf_mac_address[7];
-
-    printf("Own node ID = %d\n", own_node_id);
-    printf("DST MAC: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x (node %d)\n", dest_addr[0], dest_addr[1], dest_addr[2], dest_addr[3], dest_addr[4], dest_addr[5], dest_addr[6], dest_addr[7], dst_node_id);
-    printf("SRC MAC: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x (node %d)\n", src_addr[0], src_addr[1], src_addr[2], src_addr[3], src_addr[4], src_addr[5], src_addr[6], src_addr[7], src_node_id);
-
-    float rssi = (nodes_infos_flat_map + own_node_id * sizeof(nodes_infos_flat_map) * MAX_NODES + src_node_id)->rssi;
+    // Simulate RSSI: the link from the sender, whose ID the server stamped
+    float rssi = sim_link(nodes_infos_flat_map, g_rf_host.node_id, hdr->src)->rssi;
 
     // T = 293 [K], B = 100 [kHz], R_b = 100 [kbit/s], NF_LNA = 4 [dB]
     // $BER(P_r) = \frac{1}{2} e^{\frac{1}{2} (10 \cdot \log_{10}(kTB) + 30 + NF_{LNA} + 10\cdot \log_{10}​(\frac{B}{R_b} ) - P_{r})}$
-    float ber = 0.5 * exp(0.5 * (-153.930645 + 30 + 4 + 0 - rssi));
+    double ber = 0.5 * exp(0.5 * (-153.930645 + 30 + 4 + 0 - rssi));
+    if (ber > 0.5)
+        ber = 0.5;
     // 1.0 -> -12dBm, 0.6 -> -99dBm
-    printf("RSSI = %g dBm\n", rssi);
-    float frame_error_rate = ber * 8 * pkt_len;
+    // The frame is lost if any of its bits is: 1 - (1 - BER)^bits
+    int bits = 8 * (PHY_PHR_LEN + pkt_len + PHY_FCS_LEN);
+    double frame_error_rate = -expm1(bits * log1p(-ber));
 
-    if (frame_error_rate > (float)rand() / (float)RAND_MAX) {
-        printf("Packet was lost due to link quality (RSSI) (FER = %g)\n", frame_error_rate);
+    if (frame_error_rate > rf_rng_uniform()) {
+        printf("Packet from node %d was lost due to link quality (RSSI %g dBm, FER = %g)\n", hdr->src, rssi, frame_error_rate);
         goto CANCEL_RX;
     }
 
@@ -391,7 +428,7 @@ void phy_rf_rx_now(void)
         current_input->len = pkt_len;
         current_input->channel = pkt_chan;
         current_input->rssi = rssi;
-        memcpy(current_input->payload , &buf, pkt_len);
+        memcpy(current_input->payload, buf, pkt_len);
         // Store it in the ringbuf
         ringbufindex_put(&input_ringbuf);
         // Now signal the management thread
@@ -425,7 +462,9 @@ uint16_t phy_seq = 0;
 static int8_t phy_rf_tx_now()
 {
     static char trace_buffer[128];
-    uint8_t hdr[PHY_EXTRA_HDR_SIZE];
+    static uint8_t msg[sizeof(struct sim_frame_hdr) + MAC_IEEE_802_15_4G_MAX_PHY_PACKET_SIZE];
+    struct sim_frame_hdr *hdr = (struct sim_frame_hdr *)msg;
+    int ret;
 
     // Get the next packet to transmit and remore it from ring buffer
     int16_t output_index = ringbufindex_get(&output_ringbuf);
@@ -436,36 +475,19 @@ static int8_t phy_rf_tx_now()
     uint8_t *data_ptr = current_output->data;
     uint16_t data_len = current_output->data_len;
 
-    // We don't generate the RSSI-based loss in the TX function, because in case of broadcast we don't know how is going to receive
-    /*
-    for (int i = 0; i < data_len; i++){
-        printf("%02X ", data_ptr[i]);
-    }
-    printf("\n\n");
-
-    uint8_t dest_addr[8] = {0};
-    uint8_t src_addr[8] = {0};
-
-    extract_mac_addresses(data_ptr, dest_addr, src_addr);
-
-    uint16_t dst_node_id = dest_addr[6] << 8 + dest_addr[7];
-    uint16_t src_node_id = src_addr[6] << 8 + src_addr[7];
-
-    printf("DST MAC: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x (node %d)\n", dest_addr[0], dest_addr[1], dest_addr[2], dest_addr[3], dest_addr[4], dest_addr[5], dest_addr[6], dest_addr[7], dst_node_id);
-    printf("SRC MAC: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x (node %d)\n", src_addr[0], src_addr[1], src_addr[2], src_addr[3], src_addr[4], src_addr[5], src_addr[6], src_addr[7], src_node_id);
-    */
-
-    // Prepend data with a synchronisation marker
-    memcpy(hdr + 0, "xx", 2);
-    memcpy(hdr + 2, &data_len, 2);
-    memcpy(hdr + 4, &channel, 2);
-    memcpy(hdr + 6, &phy_seq, 2);
+    // One message: a header (the server fills in src), then the frame
+    memcpy(hdr->magic, "xx", 2);
+    hdr->len = data_len;
+    hdr->chan = channel;
+    hdr->seq = phy_seq;
+    hdr->src = 0;
+    memcpy(msg + sizeof(*hdr), data_ptr, data_len);
     TRACE(TR_RF, "   rf tx: chan=%2d/%2d %s (%d bytes)", channel, channel,
            bytes_str(data_ptr, data_len, NULL, trace_buffer, sizeof(trace_buffer), DELIM_SPACE | ELLIPSIS_STAR), data_len);
     __PRINT(35, "Transmitting ... chan=%d, len=%u, txseq=%d ts=%u", channel, data_len, phy_seq, rf_get_timestamp());
     phy_seq++;
-    write(g_rf_host.rf_fd, hdr, PHY_EXTRA_HDR_SIZE);
-    write(g_rf_host.rf_fd, data_ptr, data_len);
+    ret = write(g_rf_host.rf_fd, msg, sizeof(*hdr) + data_len);
+    FATAL_ON(ret != sizeof(*hdr) + data_len, 2, "RF socket: %m");
     write_pcap(data_ptr, data_len);
     return 0;
 }
@@ -589,7 +611,10 @@ static bool _rf_check_cca(){
                 }
             } */
             // using shm
-            int des_pos_shm = (neighbors[i].eui64[7])*3;
+            int neigh_id = sim_node_id(neighbors[i].eui64);
+            if (neigh_id >= SIM_MAX_NODES)
+                continue;
+            int des_pos_shm = neigh_id * 3;
             uint8_t tmp_st = *(uint8_t*)(shm_ptr+des_pos_shm);
             uint16_t tmp_ch = *(uint16_t*)(shm_ptr+des_pos_shm+1);
             WARN("tmp_st %d, tmp_ch: %d", tmp_st, tmp_ch);
@@ -1142,7 +1167,7 @@ void shm_init()
 
     // Map shared memory
     shm_ptr = mmap(0, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    FATAL_ON(shm_ptr == NULL, 2, "shm mmap failed!");
+    FATAL_ON(shm_ptr == MAP_FAILED, 2, "shm mmap failed!");
 
 
     // Shared memory for nodes and edges information
@@ -1152,7 +1177,7 @@ void shm_init()
 
     // Map shared memory
     void* infos_ptr = mmap(0, shm_infos_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_infos_fd, 0);
-    FATAL_ON(infos_ptr == NULL, 2, "shm_infos mmap failed!");
+    FATAL_ON(infos_ptr == MAP_FAILED, 2, "shm_infos mmap failed!");
 
     nodes_infos_flat_map = (struct node_infos *)infos_ptr;
 }

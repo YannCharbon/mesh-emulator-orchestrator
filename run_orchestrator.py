@@ -17,53 +17,22 @@ os.environ["DBUS_SYSTEM_BUS_ADDRESS"] = "unix:path=/var/run/dbus/system_bus_sock
 all_processes = [] # Track all running processes
 
 def cleanup():
+    # Each command runs in its own session (run_cmd), so signalling the group
+    # reaches the real processes, not only the shell that started them.
     print("Perform cleanup")
+    for proc in all_processes:
+        print(f"Clean PID: {proc.pid}")
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     while all_processes:
         proc = all_processes.pop()
-        print(f"Clean PID: {proc.pid}")
-        proc.terminate()
-        proc.wait()
-    # wssimserver respawn with a new PID, can't track process
-    process_wssim = 'wssimserver'
-    process_wsbrd = 'wsbrd'
-    process_wshwsim = 'wshwsim'
-    process_wsnode = 'wsnode'
-
-    # Ensure all wssimserver processes are cleaned
-    try:
-        all_pids = subprocess.check_output(['pgrep', process_wssim]).decode().strip().split('\n')
-        for pid in all_pids:
-            print(f"Find new wssimserver with pid : {pid}. Perform cleanup")
-            os.kill(int(pid), signal.SIGTERM)
-    except subprocess.CalledProcessError:
-        print("No wssimserver running. No cleanup required")
-
-    # Ensure all wshwsim processes are cleaned
-    try:
-        all_pids = subprocess.check_output(['pgrep', process_wshwsim]).decode().strip().split('\n')
-        for pid in all_pids:
-            print(f"Find new wshwsim with pid : {pid}. Perform cleanup")
-            os.kill(int(pid), signal.SIGTERM)
-    except subprocess.CalledProcessError:
-        print("No wshwsim running. No cleanup required")
-
-    # Ensure all wsbrd processes are cleaned
-    try:
-        all_pids = subprocess.check_output(['pgrep', process_wsbrd]).decode().strip().split('\n')
-        for pid in all_pids:
-            print(f"Find new wsbrd with pid : {pid}. Perform cleanup")
-            os.kill(int(pid), signal.SIGTERM)
-    except subprocess.CalledProcessError:
-        print("No wsbrd running. No cleanup required")
-
-    # Ensure all wsnode processes are cleaned
-    try:
-        all_pids = subprocess.check_output(['pgrep', process_wsnode]).decode().strip().split('\n')
-        for pid in all_pids:
-            print(f"Find new wsnode with pid : {pid}. Perform cleanup")
-            os.kill(int(pid), signal.SIGTERM)
-    except subprocess.CalledProcessError:
-        print("No wsnode running. No cleanup required")
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
 
 def handle_exit(signum, frame):
     print(f"Detect signal: {signum}")
@@ -84,7 +53,8 @@ def run_cmd(cmd, verbose:bool = False):
         stdout=None if verbose else subprocess.DEVNULL, #None if verbose else subprocess.DEVNULL,# None to directly redirect on terminal stdout and not subprocess stdout
         stderr=subprocess.STDOUT,
         text=True,
-        shell=True
+        shell=True,
+        start_new_session=True
     )
     all_processes.append(process)
 
@@ -147,8 +117,8 @@ if __name__ == '__main__':
         # Run MAC
         print("Create MAC instances")
         for i in range(n_nodes):
-            hex_id = format(i, '02x')
-            mac_cmd = f"{DIR}/wshwsim -m 01:02:03:04:05:06:00:{hex_id} /tmp/uart{i} {str(SIM_SOCKET_FILE)}"
+            hex_id = f"{i >> 8:02x}:{i & 0xff:02x}" # node ID = the last two bytes of the MAC
+            mac_cmd = f"{DIR}/wshwsim -m 01:02:03:04:05:06:{hex_id} /tmp/uart{i} {str(SIM_SOCKET_FILE)}"
             run_cmd(mac_cmd)
             time.sleep(.1)
         # Run Nodes
