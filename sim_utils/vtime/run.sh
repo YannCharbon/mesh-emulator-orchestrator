@@ -30,7 +30,8 @@
 # Output in <outdir>: simserver.log, br.log, node<i>.log (each line starts with
 # NSIM_EPOCH_S + virtual time, written by the simulation port), t0
 # (= NSIM_EPOCH_S), topology.txt, exit_codes.txt, log_wsbr (the BR's trace
-# file), storage/ (the stack's key storage, fresh for every run).
+# file), storage/ (the stack's key storage, fresh for every run), examples
+# (a link to <workdir>/examples).
 #
 # The run ends when wssimserver exits. The script never uses pkill: on error
 # it kills only the processes it started.
@@ -104,7 +105,12 @@ abort() {
 }
 trap 'abort "interrupted"' INT TERM HUP
 
-cd "$WORK" || exit 1
+# The programs run in <outdir>, with examples/ linked there (the configs name
+# their certificates relative to the working directory), and the key storage
+# is given relative to it: the stack prints the storage paths, so they must be
+# the same in every run for the determinism check.
+ln -s "$WORK/examples" "$OUT/examples"
+cd "$OUT" || exit 1
 mac() { printf '01:02:03:04:05:06:%02X:%02X' $(($1 >> 8)) $(($1 & 0xFF)); }
 start() {   # start <log name> <program and args...>
 	local log=$1; shift
@@ -122,10 +128,10 @@ done
 [ -S "$SOCK" ] || abort "no socket $SOCK after 10 s"
 
 start br "$BIN/wsbrd-inproc" --eui64="$(mac 0)" -F "$WORK/examples/wsbrd.conf" -u "$SOCK" -t "$TUN" \
-	-o storage_prefix="$OUT/storage/br_" ${BR_OPTS:-}
+	-o storage_prefix=storage/br_ ${BR_OPTS:-}
 for (( i = 1; i <= NODES; i++ )); do
 	start node$i "$BIN/wsnode-inproc" --eui64="$(mac $i)" -F "$WORK/examples/wsnode.conf" -u "$SOCK" \
-		-o storage_prefix="$OUT/storage/n${i}_" ${NODE_OPTS:-}
+		-o storage_prefix="storage/n${i}_" ${NODE_OPTS:-}
 done
 
 if [ "${WALL_TIMEOUT:-0}" -gt 0 ]; then
