@@ -200,15 +200,15 @@ bool rf_dbus_registered = false;
 void set_shm_cca_state();
 void get_shm_cca_state();
 
-/* Variables shm */
-const char* shm_name = "/wssimcca";
+/* Variables shm. The names belong to the server socket (sim_shm_name()),
+ * which rf_sim_connect() records before shm_init() runs. */
+static char sim_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 const int shm_size = SIM_SHM_CCA_SIZE;
 int shm_fd = -1;
 void* shm_ptr = NULL;
 
 /* Shared memory for RSSI infos */
 struct node_infos *nodes_infos_flat_map;
-const char* shm_infos_name = "/wssimnodesinfos";
 const long shm_infos_size = SIM_SHM_INFOS_SIZE;
 
 /* Loss model */
@@ -315,7 +315,9 @@ int rf_sim_connect(const char *path, const uint8_t eui64[8])
     FATAL_ON(g_rf_host.node_id >= SIM_MAX_NODES, 2, "node ID %d (from the EUI-64) is above %d",
              g_rf_host.node_id, SIM_MAX_NODES - 1);
     rf_rng_seed(g_rf_host.node_id);
+    FATAL_ON(strlen(path) >= sizeof(addr.sun_path), 2, "socket path too long: %s", path);
     strcpy(addr.sun_path, path);
+    strcpy(sim_socket_path, path);
     fd = socket(AF_UNIX, SOCK_SEQPACKET, 0); // use SOCK_SEQPACKET or SOCK_STREAM
     FATAL_ON(fd < 0, 2, "socket %s: %m", path);
     ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
@@ -1160,6 +1162,12 @@ static int8_t phy_rf_extension(phy_extension_type_e extension_type, uint8_t *dat
 
 void shm_init()
 {
+    char shm_name[192], shm_infos_name[192];
+
+    FATAL_ON(!sim_socket_path[0], 2, "shm_init() before rf_sim_connect()");
+    sim_shm_name(shm_name, sizeof(shm_name), "wssimcca", sim_socket_path);
+    sim_shm_name(shm_infos_name, sizeof(shm_infos_name), "wssimnodesinfos", sim_socket_path);
+
     // Create shared memory
     int shm_fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
     FATAL_ON(shm_fd < 0, 2, "shm open faild!");
