@@ -87,6 +87,7 @@ add_custom_target(check_git
 add_executable(wsbrd
     version.c
     app_wsbrd/wsbr.c
+    app_wsbrd/node_table.c
     app_wsbrd/multicast_helper.c
     app_wsbrd/wsbr_mac.c
     app_wsbrd/wsbr_fhss_mac.c
@@ -241,7 +242,7 @@ if(COMPILE_SIMULATION_TOOLS)
             set(app_sources app_wsbrd/wsrouter.c)
             set(nslib nanostack_ws_router)
         else()
-            set(app_sources app_wsbrd/wsbr.c app_wsbrd/tun.c app_wsbrd/os_whiteboard.c
+            set(app_sources app_wsbrd/wsbr.c app_wsbrd/node_table.c app_wsbrd/tun.c app_wsbrd/os_whiteboard.c
                             app_wsbrd/mbedtls_config_check.c)
             set(nslib nanostack_ws_border_router)
         endif()

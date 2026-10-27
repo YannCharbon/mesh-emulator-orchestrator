@@ -3,6 +3,7 @@
  * Main authors:
  *     - Jérôme Pouiller <jerome.pouiller@silabs.com>
  */
+#include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/select.h>
@@ -45,6 +46,10 @@
 #include "common/fhss_timer.h"
 #include "app_wshwsim/sl_rf_inproc.h"
 #include "app_wshwsim/version.h"
+#endif
+#ifdef NS_PORT_SIM
+#include "ns_port_sim.h"
+#include "node_table.h"
 #endif
 
 // See warning in wsbr.h
@@ -212,6 +217,49 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
     }
 }
 
+#ifdef NS_PORT_SIM
+// Batch mode (virtual time): nobody reads D-Bus, so the border router logs
+// the table of D-Bus "Nodes" every 30 s of virtual time, one line per node.
+// sim_utils/migration/analyze.py reads these lines.
+#define WSBR_NODE_TABLE_EVENT (APPLICATION_EVENT + 0x40)
+#define WSBR_NODE_TABLE_PERIOD_MS 30000
+
+static void wsbr_node_table_log(struct wsbr_ctxt *ctxt)
+{
+    static bbr_route_info_t table[4096];
+    uint64_t now_us = ns_port_sim_now_us();
+    int len, i;
+
+    len = wsbr_node_table_get(ctxt->rcp_if_id, table, ARRAY_SIZE(table));
+    // The table holds IIDs; flip the U/L bit back to print the EUI-64s
+    // (RFC 4291 appendix A), the addresses given with --eui64.
+    for (i = 0; i < len; i++)
+        printf("brtree t=%llu.%06llu node=%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x "
+               "parent=%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x\n",
+               (unsigned long long)(now_us / 1000000), (unsigned long long)(now_us % 1000000),
+               table[i].target[0] ^ 0x02, table[i].target[1], table[i].target[2], table[i].target[3],
+               table[i].target[4], table[i].target[5], table[i].target[6], table[i].target[7],
+               table[i].parent[0] ^ 0x02, table[i].parent[1], table[i].parent[2], table[i].parent[3],
+               table[i].parent[4], table[i].parent[5], table[i].parent[6], table[i].parent[7]);
+    printf("brtree t=%llu.%06llu nodes=%d\n",
+           (unsigned long long)(now_us / 1000000), (unsigned long long)(now_us % 1000000), len);
+    fflush(stdout);
+}
+
+static void wsbr_node_table_log_start(int8_t tasklet_id)
+{
+    const arm_event_t event = {
+        .receiver = tasklet_id,
+        .sender = tasklet_id,
+        .event_type = WSBR_NODE_TABLE_EVENT,
+        .priority = ARM_LIB_LOW_PRIORITY_EVENT,
+    };
+
+    if (!eventOS_event_timer_request_every(&event, eventOS_event_timer_ms_to_ticks(WSBR_NODE_TABLE_PERIOD_MS)))
+        BUG("eventOS_event_timer_request_every");
+}
+#endif
+
 static void wsbr_tasklet(struct arm_event_s *event)
 {
     const char *const nwk_events[] = {
@@ -270,6 +318,11 @@ static void wsbr_tasklet(struct arm_event_s *event)
                 WARN("received unknown network event: %d", event->event_id);
             }
             break;
+#ifdef NS_PORT_SIM
+        case WSBR_NODE_TABLE_EVENT:
+            wsbr_node_table_log(ctxt);
+            break;
+#endif
         default:
             WARN("received unknown event: %d", event->event_type);
             break;
@@ -364,7 +417,9 @@ int main(int argc, char *argv[])
     int ret;
 #endif
 
-    logfile_fd = open("/tmp/log_wsbr", O_WRONLY | O_CREAT, 0644);
+    // WSBRD_LOG_FILE gives each run its own copy of the trace (sim_utils/vtime).
+    logfile_fd = open(getenv("WSBRD_LOG_FILE") ? getenv("WSBRD_LOG_FILE") : "/tmp/log_wsbr",
+                      O_WRONLY | O_CREAT, 0644);
     mbed_trace_print_function_set(&mbed_trace_print_and_log);
     INFO("Silicon Labs Wi-SUN border router %s", version_daemon);
     signal(SIGINT, kill_handler);
@@ -433,8 +488,18 @@ int main(int argc, char *argv[])
     if (ctxt->rcp_if_id < 0)
         BUG("arm_nwk_interface_lowpan_init: %d", ctxt->rcp_if_id);
 
+#ifdef NS_PORT_SIM
+    {
+        int8_t tasklet_id = eventOS_event_handler_create(&wsbr_tasklet, ARM_LIB_TASKLET_INIT_EVENT);
+
+        if (tasklet_id < 0)
+            BUG("eventOS_event_handler_create");
+        wsbr_node_table_log_start(tasklet_id);
+    }
+#else
     if (eventOS_event_handler_create(&wsbr_tasklet, ARM_LIB_TASKLET_INIT_EVENT) < 0)
         BUG("eventOS_event_handler_create");
+#endif
 
     /* Example Multicast application */
     /* eventOS_event_timer_request_every((arm_event_t *)&mul_tasklet,1);
