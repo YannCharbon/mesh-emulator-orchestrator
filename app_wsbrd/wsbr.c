@@ -442,11 +442,12 @@ int main(int argc, char *argv[])
     if (!memcmp(ctxt->ipv6_prefix, ADDR_UNSPECIFIED, 16))
         FATAL(1, "You must specify a ipv6_prefix");
 #ifdef MAC_INPROCESS
-    wsbr_tun_init(ctxt);
-
     // -u names the wssimserver socket instead of the RCP's UART. The API
-    // version is the one wshwsim would report (version.c).
+    // version is the one wshwsim would report (version.c). The radio comes
+    // first: in virtual time, nothing may draw random numbers before it has
+    // the conductor's seed, and the TUN's interface does.
     mac = rf_inproc_init(ctxt->uart_dev, eui64);
+    wsbr_tun_init(ctxt);
     ctxt->rcp_version_api = version_api;
     ctxt->rcp_version_fw = version_fw;
     memcpy(ctxt->hw_mac, eui64, sizeof(ctxt->hw_mac));
