@@ -153,6 +153,16 @@ The following table presents the probability of packet loss of a 100 bytes frame
 
 With `--vtime=N`, `wssimserver` is also the conductor of a virtual-time run (EM3, design in `docs/VIRTUAL_TIME.md`): it waits for N nodes built on the simulation port, then wakes them one at a time in virtual-time order, and the run takes no account of the host clock.
 
+Build: the nodes run on the stack's simulation port, in a separate build directory. They need the mbedtls built without platform entropy (section "Compile mbedtls"; here in `mbedtls/install`), or TLS reads `/dev/urandom` and runs are not reproducible.
+
+```bash
+cmake -S . -B build-vt -G Ninja -DNANOSTACK_PORT=nanostack_port_sim \
+  -DCMAKE_PREFIX_PATH=$(pwd)/mbedtls/install -DCMAKE_C_FLAGS="-std=gnu17 -fpermissive"
+ninja -C build-vt          # wssimserver, wsnode-inproc, wsbrd-inproc (in-process nodes only, for now)
+```
+
+Run: `sim_utils/vtime/run.sh` does one run (dag_simple by default, about 3 s for 300 virtual seconds), `sim_utils/vtime/campaign.sh` several at once, and `sim_utils/migration/analyze.py` reads the results (`sim_utils/vtime/README.md`). By hand, start the server first, then the nodes with the same socket:
+
 ```bash
 WSSIM_SEED=7 wssimserver --vtime=15 --vtime-end=300 -g 0-2 ... /tmp/vt_socket
 ```
