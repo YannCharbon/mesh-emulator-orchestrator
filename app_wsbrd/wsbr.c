@@ -29,6 +29,7 @@
 #include "nanostack/multicast_api.h"
 
 #include "ns_port/critical.h"
+#include "ns_port/time.h"
 #include "common/bus_uart.h"
 #include "common/os_scheduler.h"
 #include "common/os_timer.h"
@@ -318,10 +319,8 @@ void mbed_trace_print_and_log(const char *str)
 {
     puts(str);
     if (logfile_fd >= 0) {
-        struct timeval tv;
-        gettimeofday(&tv,NULL);
         char tm[12];
-        snprintf(tm, sizeof(tm), "%09d ", (int)tv.tv_sec);
+        snprintf(tm, sizeof(tm), "%09d ", (int)ns_port_time_wall_s());
         write(logfile_fd, &tm, sizeof(tm)-1);
         write(logfile_fd, str+5, strlen(str)-9);
         write(logfile_fd, "\n", 1);

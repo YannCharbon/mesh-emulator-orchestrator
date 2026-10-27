@@ -1,7 +1,7 @@
 #include <stdbool.h>
 #include <stdint.h>
-#include <sys/time.h>
 #include "common/log.h"
+#include "ns_port/time.h"
 
 #include "multicast_helper.h"
 #include "nanostack/socket_api.h"
@@ -32,12 +32,11 @@ void handle_incoming_msg() {
             char ip6str[40];
             ip6tos(source_addr.address, ip6str);
             INFO("%s Packet from %s", mulapp, ip6str);
-            struct timeval tv;
-            gettimeofday(&tv,NULL);
+            int time_now = (int)ns_port_time_wall_s();
             int embedded_tm;
             sscanf((char*)receive_buffer,"%d",&embedded_tm);
-            int time_diff = (int)tv.tv_sec - embedded_tm;
-            INFO("%s Received: %s time_now: %d time_diff: %d", mulapp, receive_buffer, (int)tv.tv_sec, time_diff);
+            int time_diff = time_now - embedded_tm;
+            INFO("%s Received: %s time_now: %d time_diff: %d", mulapp, receive_buffer, time_now, time_diff);
         }
         else if (length!=NS_EWOULDBLOCK) {
             INFO("%s Error happened when receiving %d", mulapp, length);
@@ -55,10 +54,8 @@ static void send_message() {
 
     int length;
     static int internal_seq = 0;
-    struct timeval tv;
-    gettimeofday(&tv,NULL);
     char buf[12+4];
-    length = snprintf(buf, sizeof(buf), "%09d %04x", (int)tv.tv_sec, internal_seq);
+    length = snprintf(buf, sizeof(buf), "%09d %04x", (int)ns_port_time_wall_s(), internal_seq);
     internal_seq++;
 
     INFO("%s Sending multicast message, %d bytes: %s", mulapp, length, buf);
