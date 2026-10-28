@@ -42,6 +42,7 @@ deep_enter_us = 10
 deep_enter_ma = 1
 deep_wake_us = 100
 deep_wake_ma = 0.2
+wake_charge_uc = 0.5     # optional key: 6 wakes = 3 uC
 [cycles]
 wake = 100
 tick = 10
@@ -100,6 +101,7 @@ END_US = 4_000_000
 # Radio listen 19900 + 978980 = 998880                  × 5     = 4994.4
 #       cca 100 × 6 = 0.6; tx 950 × 32 = 30.4
 #       listen>tx 50 × 30 = 1.5; tx>listen 20 × 10 = 0.2; off 3000000 × 0
+# Wake charge 6 wakes × 0.5 µC = 3, no time of its own
 EXPECT = {
     'mcu': {'active': (660, 0.66), 'sleep': (999542, 499.771), 'deep_sleep': (2999670, 2.99967),
             'sleep_enter': (4, 0.004), 'sleep_wake': (4, 0.004),
@@ -107,7 +109,8 @@ EXPECT = {
     'radio': {'listen': (998880, 4994.4), 'cca': (100, 0.6), 'tx': (950, 30.4), 'off': (3_000_000, 0),
               'idle': (0, 0), 'receive': (0, 0)},
     'transitions': {'listen>tx': (50, 1.5), 'tx>listen': (20, 0.2)},
-    'charge_uc': 5530.57867,
+    'wake_charge_uc': 3.0,
+    'charge_uc': 5533.57867,
     'wakes': 6, 'empty_ticks': 2,
 }
 
@@ -172,6 +175,7 @@ def main():
     for tr, (t, q) in EXPECT['transitions'].items():
         near(f"{tr} time", n['radio']['transitions'][tr]['time_us'], t)
         near(f"{tr} charge", n['radio']['transitions'][tr]['charge_uc'], q)
+    near("wake charge", n['mcu']['wake_charge']['charge_uc'], EXPECT['wake_charge_uc'])
     near("charge", n['charge_uc'], EXPECT['charge_uc'])
     near("average", n['avg_current_ma'], EXPECT['charge_uc'] * 1000 / END_US)
     near("mcu sum", n['check']['mcu_time_us'], END_US)

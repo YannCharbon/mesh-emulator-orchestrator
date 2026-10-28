@@ -39,6 +39,7 @@ struct pwr_profile {
     double clock_mhz;
     double i_mcu[MCU_STATES];
     double t_mt[MT_COUNT], i_mt[MT_COUNT];
+    double wake_q;                              // µC charged per wake, on top of the cycles
     // [cycles]
     double cyc_wake, cyc_cause[NSIM_CAUSE_COUNT], cyc_event, cyc_frame_in, cyc_rx_frame, cyc_tx_frame;
     // [radio]
@@ -57,6 +58,7 @@ struct pwr_profile {
 static const struct {
     const char *key;            // "section.key"
     size_t off;
+    bool optional;              // 0 when not given
 } profile_keys[] = {
     { "profile.supply_v",       F(supply_v) },
     { "mcu.clock_mhz",          F(clock_mhz) },
@@ -71,6 +73,7 @@ static const struct {
     { "mcu.deep_enter_ma",      F(i_mt[MT_DEEP_ENTER]) },
     { "mcu.deep_wake_us",       F(t_mt[MT_DEEP_WAKE]) },
     { "mcu.deep_wake_ma",       F(i_mt[MT_DEEP_WAKE]) },
+    { "mcu.wake_charge_uc",     F(wake_q), true },
     { "cycles.wake",            F(cyc_wake) },
     { "cycles.tick",            F(cyc_cause[NSIM_CAUSE_TICK]) },
     { "cycles.protocol",        F(cyc_cause[NSIM_CAUSE_PROTOCOL]) },
@@ -241,7 +244,7 @@ static struct pwr_profile *profile_load(const char *path)
     FATAL_ON(!p->name[0], 1, "%s: missing profile.name", path);
     FATAL_ON(!p->tx_n, 1, "%s: missing radio.tx_ma", path);
     for (i = 0; i < sizeof(profile_keys) / sizeof(profile_keys[0]); i++)
-        FATAL_ON(!seen[i], 1, "%s: missing %s", path, profile_keys[i].key);
+        FATAL_ON(!seen[i] && !profile_keys[i].optional, 1, "%s: missing %s", path, profile_keys[i].key);
     if (!strcmp(p->kind, "mcu+rcp"))
         FATAL(1, "%s: MCU + RCP profiles need the split programs in virtual time (EM3 step 2)", path);
     FATAL_ON(strcmp(p->kind, "soc") && strcmp(p->kind, "mcu+transceiver"), 1,
@@ -688,7 +691,7 @@ void pwr_idle(int node, uint64_t t, uint64_t next_us)
 /* ---- end of the run */
 
 struct pwr_totals {
-    double mcu_q[MCU_STATES], mt_q[MT_COUNT], r_q[SIM_RADIO_STATES], cca_q, tx_q, rt_q;
+    double mcu_q[MCU_STATES], mt_q[MT_COUNT], r_q[SIM_RADIO_STATES], cca_q, tx_q, rt_q, wake_q;
     double charge, mcu_t, radio_t, tx_t;
     bool tx_clamped;
 };
@@ -725,6 +728,9 @@ static void node_totals(const struct pwr_node *n, struct pwr_totals *tt)
         tt->mcu_t += n->mt_time[i];
         tt->charge += tt->mt_q[i];
     }
+    // A charge per wake, without time of its own (mcu.wake_charge_uc)
+    tt->wake_q = n->wakes * p->wake_q;
+    tt->charge += tt->wake_q;
     for (i = 0; i < SIM_RADIO_STATES; i++) {
         if (i == SIM_RADIO_TX)
             continue;
@@ -785,7 +791,8 @@ static void write_node(FILE *f, const struct pwr_node *n, double t_end, bool las
         fprintf(f, "          \"%s\": {\"time_us\": %.3f, \"charge_uc\": %.6f, \"count\": %llu, \"ma\": %g}%s\n",
                 mt_names[i], n->mt_time[i], tt.mt_q[i], (unsigned long long)n->mt_count[i], p->i_mt[i],
                 i == MT_COUNT - 1 ? "" : ",");
-    fprintf(f, "        }\n      },\n");
+    fprintf(f, "        },\n        \"wake_charge\": {\"count\": %llu, \"uc_each\": %g, \"charge_uc\": %.6f}\n      },\n",
+            (unsigned long long)n->wakes, p->wake_q, tt.wake_q);
     fprintf(f, "      \"radio\": {\n        \"states\": {\n");
     for (i = 0; i < SIM_RADIO_STATES; i++) {
         if (i == SIM_RADIO_TX)
