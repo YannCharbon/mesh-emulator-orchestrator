@@ -72,7 +72,7 @@ All of them come from the real stack's behaviour, not from a script.
 
 - **CCA:** `_rf_check_cca()` (only when the MAC enabled CCA) sends an "xr" with `SIM_RADIO_EV_CCA`. The driver does the CCA in no time; the ledger charges `cca_us` at the end of the listening that precedes it (§5.2).
 - **TX power:** `PHY_EXTENSION_SET_TX_POWER` records the dBm the MAC asked for; each TX carries it.
-- **Airtime:** RX and TX last the driver's own airtime (`CALC_SLEEP_TIME`, 150 kbit/s). EM4 will give exact airtimes at the medium later.
+- **Airtime** (§12.5): TX lasts the frame's bytes on air at the data rate, `rf_airtime_us()`: SHR (preamble + SFD) + PHR + the PSDU the MAC gives + FCS. The rate is the one the MAC sets with `PHY_EXTENSION_SET_RF_CONFIGURATION` (from the PHY mode: 1a/1b 50 kbit/s, 3 150 kbit/s...), 150 kbit/s only before that; `PHY_EXTENSION_GET_SYMBOLS_PER_SECOND` returns it, so the MAC's own timings (ACK wait) follow, and the RX/TX backup timer (`MAX_PACKET_SENDING_TIME`) is recomputed. Each frame's header (`sim_frame_hdr`) carries the sender's SHR and FCS lengths (on air, the FCS length is the PHR's FCS type bit); a receiver stays in `receive` for that SHR, its own PHR, the PSDU and that FCS, at its own rate, and its loss draw covers the PHR, PSDU and FCS bits. The settings are §6.1's `WSSIM_PHY_*`. EM4 will give exact airtimes at the medium later.
 - **Off** (GS8 stage 1, LFN study E1–E2): `PHY_INTERFACE_DOWN` turns the radio off. A frame being received is lost; a CSMA backoff is cancelled; a frame being sent finishes first. While off, a channel change only records the channel (it does not turn RX on), the CCA shared memory and D-Bus show state 7 (`DRVSTATE_OFF`, added last so that the other values do not change), and frames that arrive are lost before the loss draw ("rf rx lost: radio off" in the node's log; they count as unseen frames, §5.3). `PHY_INTERFACE_UP` turns RX on again.
   - Who turns it off: the MAC, when RX-off-when-idle is set (`ws_management_rx_on_when_idle_set()`, or `rx_on_when_idle = false` / `rx_off_when_idle_after = <s>` in `wsnode.conf`): it is off whenever the MAC is idle, and on for a transmission, its CCA and the ACK wait. An FFN keeps RX on: its MAC calls `DOWN` only for an instant when it starts (`DOWN` then `UP`), which now costs a frame that was being received at that instant, as on the hardware.
   - `WSSIM_RADIO_OFF=0` in the environment of the nodes keeps the old behaviour (`DOWN` leaves RX on), to compare with runs made before GS8 stage 1: with it and `NANOSTACK_EVENTLOOP_TICKLESS=OFF`, `dag_simple` logs are identical to before for seeds 1–10.
@@ -171,7 +171,7 @@ An INI file; `#` or `;` start a comment; every key is required unless said other
 
 Two FG25 profiles:
 
-- **`examples/power/efr32fg25-soc.ini`, the default:** HW5's measurements where HW5 has them (RX listening, TX at +10 dBm, the charge per wake, the cycles per kind of work, the supply voltage), the datasheet or an estimate elsewhere, each figure tagged. Its conditions: 3.33 V, EU mode 1a (50 kbit/s), +10 dBm. §12.1 lists every change and what is still not measured.
+- **`examples/power/efr32fg25-soc.ini`, the default:** HW5's measurements where HW5 has them (RX listening, TX at +10 dBm, the charge per wake, the cycles per kind of work, the supply voltage), the datasheet or an estimate elsewhere, each figure tagged. Its conditions: 3.33 V, EU mode 1a (50 kbit/s), +10 dBm: the nodes' configuration `CONF=eu1a` (§12.5). §12.1 lists every change and what is still not measured.
 - **`examples/power/efr32fg25-soc-datasheet.ini`:** the profile as it was before HW5, from the datasheet (Rev. 1.2) only, with placeholder cycles. Kept so that a user can see how far the datasheet is from the board (§12.2): its radio currents are the datasheet's whole-chip RX/TX figures minus EM1 at 39 MHz, because they were measured with the MCU in EM1 at 39 MHz.
 
 ### 6.1 Every consumption parameter is the user's to set
@@ -183,6 +183,8 @@ The profiles are examples, not fixed models: a user sets them to the hardware an
 | Currents, transition times and charges, MCU clock, supply voltage, cycles per kind of work, charge per wake, CCA time, TX current per dBm | The profile file (§6); copy `examples/power/efr32fg25-soc.ini` and edit it | `--power-node=IDS:PROFILE` |
 | TX power (dBm) the stack asks for | `tx_power` in `wsbrd.conf` / `wsnode.conf` (default 20, the stack's), or `-o tx_power=N` | `run.sh`: `NODE_OPTS_<i>="-o tx_power=N"` |
 | Battery cell | `--power-cell=mAh[:V[:eff]]` (`POWER_CELL`) | One per run |
+| PHY data rate | The PHY mode in `wsbrd.conf` / `wsnode.conf` (`mode`; `examples/ws*-eu1a.conf`: the FG25 firmware's, 1a), or `-o`/`-m`; `WSSIM_PHY_DATARATE=<bit/s>` in the nodes' environment fixes it whatever the mode | `run.sh`: `NODE_OPTS_<i>`, `NODE_ENV_<i>` |
+| PHY overhead per frame (it lengthens every TX and RX) | `WSSIM_PHY_PREAMBLE` (bytes, default 8, Wi-SUN FAN's minimum), `WSSIM_PHY_SFD` (2), `WSSIM_PHY_PHR` (2), `WSSIM_PHY_FCS` (4 or 2, default 4 as FAN requires) in the nodes' environment. `WSSIM_PHY_LEGACY=1`: the PHY before 2026-10-28 (150 kbit/s whatever the mode, PSDU only), to compare with older runs | `run.sh`: `NODE_ENV_<i>="WSSIM_PHY_PREAMBLE=16"`, `BR_ENV` |
 
 The profile's TX table clamps the requested power to the hardware's maximum, as the radio would (the FG25: 15.9 dBm).
 
@@ -235,7 +237,7 @@ Recording does not change what the nodes do: the messages go to the conductor, w
 - **The emulated driver has no RX→TX turnaround or idle→RX settling of its own:** the profile's transitions only move time between states. RAIL's state timings are HW5.
 - **CCA duration** is the profile's, not the PHY's; it is cut from the backoff, which is long enough in practice.
 - **Supply voltage:** the measured profile is at HW5's 3.33 V; its EM0/EM1 figures are still the datasheet's (3.6 V), only their sum with the radio was measured.
-- **Airtime and channel plan differ from the board's** (§12.3): the emulated PHY sends at a fixed 150 kbit/s with no preamble, SFD, PHR or FCS, and `examples/*.conf` use EU mode 3, class 2 (35 channels). Emulated routers transmit about 7 times less than a board on mode 1a. The profile cannot correct this; §12.4 proposes the changes.
+- **Airtime: fixed** (§12.5). The emulated PHY used to send at a fixed 150 kbit/s with no preamble, SFD, PHR or FCS; it now takes the PHY mode's rate and counts the overhead. `examples/wsbrd.conf`/`wsnode.conf` still use EU mode 3, class 2 (35 channels, 150 kbit/s); `examples/ws*-eu1a.conf` (`CONF=eu1a`) are the board's mode 1a, class 1. Left: the RX timestamp the MAC reads (`PHY_EXTENSION_READ_RX_TIME`) is the frame's arrival at the sender's TX start, not the end of the SHR as on RAIL; a receiver on another PHY mode than the sender's still decodes its frames (on its own rate).
 - **Routers' TX power, fixed:** `wsnode` used to ignore `tx_power` (only `wsbrd` called `arm_nwk_set_tx_output_power()`), so routers sent at the driver's default, 0 dBm. It now applies it like `wsbrd` (default 20 dBm, clamped to 15.9 dBm by the FG25 profile). Seeds 1–10: logs identical apart from the new "change tx power" lines and line numbers, the same join milestones; routers 7.42 mA instead of 6.99 mA.
 
 ## 11. What part 1 leaves for later
@@ -247,7 +249,7 @@ Recording does not change what the nodes do: the messages go to the conductor, w
 | MCU + RCP and module profiles | EM3 step 2 (split programs in virtual time) | The link machine; Spinel messages charged to both chips |
 | Drift | EM3 step 5 | Separate wakes of the timer series; LFN window widening |
 | Measured profile | HW5 (done, §12) | Left: the radio and MCU transitions, EM2, TX at other levels, RX while receiving: HW8 and more measurements |
-| PHY airtime as on the hardware | §12.4 | Emulated TX time within 15 % of the board's |
+| PHY airtime as on the hardware | §12.4 (done, §12.5) | Done: the border router within 3 % of HW5's TX time, frame rate and current; the router's current within 3 %, its TX time 15–18 % above (more PA/PC sweeps, §12.5) |
 | Exact airtimes | EM4 | RX and TX durations at the medium |
 | Active time in virtual time | — (option) | Slow MCUs delay the protocol as on a board |
 
@@ -334,9 +336,9 @@ Product: 0.62 % × 3.6 (airtime) × 1.97 (channels) ≈ 4.4 %, × 1.2 (mix) ≈ 
 
 A smaller finding on the board's side: the firmware's airtime counter (`rail_phy.c`, `ns_pstats_tx_frame()` and the TX deadline) counts the SHR as 8 bytes; the preamble is 8 bytes and the SFD 2 more (`radioconf_generation_log.json`: 64-bit preamble, 16-bit sync word), so every frame's airtime is 0.32 ms short (1.7 % of a PC).
 
-### 12.4 Proposed emulator changes (not made)
+### 12.4 Proposed emulator changes (1–3 made, §12.5)
 
-The airtime is behaviour of the emulated PHY, not a power parameter, so it is not changed here; these are proposals.
+The airtime is behaviour of the emulated PHY, not a power parameter, so it was not changed with the profile; these were the proposals. 1, 2 and 3 are done (§12.5); 4 belongs to EM4.
 
 1. **PHY rate from the stack's configuration.** In `sl_rf_driver.c`, honour `PHY_EXTENSION_SET_RF_CONFIGURATION` (the stack sends `phy_rf_channel_configuration_s` with the datarate of the configured PHY mode) for `CALC_SLEEP_TIME`, `MAX_PACKET_SENDING_TIME` and `PHY_EXTENSION_GET_SYMBOLS_PER_SECOND`, instead of the fixed 150 kbit/s. Then the `mode` in the `.conf` sets the airtime, as on a board, and the MAC's own timing (ACK wait, CSMA) follows.
 2. **PHY overhead.** Count the SHR (preamble, default 8 bytes as Wi-SUN FAN requires, plus a 2-byte SFD), the 2-byte PHR and the FCS (4 bytes in FAN; 2 when the PHR says so) in TX and RX durations: a user setting (driver option or conductor option), defaulting to the FAN values.
@@ -345,4 +347,37 @@ The airtime is behaviour of the emulated PHY, not a power parameter, so it is no
 
 Expected effect, from §12.3: emulated routers at 5–6 % TX and the border router at 10–11 %, within about 15 % of HW5, and router averages near 9.8–10 mA with the measured profile. A sweep would also keep the radio busy for about 1.7 s instead of 0.3–0.4 s, which matters for latency studies, not only for power.
 
-Reproduce: `POWER=examples/power/efr32fg25-soc.ini NODE_OPTS="-o tx_power=10" BR_OPTS="-o tx_power=10" sim_utils/vtime/campaign.sh build-vt $(pwd) runs/hw5 300 $(seq 1 10)` (add `-m 1a -c 1` to both options for the 69-channel plan, `TOPO=` a one-line `0,1:-14.0` file for the 2-node network).
+Reproduce (§12.2–12.3, with the PHY as it was: add `WSSIM_PHY_LEGACY=1` on a build with §12.5): `POWER=examples/power/efr32fg25-soc.ini NODE_OPTS="-o tx_power=10" BR_OPTS="-o tx_power=10" sim_utils/vtime/campaign.sh build-vt $(pwd) runs/hw5 300 $(seq 1 10)` (add `-m 1a -c 1` to both options for the 69-channel plan, `TOPO=` a one-line `0,1:-14.0` file for the 2-node network).
+
+### 12.5 The PHY fixes and their effect (2026-10-28)
+
+Made (§12.4, 1–3), in `app_wshwsim/sl_rf_driver.c`, `app_wssimserver/sim_proto.h` and `sim_utils/vtime/run.sh`:
+
+1. **Data rate from the stack.** `PHY_EXTENSION_SET_RF_CONFIGURATION` sets the driver's rate (`rf_phy_configure()`); TX and RX airtimes, `MAX_PACKET_SENDING_TIME` and `PHY_EXTENSION_GET_SYMBOLS_PER_SECOND` use it. The 150 kbit/s of `phy_subghz` holds only until the MAC configures the PHY, at its start (`PHY: 50000 bit/s from the MAC's configuration` in the node's log, after the MAC's `Datarate: 50000bps`). EU mode 3, the examples' mode, is 150 kbit/s: for them only the overhead changes.
+2. **PHY overhead**, user settings with Wi-SUN FAN's values as defaults (§6.1): preamble 8 B, SFD 2 B, PHR 2 B, FCS 4 B. A frame of `n` bytes from the MAC lasts (n + 16) × 8 / rate: a 105-byte PC 19.4 ms at 50 kbit/s, as on the board. The sender's SHR and FCS lengths travel in the frame header (two new bytes in `sim_frame_hdr`; `fake_node.py` and `test_conductor.py` follow).
+3. **The firmware's configuration**: `examples/wsbrd-eu1a.conf`, `wsnode-eu1a.conf` (EU, mode 1a, class 1, 69 channels, `tx_power = 10`, as `app_config.h` with `FW_REGION_EU` and `RAIL_PHY_TX_POWER_FIXED_DDBM`); `run.sh` takes them with `CONF=eu1a`. `run.sh` also gained `BR_ENV` and `NODE_ENV_<i>` (environment for one program: per-node PHY settings).
+
+Checks, seeds 1–10, `SETARCH=1`, campaigns on `tunvt*`, the measured profile:
+
+- **`WSSIM_PHY_LEGACY=1` against the build before the change**, `dag_simple` 300 s: every node, BR and `log_wsbr` log identical once the one new `PHY: legacy` line is removed and printed addresses masked; `power.json` byte-identical for all 10 seeds.
+- **Default configuration (mode 3, class 2), before and after**, `dag_simple` 300 s, 20 dBm: the frame count is unchanged and each frame is 16 bytes longer (≈ +20 % for an 80-byte PSDU at 150 kbit/s). `analyze.py`: nodes ready within 300 s 133 → 130 of 140 (12–14 of 14 per run, both), median time to ready 146.4 → 146.7 s, to parent selection 89.3 → 92.2 s; every parent a `dag_simple` neighbour. Medians per node-run: routers TX 0.80 → 0.94 % of the time, 1.99 → 1.98 frames/s, 8.59 → 8.66 mA; border router TX 2.67 → 3.19 %, 5.32 → 5.41 frames/s, 9.51 → 9.77 mA. A small, expected change.
+- **The board's setup** (`CONF=eu1a`, +10 dBm): two nodes (border router + one router, `0,1:-14.0`; the router ready at 68–92 s), and `dag_simple`. Figures over a 300 s window, from the difference of two runs of the same seed ending at the window's start and end (the shorter run is a prefix of the longer one). Medians over the seeds (range):
+
+| | TX time | Frames/s | Average current |
+| --- | --- | --- | --- |
+| HW5 router (one 304 s sample) | 5.4 % (airtime 5.3 %) | 2.95 | 9.77 mA |
+| Emulated router, 2 nodes, 170–470 s | **6.2 %** (3.2–8.5) | **3.87** (1.86–5.65) | **10.0 mA** (9.1–10.7) |
+| Same, PHY before the change | 1.27 % (1.05–1.57) | 3.12 (2.31–3.52) | 8.55 mA |
+| Emulated routers, `dag_simple`, 300–600 s (140 node-runs) | 5.8 % (0.6–10.8) | 3.81 (0.49–7.0) | 9.9 mA (8.3–11.4) |
+| HW5 border router | 10.7 % (airtime 10.3 %) | 6.95 | 11.32 mA |
+| Emulated BR, 2 nodes, 170–470 s | **10.6 %** (10.4–10.8) | **6.91** (6.80–7.04) | **11.3 mA** (11.3–11.4) |
+| Same, PHY before the change | 2.94 % | 6.92 | 9.05 mA |
+| Emulated BR, `dag_simple`, 300–600 s | 10.7 % (10.1–11.3) | 6.97 (6.53–7.24) | 11.4 mA (11.2–11.5) |
+
+The emulated TX state is the airtime (the CCA is charged apart), so the board's airtime is the closer figure.
+
+- **Border router: matches.** TX time +3 % on the board's airtime, frames −0.6 %, current −0.2 %, the seeds within ±2 %.
+- **Router: the current matches** (+2.4 %), **the TX time is 15–18 % above** the board's and the frame rate 31 % above, with a wide spread over the seeds. The mean frame is shorter (16.1 ms against 18.3 ms: the PA/PC mix of §12.3), and the router sends more sweeps: PA + PC sweeps in the window, median 17 (8–25) against 13.5 (10–16) with the old PHY and about 13 on the board in 304 s. With frames 3.6 times longer, a sweep keeps the radio in TX for about 1 s, during which the node hears nothing; sweeps of the two nodes overlap more often (seed 2: 35 CCAs busy, 25 sweeps), frames heard are fewer, and Trickle suppresses fewer of the router's own. The board has the same physics; its single 304 s sample lies inside the emulated range. More board windows (HW5 had 10 of 30 s in one run) would tell whether the median differs.
+- **`dag_simple` at the board's PHY**: as §12.3 predicted from the frame logs (routers 5.9 %, BR 10.7 %). Joining is slower than with mode 3 at 150 kbit/s over 35 channels, as expected with 69 channels at a third of the rate: 121 of 140 nodes ready within 300 s (11–14 per run), median 162.0 s against 146.4 s; every parent a neighbour. Over the first 300 s the border router transmits 15.3 % of the time.
+
+Reproduce: `CONF=eu1a POWER=examples/power/efr32fg25-soc.ini TOPO=<0,1:-14.0 file> sim_utils/vtime/campaign.sh build-vt $(pwd) runs/eu1a_170 170 $(seq 1 10)`, the same with 470, then the difference of the two `power.json` per seed.

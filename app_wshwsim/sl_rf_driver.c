@@ -181,7 +181,33 @@ struct input_packet input_array[MAX_TXRX_BUFFERS];
 struct output_packet output_array[MAX_TXRX_BUFFERS];
 
 #define PACKET_SENDING_EXTRA_TIME   5000
+// Longest frame on air plus a margin: the backup timer of RX and TX
+// (rf_phy_timing_update()).
 uint32_t MAX_PACKET_SENDING_TIME = (uint32_t)(8000000/150000)*MAC_IEEE_802_15_4G_MAX_PHY_PACKET_SIZE + PACKET_SENDING_EXTRA_TIME;
+
+/* PHY timing (docs/POWER_MODEL.md §12.4). A frame lasts its bytes on air at
+ * the data rate: the SHR (preamble and SFD), the PHR, the PSDU the MAC gives
+ * (without FCS) and the FCS. The data rate is the one the MAC configures
+ * (PHY_EXTENSION_SET_RF_CONFIGURATION, from the PHY mode); phy_subghz's
+ * 150 kbit/s only until then. User settings, in the nodes' environment:
+ *   WSSIM_PHY_DATARATE=<bit/s>  this rate whatever the MAC configures
+ *   WSSIM_PHY_PREAMBLE=<bytes>  default 8 (Wi-SUN FAN: at least 64 bits)
+ *   WSSIM_PHY_SFD=<bytes>       default 2 (SUN FSK, 16-bit SFD)
+ *   WSSIM_PHY_PHR=<bytes>       default 2 (SUN FSK PHR)
+ *   WSSIM_PHY_FCS=<2|4>         FCS this node sends, default 4 (FAN: CRC-32);
+ *                               frames carry it, as the PHR's FCS type bit
+ *   WSSIM_PHY_LEGACY=1          the PHY before these settings: 150 kbit/s
+ *                               always, airtime of the PSDU only (to compare
+ *                               with older runs)
+ * The receiver hears a frame for the sender's SHR and FCS (in the frame's
+ * header, struct sim_frame_hdr) and its own PHR, at its own rate. */
+static uint32_t rf_datarate = 150000;   // bit/s, used for every airtime (phy_subghz until init)
+static uint32_t rf_datarate_fixed;      // WSSIM_PHY_DATARATE, 0 if unset
+static bool rf_phy_legacy;
+static uint8_t rf_preamble_len = 8;
+static uint8_t rf_sfd_len = 2;
+static uint8_t rf_phr_len = 2;
+static uint8_t rf_fcs_len = 4;
 
 /* Functions */
 static void _rf_set_off(void);
@@ -222,17 +248,78 @@ struct node_infos *nodes_infos_flat_map;
 const long shm_infos_size = SIM_SHM_INFOS_SIZE;
 
 /* Loss model */
-// Bytes on air around the frame that the receiver must decode too: the PHY
-// header and the 4-byte FCS (the frame given to the driver has no FCS).
-#define PHY_PHR_LEN 2
-#define PHY_FCS_LEN 4
+// The bits the receiver must decode: the PHR, the PSDU and the FCS (the frame
+// given to the driver has no FCS), as set above.
 static uint64_t rf_rng_state;
 
 /* Threads */
 pthread_t rf_dbus_proces_thread;
 
 /* Extra PHY defines, Helper functions */
-#define CALC_SLEEP_TIME(x)  (unsigned int)(((uint64_t)x*8*1000000)/(phy_subghz.datarate))
+// Airtime of a frame of psdu bytes (no FCS) with shr bytes of SHR and fcs of
+// FCS, at the current rate. Legacy: the PSDU only.
+static unsigned int rf_airtime_us(unsigned int psdu, unsigned int shr, unsigned int fcs)
+{
+    uint64_t bytes = psdu;
+
+    if (!rf_phy_legacy)
+        bytes += shr + rf_phr_len + fcs;
+    return (unsigned int)(bytes * 8 * 1000000 / rf_datarate);
+}
+
+static void rf_phy_timing_update(void)
+{
+    if (rf_phy_legacy)  // as before the settings, whole µs per byte
+        MAX_PACKET_SENDING_TIME = (8000000 / rf_datarate) * MAC_IEEE_802_15_4G_MAX_PHY_PACKET_SIZE +
+                                  PACKET_SENDING_EXTRA_TIME;
+    else                // the longest frame, from the longest SHR a frame header can carry
+        MAX_PACKET_SENDING_TIME = rf_airtime_us(MAC_IEEE_802_15_4G_MAX_PHY_PACKET_SIZE, UINT8_MAX, 4) +
+                                  PACKET_SENDING_EXTRA_TIME;
+}
+
+static unsigned int rf_phy_env(const char *name, unsigned int def, unsigned int min, unsigned int max)
+{
+    const char *env = getenv(name);
+    unsigned long v;
+    char *end;
+
+    if (!env || !*env)
+        return def;
+    v = strtoul(env, &end, 0);
+    FATAL_ON(*end || v < min || v > max, 2, "%s=%s: expected %u to %u", name, env, min, max);
+    return v;
+}
+
+static void rf_phy_settings_init(void)
+{
+    rf_phy_legacy = rf_phy_env("WSSIM_PHY_LEGACY", 0, 0, 1);
+    rf_datarate_fixed = rf_phy_env("WSSIM_PHY_DATARATE", 0, 1000, 10000000);
+    rf_preamble_len = rf_phy_env("WSSIM_PHY_PREAMBLE", 8, 0, 255);
+    rf_sfd_len = rf_phy_env("WSSIM_PHY_SFD", 2, 0, 8);
+    rf_phr_len = rf_phy_env("WSSIM_PHY_PHR", 2, 0, 8);
+    rf_fcs_len = rf_phy_env("WSSIM_PHY_FCS", 4, 2, 4);
+    FATAL_ON(rf_fcs_len == 3, 2, "WSSIM_PHY_FCS=3: expected 2 or 4");
+    FATAL_ON(rf_phy_legacy && rf_datarate_fixed, 2, "WSSIM_PHY_LEGACY and WSSIM_PHY_DATARATE together");
+    FATAL_ON(rf_preamble_len + rf_sfd_len > 255, 2, "WSSIM_PHY_PREAMBLE + WSSIM_PHY_SFD above 255 bytes");
+    rf_datarate = rf_datarate_fixed ? rf_datarate_fixed : phy_subghz.datarate;
+    rf_phy_timing_update();
+    if (rf_phy_legacy)
+        INFO("PHY: legacy, %u bit/s, airtime of the PSDU only", rf_datarate);
+    else
+        INFO("PHY: %u bit/s%s, preamble %u B, SFD %u B, PHR %u B, FCS %u B", rf_datarate,
+             rf_datarate_fixed ? " (WSSIM_PHY_DATARATE)" : " until the MAC configures it",
+             rf_preamble_len, rf_sfd_len, rf_phr_len, rf_fcs_len);
+}
+
+// The MAC's PHY configuration (PHY mode): its data rate, unless fixed.
+static void rf_phy_configure(const phy_rf_channel_configuration_s *config)
+{
+    if (rf_phy_legacy || rf_datarate_fixed || !config->datarate || config->datarate == rf_datarate)
+        return;
+    rf_datarate = config->datarate;
+    rf_phy_timing_update();
+    INFO("PHY: %u bit/s from the MAC's configuration", rf_datarate);
+}
 
 /*----------------------POWER (virtual time) -------------------------------------------*/
 #ifdef NS_PORT_SIM
@@ -471,6 +558,10 @@ void phy_rf_rx_now(void)
             bytes_str(msg, len, NULL, trace_buffer, sizeof(trace_buffer), DELIM_SPACE | ELLIPSIS_STAR));
         goto CANCEL_RX;
     }
+    if (hdr->fcs_len != 2 && hdr->fcs_len != 4) {
+        WARN("rf drop: FCS of %u bytes from node %u", hdr->fcs_len, hdr->src);
+        goto CANCEL_RX;
+    }
     pkt_len = hdr->len;
     pkt_chan = hdr->chan;
     pkt_seq = hdr->seq;
@@ -501,7 +592,7 @@ void phy_rf_rx_now(void)
         ber = 0.5;
     // 1.0 -> -12dBm, 0.6 -> -99dBm
     // The frame is lost if any of its bits is: 1 - (1 - BER)^bits
-    int bits = 8 * (PHY_PHR_LEN + pkt_len + PHY_FCS_LEN);
+    int bits = 8 * (rf_phr_len + pkt_len + hdr->fcs_len);
     double frame_error_rate = -expm1(bits * log1p(-ber));
 
     if (frame_error_rate > rf_rng_uniform()) {
@@ -548,7 +639,7 @@ void phy_rf_rx_now(void)
         ringbufindex_put(&input_ringbuf);
         // Now signal the management thread
         // Wait for the whole packet to be received
-        unsigned int sleep_time = CALC_SLEEP_TIME(pkt_len);
+        unsigned int sleep_time = rf_airtime_us(pkt_len, hdr->shr_len, hdr->fcs_len);
         _rf_rx_sleep_timeout_timer(sleep_time);
     }
 CANCEL_RX:
@@ -596,6 +687,8 @@ static int8_t phy_rf_tx_now()
     hdr->chan = channel;
     hdr->seq = phy_seq;
     hdr->src = 0;
+    hdr->shr_len = rf_preamble_len + rf_sfd_len;
+    hdr->fcs_len = rf_fcs_len;
     memcpy(msg + sizeof(*hdr), data_ptr, data_len);
     TRACE(TR_RF, "   rf tx: chan=%2d/%2d %s (%d bytes)", channel, channel,
            bytes_str(data_ptr, data_len, NULL, trace_buffer, sizeof(trace_buffer), DELIM_SPACE | ELLIPSIS_STAR), data_len);
@@ -812,7 +905,7 @@ static int _rf_execute_tx(){
     struct output_packet *current_output = &output_array[output_index];
     uint16_t data_len = current_output->data_len;
 
-    unsigned int sleep_time = CALC_SLEEP_TIME(data_len); // tx duration
+    unsigned int sleep_time = rf_airtime_us(data_len, rf_preamble_len + rf_sfd_len, rf_fcs_len); // tx duration
     // Do tx now and signal to do callback later after sleep
     phy_rf_tx_now();
     INFO("SIG TX in %u us for len %d", sleep_time, data_len);
@@ -1250,7 +1343,7 @@ static int8_t phy_rf_extension(phy_extension_type_e extension_type, uint8_t *dat
             }
             case PHY_EXTENSION_GET_SYMBOLS_PER_SECOND: {
                 data_ptr_32bits = (uint32_t *)data_ptr;
-                *data_ptr_32bits = phy_subghz.datarate;
+                *data_ptr_32bits = rf_datarate;
                 break;
             }
             case PHY_EXTENSION_SET_CCA_THRESHOLD: {
@@ -1267,6 +1360,7 @@ static int8_t phy_rf_extension(phy_extension_type_e extension_type, uint8_t *dat
                 break;
             }
             case PHY_EXTENSION_SET_RF_CONFIGURATION: {
+                rf_phy_configure((const phy_rf_channel_configuration_s *)data_ptr);
                 break;
             }
             case PHY_EXTENSION_SET_CSMA_PARAMETERS: {
@@ -1364,6 +1458,7 @@ void rf_driver_local_init(void)
     ns_port_add_poll_hook(rf_fhss_status_poll);
     if (getenv("WSSIM_RADIO_OFF"))
         rf_off_state_enabled = strtol(getenv("WSSIM_RADIO_OFF"), NULL, 0) != 0;
+    rf_phy_settings_init();
 
     driver_state = DRVSTATE_IDLE;
     set_shm_cca_state();

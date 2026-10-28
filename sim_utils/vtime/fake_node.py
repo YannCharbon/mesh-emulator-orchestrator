@@ -24,7 +24,7 @@ NEVER = 2**64 - 1
 HELLO_VTIME = 0x0001
 
 HELLO = struct.Struct("=2sHHH")      # magic, node_id, flags, reserved
-FRAME = struct.Struct("=2sHHHH")     # magic, len, chan, seq, src
+FRAME = struct.Struct("=2sHHHHBB")   # magic, len, chan, seq, src, shr_len, fcs_len
 WELCOME = struct.Struct("=2sHIQ")    # magic, version, flags, seed
 ADVANCE = struct.Struct("=2s3HQ")    # magic, frames, reserved[2], now_us
 IDLE = struct.Struct("=2s3HQ")       # magic, reserved[3], next_us
@@ -180,14 +180,14 @@ class Driver:
         self.log.append((t, nid, tuple(frames), tuple(out)))
         s = self.socks[nid]
         for i, p in enumerate(out):
-            s.send(FRAME.pack(b"xx", len(p), 0, i, 0xFFFF) + p)   # src is set by the server
+            s.send(FRAME.pack(b"xx", len(p), 0, i, 0xFFFF, 10, 4) + p)   # src is set by the server
         s.send(IDLE.pack(b"xi", 0, 0, 0, nxt))
 
     def _recv_frame(self, nid, s):
         msg = s.recv(65536)
         if msg[:2] != b"xx":
             raise TestError(f"node {nid}: expected a frame, got {msg[:2]!r}")
-        magic, ln, chan, seq, src = FRAME.unpack_from(msg)
+        magic, ln, chan, seq, src, _, _ = FRAME.unpack_from(msg)
         if ln != len(msg) - FRAME.size:
             raise TestError(f"node {nid}: frame length {ln}, message {len(msg)}")
         if src not in self.nodes:

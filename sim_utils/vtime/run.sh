@@ -27,6 +27,15 @@
 #                      into <outdir>/rss.txt ("<log name> <kB>")
 #   WSSIM_RADIO_OFF=0  the emulated radio ignores PHY_INTERFACE_DOWN (RX stays
 #                      on), as before GS8 stage 1: to compare with older runs
+#   CONF=<name>        use examples/wsbrd-<name>.conf and wsnode-<name>.conf
+#                      instead of wsbrd.conf and wsnode.conf; CONF=eu1a is the
+#                      FG25 firmware's PHY (EU, mode 1a, class 1, +10 dBm)
+#   WSSIM_PHY_*        the emulated PHY's data rate and overhead, for every
+#                      node (docs/POWER_MODEL.md §6.1): WSSIM_PHY_DATARATE,
+#                      _PREAMBLE, _SFD, _PHR, _FCS; WSSIM_PHY_LEGACY=1 for the
+#                      PHY before them (150 kbit/s, PSDU-only airtime)
+#   BR_ENV, NODE_ENV_<i> environment for the border router / node i only, e.g.
+#                      NODE_ENV_3="WSSIM_PHY_PREAMBLE=16"
 #   BR_OPTS, NODE_OPTS extra arguments for wsbrd-inproc / every wsnode-inproc
 #   NODE_OPTS_<i>      extra arguments for node i only, after NODE_OPTS, e.g.
 #                      NODE_OPTS_3="-o tx_power=8" (power settings per node:
@@ -49,6 +58,11 @@
 # it kills only the processes it started.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3; DUR=$4
+BR_CONF=$WORK/examples/wsbrd${CONF:+-$CONF}.conf
+NODE_CONF=$WORK/examples/wsnode${CONF:+-$CONF}.conf
+for f in "$BR_CONF" "$NODE_CONF"; do
+	[ -f "$f" ] || { echo "run.sh: no $f" >&2; exit 1; }
+done
 if [ -n "${POWER:-}" ]; then
 	POWER=$(realpath "$POWER") && [ -f "$POWER" ] || { echo "run.sh: no power profile ${POWER:-}" >&2; exit 1; }
 fi
@@ -95,7 +109,8 @@ export WSBRD_LOG_FILE=$OUT/log_wsbr
 mkdir -p "$OUT/storage"
 echo $NSIM_EPOCH_S > "$OUT/t0"
 cat > "$OUT/run_info.txt" <<EOF
-seed=$SEED nodes=$((NODES + 1)) vtime_end=$DUR sock=$SOCK tun=$TUN setarch=${SETARCH:-0}
+seed=$SEED nodes=$((NODES + 1)) vtime_end=$DUR sock=$SOCK tun=$TUN setarch=${SETARCH:-0} conf=${CONF:-default}
+phy_env=$(env | grep '^WSSIM_PHY_' | sort | tr '\n' ' ')
 bin=$BIN work=$WORK
 start_wall=$(date +%s.%N)
 EOF
@@ -151,10 +166,10 @@ for (( i = 0; i < 200; i++ )); do
 done
 [ -S "$SOCK" ] || abort "no socket $SOCK after 10 s"
 
-start br "$BIN/wsbrd-inproc" --eui64="$(mac 0)" -F "$WORK/examples/wsbrd.conf" -u "$SOCK" -t "$TUN" \
+start br env ${BR_ENV:-} "$BIN/wsbrd-inproc" --eui64="$(mac 0)" -F "$BR_CONF" -u "$SOCK" -t "$TUN" \
 	-o storage_prefix=storage/br_ ${BR_OPTS:-}
 for (( i = 1; i <= NODES; i++ )); do
-	start node$i "$BIN/wsnode-inproc" --eui64="$(mac $i)" -F "$WORK/examples/wsnode.conf" -u "$SOCK" \
+	start node$i env $(v="NODE_ENV_$i"; echo "${!v:-}") "$BIN/wsnode-inproc" --eui64="$(mac $i)" -F "$NODE_CONF" -u "$SOCK" \
 		-o storage_prefix="storage/n${i}_" ${NODE_OPTS:-} $(v="NODE_OPTS_$i"; echo "${!v:-}")
 done
 

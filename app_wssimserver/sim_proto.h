@@ -44,6 +44,11 @@ struct sim_frame_hdr {
     uint16_t chan;
     uint16_t seq;               // per-sender sequence number, for traces
     uint16_t src;               // sender's node ID, set by the server
+    // What the PHY sends around the frame, which the receiver hears too
+    // (docs/POWER_MODEL.md §12.4): the sender's SHR, preamble and SFD, in
+    // bytes, and its FCS, 2 or 4 bytes (on air, the PHR's FCS type bit).
+    uint8_t shr_len;
+    uint8_t fcs_len;
 };
 
 // Power recording (docs/POWER_MODEL.md), virtual time only: when the welcome
