@@ -172,7 +172,7 @@ An INI file; `#` or `;` start a comment; every key is required unless said other
 
 Two FG25 profiles:
 
-- **`examples/power/efr32fg25-soc.ini`, the default:** HW5's measurements where HW5 has them (RX listening, TX at +10 dBm, the charge per wake, the cycles per kind of work, the supply voltage), the datasheet or an estimate elsewhere, each figure tagged. Its conditions: 3.33 V, EU mode 1a (50 kbit/s), +10 dBm: the nodes' configuration `CONF=eu1a` (§12.5). §12.1 lists every change and what is still not measured.
+- **`examples/power/efr32fg25-soc.ini`, the default:** HW5's measurements where HW5 has them (RX listening, TX at +10 dBm, the charge per wake, the cycles per kind of work, the supply voltage), the datasheet or an estimate elsewhere, each figure tagged. Its conditions: 3.33 V, EU mode 1a (50 kbit/s), +10 dBm: the nodes' configuration `CONF=eu1a` (§12.5). §12.1 lists every change and what is still not measured. The values for EU mode 3 (150 kbit/s, the default configs' mode), measured on the same kits, are in the comments next to the keys that depend on the mode (`mode 3: ...`): §12.6.
 - **`examples/power/efr32fg25-soc-datasheet.ini`:** the profile as it was before HW5, from the datasheet (Rev. 1.2) only, with placeholder cycles. Kept so that a user can see how far the datasheet is from the board (§12.2): its radio currents are the datasheet's whole-chip RX/TX figures minus EM1 at 39 MHz, because they were measured with the MCU in EM1 at 39 MHz.
 
 ### 6.1 Every consumption parameter is the user's to set
@@ -382,6 +382,30 @@ The emulated TX state is the airtime (the CCA is charged apart), so the board's 
 - **`dag_simple` at the board's PHY**: as §12.3 predicted from the frame logs (routers 5.9 %, BR 10.7 %). Joining is slower than with mode 3 at 150 kbit/s over 35 channels, as expected with 69 channels at a third of the rate: 121 of 140 nodes ready within 300 s (11–14 per run), median 162.0 s against 146.4 s; every parent a neighbour. Over the first 300 s the border router transmits 15.3 % of the time.
 
 Reproduce: `CONF=eu1a POWER=examples/power/efr32fg25-soc.ini TOPO=<0,1:-14.0 file> sim_utils/vtime/campaign.sh build-vt $(pwd) runs/eu1a_170 170 $(seq 1 10)`, the same with 470, then the difference of the two `power.json` per seed.
+
+### 12.6 EU mode 3 figures (2026-10-28)
+
+The firmware gained a mode 3 build (`FW_PHY_MODE=3`: EU class 2, 2-FSK 150 kbit/s, 35 channels at 200 kHz), measured on the same kits with the same method as HW5: border router and one router, idle, +10 dBm, 3.33 V, 10 windows of 30 s per run on the AEM, firmware counters, and 10 kHz traces. One router run and two border-router runs (20 windows); mode 1a was measured again the same day with the same firmware (idle-tick skipping on). Results: the firmware's `README.md`, "Hardware results: idle-tick skipping and PHY mode 3".
+
+Which mode each figure of `examples/power/efr32fg25-soc.ini` comes from:
+
+| Key | Active value (mode 1a) | Mode 3 value (in the comment) | Mode 3 source |
+| --- | --- | --- | --- |
+| `radio.listen_ma`, `receive_ma`, `cca_ma` | 6.0, HW5 | 6.0 (same) | [M3] chip with RX on and the MCU in EM1: 8.12–8.13 mA (fit), 8.10 mA (trace median); mode 1a the same day 8.07–8.13 mA |
+| `radio.tx_ma` | 10:35.75, HW5; other levels scaled from the datasheet | 0:17.36 **10:35.29** 12:38.88 15.9:55.09 | [M3] 37.43 mA chip in TX at +10 dBm (fit 8.12 + 29.31 mA × TX share), trace plateau 37.36 mA over 422 frames; other levels [I] scaled by 0.727 |
+| `radio.cca_us` | 128 [I] | 53 | [V] the firmware's CCA: 8 symbols at 150 ksym/s (its mode 1a CCA is 160 µs) |
+| `cycles.tx_frame` | 67 000, HW5 | 47 200 | [M3] TX-prepare wake 41 900 + TX-event wake 26 100 − 2 × (`wake` + `radio`); RAIL's TX start 30 300 cycles against 43 900 in mode 1a |
+| All other keys | HW5, the datasheet or an estimate | same | Not mode-dependent, or not measured apart: `cycles.rx_frame` (RX wake 31 100 in mode 3, 31 300 in 1a), `wake_charge_uc`, the MCU states |
+
+Board figures in mode 3, to compare with the emulator's default configuration (means over the windows, range in brackets):
+
+| | Router, mode 3 | Router, mode 1a (same day) | Border router, mode 3 | Border router, mode 1a (same day) |
+| --- | --- | --- | --- | --- |
+| TX share | 0.89 % [0.03–2.03] | 5.28 % [0.09–9.63] | 1.89 % [1.25–2.52] | 10.60 % [7.14–14.19] |
+| Frames sent/s | 1.71 [0.03–3.45] | 3.54 [0.03–6.81] | 3.43 [2.30–4.64] | 6.90 [4.57–9.12] |
+| Average current | 8.38 mA [8.13–8.72] | 9.61 mA [8.11–10.93] | 8.67 mA [8.49–8.88] | 11.18 mA [10.20–12.26] |
+
+The profile file holds one value per key and the parser rejects unknown keys, so the mode 3 values are comments: copy the file and set them for a mode 3 run.
 
 ## 13. LFN timed receive windows (GS8 stage 2, 2026-10-28)
 
