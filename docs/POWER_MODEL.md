@@ -148,6 +148,18 @@ An INI file; `#` or `;` start a comment; every key is required unless said other
 
 The FG25 profile (`examples/power/efr32fg25-soc.ini`) takes every current from the datasheet (Rev. 1.2) and marks the cycles and several transitions as HW5. Its radio currents are the datasheet's whole-chip RX/TX figures minus EM1 at 39 MHz, because they were measured with the MCU in EM1 at 39 MHz.
 
+### 6.1 Every consumption parameter is the user's to set
+
+The profiles are examples, not fixed models: a user sets them to the hardware and use case being studied.
+
+| Parameter | Where it is set | Per node |
+| --- | --- | --- |
+| Currents, transition times and charges, MCU clock, supply voltage, cycles per kind of work, CCA time, TX current per dBm | The profile file (§6); copy `examples/power/efr32fg25-soc.ini` and edit it | `--power-node=IDS:PROFILE` |
+| TX power (dBm) the stack asks for | `tx_power` in `wsbrd.conf` / `wsnode.conf` (default 20, the stack's), or `-o tx_power=N` | `run.sh`: `NODE_OPTS_<i>="-o tx_power=N"` |
+| Battery cell | `--power-cell=mAh[:V[:eff]]` (`POWER_CELL`) | One per run |
+
+The profile's TX table clamps the requested power to the hardware's maximum, as the radio would (the FG25: 15.9 dBm).
+
 ## 7. Running and outputs
 
 ```bash
@@ -184,7 +196,7 @@ Recording does not change what the nodes do: the messages go to the conductor, w
 - **Recording off, before and after the change:** node, BR and `log_wsbr` logs identical for all 10 seeds once printed heap addresses are masked (`compare_logs.py --mask-pointers`; the larger binary moves the heap by 0x1000). `analyze.py`: identical milestones.
 - **Recording on versus off, same build:** byte-identical logs for all 10 seeds, unmasked. Wall time per run +18 %.
 - **Sums:** Σ state and transition times = 300 000 000 µs for every node of every run, MCU and radio.
-- **Plausibility (FG25 profile):** routers 6.86–7.13 mA (median 6.99), close to the always-listening figure (EM1 at 97.5 MHz 2.145 mA + RX 4.686 mA = 6.83 mA); TX adds the rest (0.8 % of the time at 0 dBm). The border router 8.65–8.83 mA (median 8.73): it sends more, at 20 dBm clamped to 15.9 dBm. MCU active about 1 % of the time; 104–123 wakes/s; empty ticks 0–76/s.
+- **Plausibility (FG25 profile):** routers 6.86–7.13 mA (median 6.99), close to the always-listening figure (EM1 at 97.5 MHz 2.145 mA + RX 4.686 mA = 6.83 mA); TX adds the rest (0.8 % of the time at 0 dBm; these runs predate the fix below). The border router 8.65–8.83 mA (median 8.73): it sends more, at 20 dBm clamped to 15.9 dBm. MCU active about 1 % of the time; 104–123 wakes/s; empty ticks 0–76/s.
 - **Determinism:** the same seed gives an identical `power.json` on another `tunvt` device.
 - **Ledger arithmetic:** `test_power.py` (a scripted node with deep sleep, radio off, transitions, CCA, TX between two levels) matches the hand-computed totals exactly.
 - **Stack:** the port's unit tests pass (one new: "xc" before each "xi"). The POSIX build's objects of HEAD and of this change, with `-ffile-prefix-map`: all stack objects identical; `sl_rf_driver.o` differs only by `__LINE__` immediates (the new code is under `NS_PORT_SIM`). The cross-build check links, and its images are byte-identical to HEAD's.
@@ -197,7 +209,7 @@ Recording does not change what the nodes do: the messages go to the conductor, w
 - **The emulated driver has no RX→TX turnaround or idle→RX settling of its own:** the profile's transitions only move time between states. RAIL's state timings are HW5.
 - **CCA duration** is the profile's, not the PHY's; it is cut from the backoff, which is long enough in practice.
 - **Supply voltage:** the FG25 datasheet gives the MCU at 3.6 V and the radio at 3.3 V; the profile mixes them (HW5 replaces both).
-- **The routers' TX power is never set** by `wsnode` (only `wsbrd` calls `arm_nwk_set_tx_output_power()`), so their frames are recorded at the driver's default, 0 dBm.
+- **Routers' TX power, fixed:** `wsnode` used to ignore `tx_power` (only `wsbrd` called `arm_nwk_set_tx_output_power()`), so routers sent at the driver's default, 0 dBm. It now applies it like `wsbrd` (default 20 dBm, clamped to 15.9 dBm by the FG25 profile). Seeds 1–10: logs identical apart from the new "change tx power" lines and line numbers, the same join milestones; routers 7.42 mA instead of 6.99 mA.
 
 ## 11. What part 1 leaves for later
 

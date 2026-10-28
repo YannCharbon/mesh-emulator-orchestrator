@@ -26,6 +26,9 @@
 #   RSS=1              sample every program's peak RSS (VmHWM) every second
 #                      into <outdir>/rss.txt ("<log name> <kB>")
 #   BR_OPTS, NODE_OPTS extra arguments for wsbrd-inproc / every wsnode-inproc
+#   NODE_OPTS_<i>      extra arguments for node i only, after NODE_OPTS, e.g.
+#                      NODE_OPTS_3="-o tx_power=8" (power settings per node:
+#                      docs/POWER_MODEL.md §6.1)
 #   POWER=<profile>    record power (docs/POWER_MODEL.md): every node with this
 #                      profile (e.g. examples/power/efr32fg25-soc.ini); the
 #                      report is <outdir>/power.json. Off by default.
@@ -150,7 +153,7 @@ start br "$BIN/wsbrd-inproc" --eui64="$(mac 0)" -F "$WORK/examples/wsbrd.conf" -
 	-o storage_prefix=storage/br_ ${BR_OPTS:-}
 for (( i = 1; i <= NODES; i++ )); do
 	start node$i "$BIN/wsnode-inproc" --eui64="$(mac $i)" -F "$WORK/examples/wsnode.conf" -u "$SOCK" \
-		-o storage_prefix="storage/n${i}_" ${NODE_OPTS:-}
+		-o storage_prefix="storage/n${i}_" ${NODE_OPTS:-} $(v="NODE_OPTS_$i"; echo "${!v:-}")
 done
 
 if [ "${WALL_TIMEOUT:-0}" -gt 0 ]; then
