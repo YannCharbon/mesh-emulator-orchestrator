@@ -109,6 +109,10 @@ enum driver_state {
     DRVSTATE_RX,
     /// Driver is inside the CSMA process
     DRVSTATE_CSMA_STARTED,
+    /// Radio off (PHY_INTERFACE_DOWN): hears nothing (LFN study E1, E2).
+    /// Last, so the values above, seen by other nodes in the CCA shared
+    /// memory and on D-Bus, do not change.
+    DRVSTATE_OFF,
 };
 static volatile enum driver_state driver_state = DRVSTATE_RADIO_UNINIT;
 /**
@@ -146,6 +150,14 @@ static uint32_t packet_rxsync_time = 0;
 /* Locks */
 bool rx_thread_blokcked;
 
+/* Radio off (E1): PHY_INTERFACE_DOWN during a TX turns the radio off at its
+ * end; frames that arrive while off are lost (E2), counted here */
+static bool rf_off_pending;
+static unsigned long rf_frames_lost_off;
+/* WSSIM_RADIO_OFF=0: PHY_INTERFACE_DOWN leaves the radio listening, as before
+ * the off state existed (for comparisons with older runs). Default 1. */
+static bool rf_off_state_enabled = true;
+
 /* Buffers for RX and TX */
 #define MAX_TXRX_BUFFERS 128
 static struct ringbufindex input_ringbuf;
@@ -172,6 +184,8 @@ struct output_packet output_array[MAX_TXRX_BUFFERS];
 uint32_t MAX_PACKET_SENDING_TIME = (uint32_t)(8000000/150000)*MAC_IEEE_802_15_4G_MAX_PHY_PACKET_SIZE + PACKET_SENDING_EXTRA_TIME;
 
 /* Functions */
+static void _rf_set_off(void);
+static void _rf_stop_csma_timeout_timer();
 static void _rf_rearm_csma_timeout_timer();
 static int _rf_set_rx();
 static int _rf_check_and_change_channel(uint16_t new_channel);
@@ -250,6 +264,7 @@ static uint8_t rf_power_state(void)
     switch (driver_state) {
     case DRVSTATE_RADIO_UNINIT:
     case DRVSTATE_RADIO_INITING:
+    case DRVSTATE_OFF:
         return SIM_RADIO_OFF;
     case DRVSTATE_IDLE:
         return SIM_RADIO_IDLE;
@@ -315,6 +330,21 @@ void set_shm_cca_state()
 static int8_t phy_rf_state_control(phy_interface_state_e new_state, uint8_t rf_channel)
 {
     tr_info("%s %d", __func__, new_state);
+    if (new_state == PHY_INTERFACE_DOWN && rf_off_state_enabled) {
+        // The channel updates of the driver before it had an off state, so
+        // that FFN runs keep the same traces (the MAC calls DOWN with channel
+        // 0, then UP, when it starts); then off.
+        _rf_check_and_change_channel(rf_channel);
+        if (driver_state != DRVSTATE_TX)
+            _rf_check_and_change_channel(new_channel);
+        _rf_set_off();
+        return 0;
+    }
+    rf_off_pending = false;
+    if (driver_state == DRVSTATE_OFF) {
+        driver_state = DRVSTATE_IDLE;
+        set_shm_cca_state();
+    }
     _rf_check_and_change_channel(rf_channel);
     _rf_set_rx();
     return 0;
@@ -444,6 +474,12 @@ void phy_rf_rx_now(void)
     pkt_len = hdr->len;
     pkt_chan = hdr->chan;
     pkt_seq = hdr->seq;
+    if (driver_state == DRVSTATE_OFF) {
+        rf_frames_lost_off++;
+        INFO("rf rx lost: radio off, chan=%d len=%d rxseq=%d (%lu lost)", pkt_chan, pkt_len, pkt_seq,
+             rf_frames_lost_off);
+        goto CANCEL_RX;
+    }
     if ((channel != pkt_chan) && !fhss_on) {
         WARN("YET FHSS OFF & WRONG CHANNEL ... rf rx: chan=%d, curr chan=%d len=%d rxseq=%d", pkt_chan, channel, pkt_len, pkt_seq);
     }
@@ -619,6 +655,11 @@ static int _rf_set_rx(){
     if (driver_state == DRVSTATE_TX) {
         return -1;
     }
+    if (driver_state == DRVSTATE_OFF) {
+        // Only the channel: a channel change does not turn the radio on
+        _rf_check_and_change_channel(new_channel);
+        return 0;
+    }
 
     /*Set channel*/
     _rf_check_and_change_channel(new_channel);
@@ -639,6 +680,35 @@ static void _rf_set_idle(enum idle_state mode){
     return;
 }
 
+/**
+ * @brief Turns the radio off (PHY_INTERFACE_DOWN, LFN study E1).
+ *
+ * A frame being received is lost; a CSMA backoff is cancelled (the MAC that
+ * asks for this has given up its transmission). A frame being sent is on the
+ * air already: the radio turns off at its end.
+ */
+static void _rf_set_off(void){
+    switch (driver_state) {
+    case DRVSTATE_OFF:
+        return;
+    case DRVSTATE_TX:
+        rf_off_pending = true;
+        return;
+    case DRVSTATE_RX:
+        eventOS_callback_timer_stop(rx_sleep_handler_timer);
+        _rf_stop_backup_timer();
+        ringbufindex_flush(&input_ringbuf);
+        break;
+    case DRVSTATE_CSMA_STARTED:
+        _rf_stop_csma_timeout_timer();
+        break;
+    default:
+        break;
+    }
+    driver_state = DRVSTATE_OFF;
+    set_shm_cca_state();
+}
+
 
 static void _rf_tx_sleep_timeout_timer_cb(int timer_id, uint16_t slots)
 {
@@ -647,7 +717,8 @@ static void _rf_tx_sleep_timeout_timer_cb(int timer_id, uint16_t slots)
                 device_driver.phy_tx_done_cb(rf_radio_driver_id,
                                                         mac_tx_handle, PHY_LINK_TX_SUCCESS, 0, 0);
     rx_thread_blokcked = false;
-    driver_state = DRVSTATE_IDLE_WAITING_RX;
+    driver_state = rf_off_pending ? DRVSTATE_OFF : DRVSTATE_IDLE_WAITING_RX;
+    rf_off_pending = false;
     set_shm_cca_state();
     //_rf_set_rx();
 }
@@ -899,7 +970,8 @@ static void _rf_backup_timeout_handler(){
         if (device_driver.phy_tx_done_cb) {
             device_driver.phy_tx_done_cb(rf_radio_driver_id, mac_tx_handle, PHY_LINK_TX_FAIL, 0, 0);
         }
-        driver_state = DRVSTATE_IDLE;
+        driver_state = rf_off_pending ? DRVSTATE_OFF : DRVSTATE_IDLE;
+        rf_off_pending = false;
         set_shm_cca_state();
         _rf_set_idle(RADIO_IDLE_ABORT);
         _rf_set_rx();
@@ -1204,7 +1276,8 @@ static int8_t phy_rf_extension(phy_extension_type_e extension_type, uint8_t *dat
                     // Cancel any on-going transmission and set to RX state on current channel
                     _rf_stop_csma_timeout_timer();
                     _rf_set_idle(RADIO_IDLE_ABORT);
-                    driver_state = DRVSTATE_IDLE;
+                    if (driver_state != DRVSTATE_OFF)
+                        driver_state = DRVSTATE_IDLE;
                     set_shm_cca_state();
                     //_rf_set_rx();
                     backoff_time = 0;
@@ -1218,7 +1291,8 @@ static int8_t phy_rf_extension(phy_extension_type_e extension_type, uint8_t *dat
             case PHY_EXTENSION_SET_CHANNEL: {
                 if (driver_state == DRVSTATE_IDLE ||
                     driver_state == DRVSTATE_IDLE_WAITING_RX ||
-                    driver_state == DRVSTATE_CSMA_STARTED){
+                    driver_state == DRVSTATE_CSMA_STARTED ||
+                    driver_state == DRVSTATE_OFF){
                     new_channel = *data_ptr;
                     _rf_set_rx();
                 } else {
@@ -1288,6 +1362,8 @@ void rf_driver_local_init(void)
     rx_sleep_handler_timer = eventOS_callback_timer_register(_rf_rx_sleep_timeout_timer_cb);
     backup_timeout_timer = eventOS_callback_timer_register(_rf_backup_timer_cb);
     ns_port_add_poll_hook(rf_fhss_status_poll);
+    if (getenv("WSSIM_RADIO_OFF"))
+        rf_off_state_enabled = strtol(getenv("WSSIM_RADIO_OFF"), NULL, 0) != 0;
 
     driver_state = DRVSTATE_IDLE;
     set_shm_cca_state();

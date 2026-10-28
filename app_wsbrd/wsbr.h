@@ -74,6 +74,9 @@ struct wsbr_ctxt {
     char ws_name[33]; // null-terminated string of 32 chars
     int  ws_pan_id;
     int  tx_power;
+    int  ws_fan_version;        // 1: FAN 1.0 (default), 2: FAN 1.1
+    bool rx_on_when_idle;       // false: the MAC turns the radio off when idle
+    int  rx_off_after_s;        // >= 0: RX off when idle from this many seconds after start
     uint8_t ws_gtk[4][16];
     bool ws_gtk_force[4];
     uint8_t ipv6_prefix[16];

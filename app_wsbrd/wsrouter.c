@@ -17,6 +17,7 @@
 #include "mbed-client-libservice/ns_trace.h"
 #include "nanostack-event-loop/eventOS_event.h"
 #include "nanostack-event-loop/eventOS_scheduler.h"
+#include "nanostack-event-loop/eventOS_event_timer.h"
 #include "nanostack/mac/fhss_api.h"
 #include "nanostack/mac/mac_api.h"
 #include "nanostack/ns_file_system.h"
@@ -130,6 +131,20 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
     ret = arm_nwk_set_tx_output_power(ctxt->rcp_if_id, ctxt->tx_power);
     WARN_ON(ret);
 
+    // FAN 1.1 at run time (GS8, LFN study U1); FAN 1.0 stays the default
+    if (ctxt->ws_fan_version != 1) {
+        ret = ws_management_fan_version_set(ctxt->rcp_if_id, ctxt->ws_fan_version);
+        FATAL_ON(ret, 1, "fan_version: not supported by this build (%d)", ret);
+        INFO("Wi-SUN FAN version 1.%d", ctxt->ws_fan_version - 1);
+    }
+    // Radio off when the MAC is idle (LFN study M1): a test of the radio-off
+    // path, not an LFN. Applied when the MAC starts.
+    if (!ctxt->rx_on_when_idle) {
+        ret = ws_management_rx_on_when_idle_set(ctxt->rcp_if_id, false);
+        WARN_ON(ret);
+        INFO("RX off when idle");
+    }
+
     ret = ws_device_min_sens_set(ctxt->rcp_if_id, 174 - 93);
     WARN_ON(ret);
 
@@ -151,6 +166,9 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
         WARN_ON(ret);
     }
 }
+
+// Event of wsbr_tasklet: rx_off_when_idle_after has passed
+#define WSROUTER_EVENT_RX_OFF 100
 
 static void wsbr_tasklet(struct arm_event_s *event)
 {
@@ -181,6 +199,13 @@ static void wsbr_tasklet(struct arm_event_s *event)
             if (arm_nwk_interface_up(ctxt->rcp_if_id))
                  WARN("arm_nwk_interface_up RCP");
             multicast_set_parameters(10,0,1,1,75);
+            if (ctxt->rx_off_after_s >= 0)
+                eventOS_event_timer_request(0, WSROUTER_EVENT_RX_OFF, event->receiver,
+                                            (uint32_t)ctxt->rx_off_after_s * 1000);
+            break;
+        case WSROUTER_EVENT_RX_OFF:
+            INFO("RX off when idle (rx_off_when_idle_after = %d s)", ctxt->rx_off_after_s);
+            WARN_ON(ws_management_rx_on_when_idle_set(ctxt->rcp_if_id, false));
             break;
         case ARM_LIB_NWK_INTERFACE_EVENT:
             if (event->event_id == ctxt->rcp_if_id) {

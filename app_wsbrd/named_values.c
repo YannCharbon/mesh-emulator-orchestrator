@@ -51,6 +51,13 @@ const struct name_value valid_traces[] = {
     { NULL },
 };
 
+// Wi-SUN FAN version: the PAN-IE value (WS_FAN_VERSION_1_0, _1_1)
+const struct name_value valid_fan_versions[] = {
+    { "1.0", 1 },
+    { "1.1", 2 },
+    { NULL },
+};
+
 const struct name_value valid_booleans[] = {
     { "true",    1 },
     { "false",   0 },

@@ -307,6 +307,13 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
         ctxt->ws_gtk_force[int_arg] = true;
     } else if (sscanf(line, " size = %s %c", str_arg, &garbage) == 1) {
         ctxt->ws_size = str_to_val(str_arg, valid_ws_size);
+    } else if (sscanf(line, " fan_version = %s %c", str_arg, &garbage) == 1) {
+        ctxt->ws_fan_version = str_to_val(str_arg, valid_fan_versions);
+    } else if (sscanf(line, " rx_on_when_idle = %s %c", str_arg, &garbage) == 1) {
+        ctxt->rx_on_when_idle = str_to_val(str_arg, valid_booleans);
+    } else if (sscanf(line, " rx_off_when_idle_after = %d %c", &ctxt->rx_off_after_s, &garbage) == 1) {
+        if (ctxt->rx_off_after_s < 0)
+            FATAL(1, "%s:%d: invalid rx_off_when_idle_after: %d", filename, line_no, ctxt->rx_off_after_s);
     } else if (sscanf(line, " tx_power = %d %c", &ctxt->tx_power, &garbage) == 1) {
         if (ctxt->tx_power < INT8_MIN || ctxt->tx_power > INT8_MAX)
             FATAL(1, "%s:%d: invalid tx_power: %d", filename, line_no, ctxt->tx_power);
@@ -433,6 +440,9 @@ void parse_commandline(struct wsbr_ctxt *ctxt, int argc, char *argv[],
     ctxt->ws_size = NETWORK_SIZE_SMALL;
     ctxt->ws_pan_id = -1;
     ctxt->tx_power = 20;
+    ctxt->ws_fan_version = 1;
+    ctxt->rx_on_when_idle = true;
+    ctxt->rx_off_after_s = -1;
     ctxt->uc_dwell_interval = WS_FHSS_UC_DWELL_INTERVAL;
     ctxt->bc_interval = WS_FHSS_BC_INTERVAL;
     ctxt->bc_dwell_interval = WS_FHSS_BC_DWELL_INTERVAL;

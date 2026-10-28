@@ -11,6 +11,7 @@ Scripts for the step-1 gate of `docs/VIRTUAL_TIME.md` (§7). They need a virtual
 | `tun_setup.sh` | Creates `tunvt0`… (run once per boot with sudo): one TUN per border router running at the same time, all with the same fixed link-local address |
 | `campaign.sh` | Several runs at once, one per `tunvt` device: `campaign.sh <bindir> <workdir> <outdir> <seconds> <seed>...` (`JOBS` limits how many at a time) |
 | `speed.sh` | Wall time per simulated second and peak RSS at several sizes (§7.4) |
+| `test_radio_off.sh` | Radio off end to end (GS8 stage 1): router 1 turns RX off when idle at 150 s; checks that it then receives nothing, that frames are lost, that the ledger shows its radio off and its MCU in deep sleep, and the sums: `test_radio_off.sh build-vt $(pwd) runs/radio_off` (`TUN=tunvt0`) |
 | `test_power.py` | Test of the power ledger (`docs/POWER_MODEL.md`): one scripted node, totals checked against hand-computed ones: `test_power.py build-vt/wssimserver` |
 
 Analysis: `sim_utils/migration/analyze.py` reads these runs as it reads the wall-clock ones (`brtree` lines of `br.log` instead of `dbus_nodes.txt`).
@@ -33,7 +34,7 @@ Power recording (EM2, `docs/POWER_MODEL.md`): `POWER=examples/power/efr32fg25-so
 
 Output: one log per program (`simserver.log`, `br.log`, `node<i>.log`), with no timestamping wrapper: the simulation port starts every line with `NSIM_EPOCH_S` + virtual time, and `t0` holds `NSIM_EPOCH_S` (1700000000). Also `topology.txt`, `run_info.txt` (seed, socket, wall-clock start and end), `exit_codes.txt`, `log_wsbr` and `storage/`.
 
-The run ends when `wssimserver` exits (`--vtime-end`, or SIGTERM from `WALL_TIMEOUT`). A program that exits with an error before that stops the run. The script never uses `pkill`; it stops only the processes it started. Options are environment variables, listed at the top of the script: `WSSIM_SEED`, `TOPO`, `SOCK`, `TUN`, `SETARCH=1`, `KEEP_DBUS=1`, `WALL_TIMEOUT`, `RSS=1`, `BR_OPTS`, `NODE_OPTS`.
+The run ends when `wssimserver` exits (`--vtime-end`, or SIGTERM from `WALL_TIMEOUT`). A program that exits with an error before that stops the run. The script never uses `pkill`; it stops only the processes it started. Options are environment variables, listed at the top of the script: `WSSIM_SEED`, `TOPO`, `SOCK`, `TUN`, `SETARCH=1`, `KEEP_DBUS=1`, `WALL_TIMEOUT`, `RSS=1`, `BR_OPTS`, `NODE_OPTS`. The programs inherit the environment, so `WSSIM_RADIO_OFF=0` (the emulated radio's `PHY_INTERFACE_DOWN` leaves RX on, as before GS8 stage 1) applies to a whole run or campaign.
 
 ## Running several runs at once
 

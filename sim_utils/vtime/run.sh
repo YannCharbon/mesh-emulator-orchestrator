@@ -25,6 +25,8 @@
 #                      run with "xq") after this many seconds (default 0: none)
 #   RSS=1              sample every program's peak RSS (VmHWM) every second
 #                      into <outdir>/rss.txt ("<log name> <kB>")
+#   WSSIM_RADIO_OFF=0  the emulated radio ignores PHY_INTERFACE_DOWN (RX stays
+#                      on), as before GS8 stage 1: to compare with older runs
 #   BR_OPTS, NODE_OPTS extra arguments for wsbrd-inproc / every wsnode-inproc
 #   NODE_OPTS_<i>      extra arguments for node i only, after NODE_OPTS, e.g.
 #                      NODE_OPTS_3="-o tx_power=8" (power settings per node:

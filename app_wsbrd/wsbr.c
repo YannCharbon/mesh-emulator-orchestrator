@@ -181,6 +181,15 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
     ret = arm_nwk_set_tx_output_power(ctxt->rcp_if_id, ctxt->tx_power);
     WARN_ON(ret);
 
+    // FAN 1.1 at run time (GS8, LFN study U1); FAN 1.0 stays the default
+    if (ctxt->ws_fan_version != 1) {
+        ret = ws_management_fan_version_set(ctxt->rcp_if_id, ctxt->ws_fan_version);
+        FATAL_ON(ret, 1, "fan_version: not supported by this build (%d)", ret);
+        INFO("Wi-SUN FAN version 1.%d", ctxt->ws_fan_version - 1);
+    }
+    FATAL_ON(!ctxt->rx_on_when_idle || ctxt->rx_off_after_s >= 0, 1,
+             "rx_on_when_idle, rx_off_when_idle_after: router only (a border router must listen)");
+
     ret = ws_device_min_sens_set(ctxt->rcp_if_id, 174 - 93);
     WARN_ON(ret);
 

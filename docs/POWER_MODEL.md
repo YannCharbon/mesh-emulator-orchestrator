@@ -63,6 +63,7 @@ All of them come from the real stack's behaviour, not from a script.
 | Driver state | Set in | Radio state |
 | --- | --- | --- |
 | `DRVSTATE_RADIO_UNINIT`, `_INITING` | start | off |
+| `DRVSTATE_OFF` | `phy_rf_state_control(PHY_INTERFACE_DOWN)` (GS8 stage 1); left by `PHY_INTERFACE_UP` | off |
 | `DRVSTATE_IDLE` | init; `PHY_EXTENSION_SET_CSMA_PARAMETERS` with backoff 0 (cancel); `PHY_TX_NOT_ALLOWED` | idle |
 | `DRVSTATE_IDLE_WAITING_RX` | `_rf_set_rx()`, end of TX/RX, CCA busy | listen |
 | `DRVSTATE_CSMA_STARTED` | `phy_rf_tx()`: the backoff before a TX | listen |
@@ -72,7 +73,9 @@ All of them come from the real stack's behaviour, not from a script.
 - **CCA:** `_rf_check_cca()` (only when the MAC enabled CCA) sends an "xr" with `SIM_RADIO_EV_CCA`. The driver does the CCA in no time; the ledger charges `cca_us` at the end of the listening that precedes it (§5.2).
 - **TX power:** `PHY_EXTENSION_SET_TX_POWER` records the dBm the MAC asked for; each TX carries it.
 - **Airtime:** RX and TX last the driver's own airtime (`CALC_SLEEP_TIME`, 150 kbit/s). EM4 will give exact airtimes at the medium later.
-- **Off:** the driver has no off state; GS8 stage 1 (LFN study E1–E3) adds it. Until then "off" appears only before the driver starts.
+- **Off** (GS8 stage 1, LFN study E1–E2): `PHY_INTERFACE_DOWN` turns the radio off. A frame being received is lost; a CSMA backoff is cancelled; a frame being sent finishes first. While off, a channel change only records the channel (it does not turn RX on), the CCA shared memory and D-Bus show state 7 (`DRVSTATE_OFF`, added last so that the other values do not change), and frames that arrive are lost before the loss draw ("rf rx lost: radio off" in the node's log; they count as unseen frames, §5.3). `PHY_INTERFACE_UP` turns RX on again.
+  - Who turns it off: the MAC, when RX-off-when-idle is set (`ws_management_rx_on_when_idle_set()`, or `rx_on_when_idle = false` / `rx_off_when_idle_after = <s>` in `wsnode.conf`): it is off whenever the MAC is idle, and on for a transmission, its CCA and the ACK wait. An FFN keeps RX on: its MAC calls `DOWN` only for an instant when it starts (`DOWN` then `UP`), which now costs a frame that was being received at that instant, as on the hardware.
+  - `WSSIM_RADIO_OFF=0` in the environment of the nodes keeps the old behaviour (`DOWN` leaves RX on), to compare with runs made before GS8 stage 1: with it and `NANOSTACK_EVENTLOOP_TICKLESS=OFF`, `dag_simple` logs are identical to before for seeds 1–10.
 
 ### 3.2 MCU: the run loop's idle intervals
 
@@ -83,6 +86,24 @@ In virtual time the node's run loop (`NGS/port/sim/sim_scheduler.c`) runs until 
 - **The idle** that follows lasts until the next "xa" of that node.
 
 The ledger reads this in the conductor, so it works for any program that speaks the conductor protocol: EM7's clients get the same accounting by sending "xi" (and, if they can, "xc" and "xr"). On the firmware, the same intervals are the FreeRTOS idle task's sleeps (HW5).
+
+### 3.3 Radio off and tickless loop: checks (GS8 stage 1, 2026-10-28)
+
+`dag_simple`, 300 virtual seconds, seeds 1–10, `SETARCH=1`, the datasheet FG25 profile (`efr32fg25-soc-datasheet.ini`; wakes do not depend on the profile):
+
+| | Before (periodic tick) | Tickless |
+| --- | --- | --- |
+| Router wakes/s over the run (min / median / max) | 103.5 / 115.7 / 122.6 | 40.9 / 61.9 / 104.3 |
+| Router wakes/s once joined (200–300 s, seed 1) | 110–121 | 36–42 (node 14, joined at 290 s: 88) |
+| Border router wakes/s (median) | 125.9 | 47.7 |
+| Tick callbacks per second (median) | 100 | 0.10 |
+| Empty ticks per second (median) | 54.7 | 0 |
+| Router current (median, datasheet / HW5 profile) | 7.400 / 8.619 mA | 7.405 / 8.592 mA |
+
+- **What is left once joined, per second:** the protocol timer 20, FHSS about 14 (TX-slot poll `fhss_event_timer_cb` about 8, unicast hop 4, broadcast schedule 2), the radio driver's timers about 5 under `dag_simple`'s traffic. Before a node joins, FHSS polls its TX queue every 10 ms (`DEFAULT_POLL_PERIOD`), so unjoined nodes still wake about 100 times a second. The idle-sleep study's 26–30 wakes/s left out the TX-slot poll and the radio's timers.
+- **An FFN's current hardly moves** (−0.03 mA with the HW5 profile): its radio listens all the time and its MCU stays in EM1.
+- **Sums:** Σ state and transition times = run time for every node of every run.
+- **A node with RX off when idle** (`NODE_OPTS_1="-o rx_off_when_idle_after=150"`, seed 1): after 150 s node 1 receives no frame (284 before), 839 frames are lost while off; its radio is off for 145.3 of the last 150 s (listen 2.6 s, TX 2.1 s, CCA 0.07 s), and the MCU sleeps deep 143.6 s of them (§4: no hold once the radio is off). Average over the run 4.52 mA, against 7.64 mA for node 2. With `rx_on_when_idle = false` from the start, node 1 never joins, sleeps deep 95.7 % of the time and averages 0.44 mA (with 103 wakes/s, FHSS's 10 ms poll before joining).
 
 ## 4. Sleep depth: a port-level rule
 
@@ -130,7 +151,7 @@ charge      = active time × active_ma + wake_charge_uc     (per wake)
 Per node the report counts:
 
 - **wakes**, and per cause the wakes in which it appeared (`wakes_with`) and its callbacks (`timer_callbacks`);
-- **empty ticks:** wakes where only the 10 ms tick fired and no event was dispatched and no frame came. This is what a tickless event loop would remove (idle-sleep study §3), measured without building it;
+- **empty ticks:** wakes where only the 10 ms tick fired and no event was dispatched and no frame came. This is what a tickless event loop removes (idle-sleep study §3). With the stack's tickless event loop (`NANOSTACK_EVENTLOOP_TICKLESS`, default ON since GS8 stage 1) the tick fires only when an event timer is due, so empty ticks are about 0; build with it `OFF` to see the periodic tick's;
 - **unseen frame wakes:** wakes with only frames that the radio did not take (another channel, lost to the link, or the radio busy). The emulator delivers every frame to every neighbour; a board's radio would not have interrupted the CPU. They are not counted as wakes and cost nothing (`frames_unseen` keeps the count).
 
 ## 6. Profile format
@@ -221,7 +242,7 @@ Recording does not change what the nodes do: the messages go to the conductor, w
 
 | Item | Needs | Then |
 | --- | --- | --- |
-| Radio off, deep sleep in real runs | GS8 stage 1: the driver's off state, timed RX windows; the tickless event loop | The rule of §4 chooses deep sleep; empty ticks disappear |
+| Radio off, deep sleep in real runs | GS8 stage 1 (done: the driver's off state, the MAC's RX-off-when-idle, the tickless event loop); stage 2: timed RX windows | Done: a node with RX off when idle sleeps deep (§3.1, §5.3); empty ticks are gone. Left: timed RX windows (an LFN listening) |
 | First real deep-sleep figures | GS8 stages 2–4: an LFN | Check against the AEM on the kits |
 | MCU + RCP and module profiles | EM3 step 2 (split programs in virtual time) | The link machine; Spinel messages charged to both chips |
 | Drift | EM3 step 5 | Separate wakes of the timer series; LFN window widening |
