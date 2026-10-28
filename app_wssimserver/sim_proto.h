@@ -46,6 +46,31 @@ struct sim_frame_hdr {
     uint16_t src;               // sender's node ID, set by the server
 };
 
+// Power recording (docs/POWER_MODEL.md), virtual time only: when the welcome
+// has NSIM_WELCOME_POWER, the radio reports each change of its state with
+// "xr", between the node's wake and its "xi" (at the time of that wake). The
+// states are the hardware's, not the driver's: the conductor's power ledger
+// gives each one a current from the node's power profile.
+enum sim_radio_state {
+    SIM_RADIO_OFF,              // powered down (none yet: GS8 stage 1)
+    SIM_RADIO_IDLE,             // ready, neither receiving nor sending
+    SIM_RADIO_LISTEN,           // RX on, no frame (also during CSMA backoffs)
+    SIM_RADIO_RECEIVE,          // RX of a frame, from its start to its end
+    SIM_RADIO_TX,               // sending, at tx_dbm
+    SIM_RADIO_STATES
+};
+
+#define SIM_RADIO_EV_CCA 0x01   // a CCA ended now (it is not a state of the driver)
+
+struct sim_radio_report {
+    char magic[2];              // "xr"
+    uint8_t state;              // enum sim_radio_state
+    int8_t tx_dbm;              // TX power the MAC asked for
+    uint8_t events;             // SIM_RADIO_EV_*
+    uint8_t reserved;
+    uint16_t channel;
+};
+
 // Shared memory "/wssimnodesinfos": one entry per (receiver, sender) pair,
 // written by wssimserver from its -g options.
 struct node_infos {

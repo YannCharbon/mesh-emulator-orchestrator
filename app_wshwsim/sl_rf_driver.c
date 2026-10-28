@@ -220,12 +220,84 @@ pthread_t rf_dbus_proces_thread;
 /* Extra PHY defines, Helper functions */
 #define CALC_SLEEP_TIME(x)  (unsigned int)(((uint64_t)x*8*1000000)/(phy_subghz.datarate))
 
+/*----------------------POWER (virtual time) -------------------------------------------*/
+#ifdef NS_PORT_SIM
+// Power recording (docs/POWER_MODEL.md §3): when the conductor asks for it,
+// every change of the radio's hardware state goes to its power ledger as an
+// "xr" (sim_proto.h). The driver's states map to the hardware's: a CSMA
+// backoff listens, and the driver has no off state yet (GS8 stage 1).
+static int8_t rf_tx_dbm;                // last TX power the MAC asked for
+static int rf_power_last = -1;          // last state reported
+static int8_t rf_power_last_dbm;
+
+static void rf_power_send(uint8_t state, uint8_t events)
+{
+    struct sim_radio_report r = {
+        .magic = "xr",
+        .state = state,
+        .tx_dbm = rf_tx_dbm,
+        .events = events,
+        .channel = channel,
+    };
+    int ret;
+
+    ret = write(g_rf_host.rf_fd, &r, sizeof(r));
+    FATAL_ON(ret != sizeof(r), 2, "RF socket: %m");
+}
+
+static uint8_t rf_power_state(void)
+{
+    switch (driver_state) {
+    case DRVSTATE_RADIO_UNINIT:
+    case DRVSTATE_RADIO_INITING:
+        return SIM_RADIO_OFF;
+    case DRVSTATE_IDLE:
+        return SIM_RADIO_IDLE;
+    case DRVSTATE_IDLE_WAITING_RX:
+    case DRVSTATE_CSMA_STARTED:
+        return SIM_RADIO_LISTEN;
+    case DRVSTATE_RX:
+        return SIM_RADIO_RECEIVE;
+    case DRVSTATE_TX:
+        return SIM_RADIO_TX;
+    }
+    return SIM_RADIO_IDLE;
+}
+
+// Called wherever the driver's state may have changed (set_shm_cca_state())
+static void rf_power_report(void)
+{
+    uint8_t state;
+
+    if (!ns_port_sim_power() || g_rf_host.rf_fd < 0)
+        return;
+    state = rf_power_state();
+    if (state == rf_power_last && (state != SIM_RADIO_TX || rf_tx_dbm == rf_power_last_dbm))
+        return;
+    rf_power_last = state;
+    rf_power_last_dbm = rf_tx_dbm;
+    rf_power_send(state, 0);
+}
+
+// A CCA, which the driver does in no time: the ledger charges it at the end
+// of the listening that precedes it.
+static void rf_power_cca(void)
+{
+    if (!ns_port_sim_power() || g_rf_host.rf_fd < 0)
+        return;
+    rf_power_send(rf_power_state(), SIM_RADIO_EV_CCA);
+}
+#endif
+
 /*----------------------SHM-------------------------------------------------------------*/
 void set_shm_cca_state()
 {
     int pos = g_rf_host.node_id * 3;
     memcpy(shm_ptr+pos, (uint8_t *)&driver_state, 1);
     memcpy(shm_ptr+pos+1, &channel, 2);
+#ifdef NS_PORT_SIM
+    rf_power_report();
+#endif
 }
 
 /*----------------------RADIO ----------------------------------------------------------*/
@@ -603,6 +675,9 @@ static bool _rf_check_cca(){
     if(!_rf_set_rx()){
         WARN("Could not start RX mode");
     }
+#ifdef NS_PORT_SIM
+    rf_power_cca();
+#endif
     struct neighbor_timings *neighbors = g_rf_host.neighbors;
     int i;
 
@@ -1114,6 +1189,9 @@ static int8_t phy_rf_extension(phy_extension_type_e extension_type, uint8_t *dat
             }
             case PHY_EXTENSION_SET_TX_POWER: {
                 INFO("change tx power to %u", *data_ptr);
+#ifdef NS_PORT_SIM
+                rf_tx_dbm = (int8_t)*data_ptr;
+#endif
                 break;
             }
             case PHY_EXTENSION_SET_RF_CONFIGURATION: {

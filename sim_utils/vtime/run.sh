@@ -26,6 +26,13 @@
 #   RSS=1              sample every program's peak RSS (VmHWM) every second
 #                      into <outdir>/rss.txt ("<log name> <kB>")
 #   BR_OPTS, NODE_OPTS extra arguments for wsbrd-inproc / every wsnode-inproc
+#   POWER=<profile>    record power (docs/POWER_MODEL.md): every node with this
+#                      profile (e.g. examples/power/efr32fg25-soc.ini); the
+#                      report is <outdir>/power.json. Off by default.
+#   POWER_LOG=1        with POWER, also log every state interval
+#                      (<outdir>/power_log.txt; large)
+#   POWER_CELL=<mAh[:V[:eff]]> with POWER, battery life for this cell
+#   POWER_OPTS         more wssimserver options (e.g. --power-node=3:<profile>)
 #
 # Output in <outdir>: simserver.log, br.log, node<i>.log (each line starts with
 # NSIM_EPOCH_S + virtual time, written by the simulation port), t0
@@ -37,6 +44,9 @@
 # it kills only the processes it started.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3; DUR=$4
+if [ -n "${POWER:-}" ]; then
+	POWER=$(realpath "$POWER") && [ -f "$POWER" ] || { echo "run.sh: no power profile ${POWER:-}" >&2; exit 1; }
+fi
 NSIM_EPOCH_S=1700000000
 DAG_SIMPLE="0,1:-34.0 0,2:-36.0 0,3:-71.0 2,4:-21.0 2,5:-45.0 4,6:-2.0 0,7:-80.0 1,7:-39.0 4,7:-67.0 0,8:-16.0 3,8:-41.0 5,8:-80.0 7,8:-12.0 3,9:-56.0 4,9:-20.0 7,9:-33.0 8,9:-21.0 7,10:-29.0 8,11:-22.0 9,12:-30.0 9,13:-74.0 10,14:-59.0"
 
@@ -119,7 +129,15 @@ start() {   # start <log name> <program and args...>
 	PIDS+=($!); NAME[$!]=$log; ACTIVE[$!]=1
 }
 
-start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1)) --vtime-end="$DUR" --dump "$SOCK"
+PWR=()
+if [ -n "${POWER:-}" ]; then
+	PWR=(--power="$POWER" --power-out="$OUT/power.json")
+	[ "${POWER_LOG:-0}" = 1 ] && PWR+=(--power-log="$OUT/power_log.txt")
+	[ -n "${POWER_CELL:-}" ] && PWR+=(--power-cell="$POWER_CELL")
+	PWR+=(${POWER_OPTS:-})
+	echo "power=$POWER log=${POWER_LOG:-0} cell=${POWER_CELL:-}" >> "$OUT/run_info.txt"
+fi
+start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1)) --vtime-end="$DUR" "${PWR[@]}" --dump "$SOCK"
 SIM_PID=$!
 for (( i = 0; i < 200; i++ )); do
 	[ -S "$SOCK" ] && break

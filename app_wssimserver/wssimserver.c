@@ -18,6 +18,7 @@
 
 #include "sim_proto.h"
 #include "ns_port_sim.h"
+#include "sim_power.h"
 
 #define MAX_NODES SIM_MAX_NODES
 
@@ -292,12 +293,23 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  -f, --fpath[=FILE]        with -l, also write the edges to FILE (/tmp/graph.txt)\n");
     fprintf(stream, "  --vtime=N                 virtual time: conduct N nodes (docs/VIRTUAL_TIME.md)\n");
     fprintf(stream, "  --vtime-end=SECONDS       virtual time: end the run at this time\n");
+    fprintf(stream, "  --power=PROFILE           virtual time: record power, every node with this profile\n");
+    fprintf(stream, "                            (docs/POWER_MODEL.md)\n");
+    fprintf(stream, "  --power-node=IDS:PROFILE  another profile for these nodes (3, 2-5, 1,4); repeatable\n");
+    fprintf(stream, "  --power-out=FILE          the power report (default power.json)\n");
+    fprintf(stream, "  --power-log=FILE          also log every state interval of every node\n");
+    fprintf(stream, "  --power-cell=MAH[:V[:EFF]] battery life for this cell (capacity, voltage, converter efficiency)\n");
     exit(exit_code);
 }
 
 enum {
     OPT_VTIME = 256,
     OPT_VTIME_END,
+    OPT_POWER,
+    OPT_POWER_NODE,
+    OPT_POWER_OUT,
+    OPT_POWER_LOG,
+    OPT_POWER_CELL,
 };
 
 void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
@@ -310,6 +322,11 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "help",  no_argument,       0,  'h' },
         { "vtime", required_argument, 0, OPT_VTIME },
         { "vtime-end", required_argument, 0, OPT_VTIME_END },
+        { "power", required_argument, 0, OPT_POWER },
+        { "power-node", required_argument, 0, OPT_POWER_NODE },
+        { "power-out", required_argument, 0, OPT_POWER_OUT },
+        { "power-log", required_argument, 0, OPT_POWER_LOG },
+        { "power-cell", required_argument, 0, OPT_POWER_CELL },
         { 0,       0,                 0,   0  }
     };
     uint64_t mask[MAX_NODES / 64];
@@ -355,6 +372,21 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
                 ctxt->vtime_end_us = (uint64_t)(d * 1e6 + 0.5);
                 ctxt->has_vtime_end = true;
                 break;
+            case OPT_POWER:
+                pwr_set_profile(optarg);
+                break;
+            case OPT_POWER_NODE:
+                pwr_add_node_profile(optarg);
+                break;
+            case OPT_POWER_OUT:
+                pwr_set_out(optarg);
+                break;
+            case OPT_POWER_LOG:
+                pwr_set_log(optarg);
+                break;
+            case OPT_POWER_CELL:
+                pwr_set_cell(optarg);
+                break;
             case 'h':
                 print_help(stdout, 0);
                 break;
@@ -366,6 +398,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         }
     }
     FATAL_ON(ctxt->has_vtime_end && !ctxt->vtime_nodes, 1, "--vtime-end needs --vtime");
+    FATAL_ON(pwr_enabled() && !ctxt->vtime_nodes, 1, "--power needs --vtime");
     FATAL_ON(ctxt->dump && !ctxt->num_groups, 1, "No graph to dump");
     if (optind >= argc)
         FATAL(1, "Expected argument: socket path");
@@ -749,11 +782,17 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
                 WARN("node %d: bad idle message (%zd bytes): run aborted", node, len);
                 return -1;
             }
+            if (pwr_enabled())
+                pwr_idle(node, vt_now, idle->next_us);
             vt_set_deadline(node, idle->next_us);
             return 0;
         }
         if (len >= 2 && !memcmp(buf, "xx", 2))
             vt_queue_frame(ctxt, node, buf, len);
+        else if (pwr_enabled() && len == sizeof(struct sim_radio_report) && !memcmp(buf, "xr", 2))
+            pwr_radio(node, vt_now, (const struct sim_radio_report *)buf);
+        else if (pwr_enabled() && len == sizeof(struct nsim_wake) && !memcmp(buf, "xc", 2))
+            pwr_wake_report(node, (const struct nsim_wake *)buf);
         else
             WARN("node %d: unexpected message (%zd bytes, \"%.2s\"), dropped", node, len, buf);
     }
@@ -790,6 +829,8 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
     adv.frames = num;
     vt_now = t;
     vt_wakes++;
+    if (pwr_enabled())
+        pwr_wake(node, t, num);
     if (vt_send(node, &adv, sizeof(adv)))
         ret = -1;
     for (i = 0; i < num; i++) {
@@ -883,12 +924,18 @@ static int vt_run(struct ctxt *ctxt)
             vt_nodes[vt_num_nodes++] = node;
     INFO("virtual time: %d nodes, seed %llu%s", vt_num_nodes, (unsigned long long)welcome.seed,
          ctxt->has_vtime_end ? "" : ", no end time");
+    if (pwr_enabled()) {
+        welcome.flags |= NSIM_WELCOME_POWER;
+        pwr_start(vt_num_nodes, vt_nodes);
+    }
 
     clock_gettime(CLOCK_MONOTONIC, &start);
     // Welcome the nodes one at a time, in ID order, and read each one's first
     // run at time 0 until its "xi": no two nodes ever run at once.
     for (i = 0; i < vt_num_nodes; i++) {
         node = vt_nodes[i];
+        if (pwr_enabled())
+            pwr_wake(node, 0, 0);
         if (vt_send(node, &welcome, sizeof(welcome)) || vt_read_until_idle(ctxt, node)) {
             status = stop ? 0 : 1;
             reason = stop ? "interrupted" : "a node failed";
@@ -941,6 +988,11 @@ out:
          (unsigned long long)vt_frames_out);
     INFO("virtual time: wall %.3f s, %.6f wall s per simulated s", wall,
          vt_now ? wall / (vt_now / 1e6) : 0.0);
+    // A run that reached its end time lasted until then; any other, until
+    // its last wake.
+    if (pwr_enabled())
+        pwr_finish(!strcmp(reason, "end time reached") || !strcmp(reason, "no more events")
+                   ? (ctxt->has_vtime_end ? ctxt->vtime_end_us : vt_now) : vt_now, welcome.seed);
     return status;
 }
 

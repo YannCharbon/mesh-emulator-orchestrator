@@ -11,6 +11,7 @@ Scripts for the step-1 gate of `docs/VIRTUAL_TIME.md` (§7). They need a virtual
 | `tun_setup.sh` | Creates `tunvt0`… (run once per boot with sudo): one TUN per border router running at the same time, all with the same fixed link-local address |
 | `campaign.sh` | Several runs at once, one per `tunvt` device: `campaign.sh <bindir> <workdir> <outdir> <seconds> <seed>...` (`JOBS` limits how many at a time) |
 | `speed.sh` | Wall time per simulated second and peak RSS at several sizes (§7.4) |
+| `test_power.py` | Test of the power ledger (`docs/POWER_MODEL.md`): one scripted node, totals checked against hand-computed ones: `test_power.py build-vt/wssimserver` |
 
 Analysis: `sim_utils/migration/analyze.py` reads these runs as it reads the wall-clock ones (`brtree` lines of `br.log` instead of `dbus_nodes.txt`).
 
@@ -27,6 +28,8 @@ python3 sim_utils/vtime/gen_topology.py 500 --seed 2 -o topo500.txt   # then TOP
 ```
 
 ## run.sh
+
+Power recording (EM2, `docs/POWER_MODEL.md`): `POWER=examples/power/efr32fg25-soc.ini` adds `power.json` to the run (`POWER_LOG=1`: also `power_log.txt`, every state interval; `POWER_CELL=mAh[:V[:eff]]`: battery life). `campaign.sh` passes these through; `sim_utils/power_summary.py runs/...` summarises the runs.
 
 Output: one log per program (`simserver.log`, `br.log`, `node<i>.log`), with no timestamping wrapper: the simulation port starts every line with `NSIM_EPOCH_S` + virtual time, and `t0` holds `NSIM_EPOCH_S` (1700000000). Also `topology.txt`, `run_info.txt` (seed, socket, wall-clock start and end), `exit_codes.txt`, `log_wsbr` and `storage/`.
 

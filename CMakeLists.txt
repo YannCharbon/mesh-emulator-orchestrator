@@ -314,12 +314,15 @@ if(COMPILE_SIMULATION_TOOLS)
     # compiled here, without the port's HAVE_BACKTRACE, as it was before.
     add_executable(wssimserver
         ${NANOSTACK_ROOT}/port/posix/common/log.c
+        app_wssimserver/sim_power.c
         app_wssimserver/wssimserver.c)
     target_include_directories(wssimserver PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${NANOSTACK_ROOT}/include/
         ${NANOSTACK_ROOT}/port/posix/
         ${NANOSTACK_ROOT}/port/sim/
     )
+    target_link_libraries(wssimserver PRIVATE m)
     install(TARGETS wssimserver RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 endif()
