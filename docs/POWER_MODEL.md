@@ -75,7 +75,7 @@ All of them come from the real stack's behaviour, not from a script.
 - **Airtime** (§12.5): TX lasts the frame's bytes on air at the data rate, `rf_airtime_us()`: SHR (preamble + SFD) + PHR + the PSDU the MAC gives + FCS. The rate is the one the MAC sets with `PHY_EXTENSION_SET_RF_CONFIGURATION` (from the PHY mode: 1a/1b 50 kbit/s, 3 150 kbit/s...), 150 kbit/s only before that; `PHY_EXTENSION_GET_SYMBOLS_PER_SECOND` returns it, so the MAC's own timings (ACK wait) follow, and the RX/TX backup timer (`MAX_PACKET_SENDING_TIME`) is recomputed. Each frame's header (`sim_frame_hdr`) carries the sender's SHR and FCS lengths (on air, the FCS length is the PHR's FCS type bit); a receiver stays in `receive` for that SHR, its own PHR, the PSDU and that FCS, at its own rate, and its loss draw covers the PHR, PSDU and FCS bits. The settings are §6.1's `WSSIM_PHY_*`. EM4 will give exact airtimes at the medium later.
 - **Off** (GS8 stage 1, LFN study E1–E2): `PHY_INTERFACE_DOWN` turns the radio off. A frame being received is lost; a CSMA backoff is cancelled; a frame being sent finishes first. While off, a channel change only records the channel (it does not turn RX on), the CCA shared memory and D-Bus show state 7 (`DRVSTATE_OFF`, added last so that the other values do not change), and frames that arrive are lost before the loss draw ("rf rx lost: radio off" in the node's log; they count as unseen frames, §5.3). `PHY_INTERFACE_UP` turns RX on again.
   - Who turns it off: the MAC, when RX-off-when-idle is set (`ws_management_rx_on_when_idle_set()`, or `rx_on_when_idle = false` / `rx_off_when_idle_after = <s>` in `wsnode.conf`): it is off whenever the MAC is idle, and on for a transmission, its CCA and the ACK wait. An FFN keeps RX on: its MAC calls `DOWN` only for an instant when it starts (`DOWN` then `UP`), which now costs a frame that was being received at that instant, as on the hardware.
-  - `WSSIM_RADIO_OFF=0` in the environment of the nodes keeps the old behaviour (`DOWN` leaves RX on), to compare with runs made before GS8 stage 1: with it and `NANOSTACK_EVENTLOOP_TICKLESS=OFF`, `dag_simple` logs are identical to before for seeds 1–10.
+  - `WSSIM_RADIO_OFF=0` in the environment of the nodes keeps the old behaviour (`DOWN` leaves RX on), to compare with runs made before GS8 stage 1: with it and `NANOSTACK_EVENTLOOP_SKIP_IDLE_TICKS=OFF`, `dag_simple` logs are identical to before for seeds 1–10.
 
 ### 3.2 MCU: the run loop's idle intervals
 
@@ -87,11 +87,11 @@ In virtual time the node's run loop (`NGS/port/sim/sim_scheduler.c`) runs until 
 
 The ledger reads this in the conductor, so it works for any program that speaks the conductor protocol: EM7's clients get the same accounting by sending "xi" (and, if they can, "xc" and "xr"). On the firmware, the same intervals are the FreeRTOS idle task's sleeps (HW5).
 
-### 3.3 Radio off and tickless loop: checks (GS8 stage 1, 2026-10-28)
+### 3.3 Radio off and idle-tick skipping: checks (GS8 stage 1, 2026-10-28)
 
 `dag_simple`, 300 virtual seconds, seeds 1–10, `SETARCH=1`, the datasheet FG25 profile (`efr32fg25-soc-datasheet.ini`; wakes do not depend on the profile):
 
-| | Before (periodic tick) | Tickless |
+| | Before (periodic tick) | Idle-tick skipping |
 | --- | --- | --- |
 | Router wakes/s over the run (min / median / max) | 103.5 / 115.7 / 122.6 | 40.9 / 61.9 / 104.3 |
 | Router wakes/s once joined (200–300 s, seed 1) | 110–121 | 36–42 (node 14, joined at 290 s: 88) |
@@ -151,7 +151,7 @@ charge      = active time × active_ma + wake_charge_uc     (per wake)
 Per node the report counts:
 
 - **wakes**, and per cause the wakes in which it appeared (`wakes_with`) and its callbacks (`timer_callbacks`);
-- **empty ticks:** wakes where only the 10 ms tick fired and no event was dispatched and no frame came. This is what a tickless event loop removes (idle-sleep study §3). With the stack's tickless event loop (`NANOSTACK_EVENTLOOP_TICKLESS`, default ON since GS8 stage 1) the tick fires only when an event timer is due, so empty ticks are about 0; build with it `OFF` to see the periodic tick's;
+- **empty ticks:** wakes where only the 10 ms tick fired and no event was dispatched and no frame came. This is what idle-tick skipping in the event loop removes (idle-sleep study §3). With idle-tick skipping in the stack's event loop (`NANOSTACK_EVENTLOOP_SKIP_IDLE_TICKS`, default ON since GS8 stage 1) the tick fires only when an event timer is due, so empty ticks are about 0; build with it `OFF` to see the periodic tick's;
 - **unseen frame wakes:** wakes with only frames that the radio did not take (another channel, lost to the link, or the radio busy). The emulator delivers every frame to every neighbour; a board's radio would not have interrupted the CPU. They are not counted as wakes and cost nothing (`frames_unseen` keeps the count).
 
 ## 6. Profile format
@@ -244,7 +244,7 @@ Recording does not change what the nodes do: the messages go to the conductor, w
 
 | Item | Needs | Then |
 | --- | --- | --- |
-| Radio off, deep sleep in real runs | GS8 stage 1 (done: the driver's off state, the MAC's RX-off-when-idle, the tickless event loop); stage 2: timed RX windows | Done: a node with RX off when idle sleeps deep (§3.1, §5.3); empty ticks are gone. Left: timed RX windows (an LFN listening) |
+| Radio off, deep sleep in real runs | GS8 stage 1 (done: the driver's off state, the MAC's RX-off-when-idle, idle-tick skipping in the event loop); stage 2: timed RX windows | Done: a node with RX off when idle sleeps deep (§3.1, §5.3); empty ticks are gone. Left: timed RX windows (an LFN listening) |
 | First real deep-sleep figures | GS8 stages 2–4: an LFN | Check against the AEM on the kits |
 | MCU + RCP and module profiles | EM3 step 2 (split programs in virtual time) | The link machine; Spinel messages charged to both chips |
 | Drift | EM3 step 5 | Separate wakes of the timer series; LFN window widening |
@@ -279,7 +279,7 @@ Runs below: `wssimserver` with this change; `wsbrd-inproc` and `wsnode-inproc` f
 
 Unchanged, **still not measured**: EM0 and EM1 on their own (HW5 measured EM1 + RX), EM2 and every MCU transition (the FFN firmware never goes below EM1: HW8), the radio's idle and off currents, every radio transition, TX at levels other than +10 dBm, the CCA alone (HW5 bounds CCA + PA ramp + RAIL's wait at ≤ 0.25 ms per frame: TX-state time minus airtime; `cca_us` stays 128).
 
-Why a new key rather than more cycles: the measured cost per wake is 3.5–6 times what the cycle counter and the datasheet's EM0 − EM1 give. Raising `active_ma` to about 8.6 mA would reproduce the charge but make the EM0 current and the active time inconsistent with the datasheet and with the measured EM0 time (2.5 %); adding cycles would stretch the active time. A charge per wake keeps both right and is what a tickless loop removes, wake by wake.
+Why a new key rather than more cycles: the measured cost per wake is 3.5–6 times what the cycle counter and the datasheet's EM0 − EM1 give. Raising `active_ma` to about 8.6 mA would reproduce the charge but make the EM0 current and the active time inconsistent with the datasheet and with the measured EM0 time (2.5 %); adding cycles would stretch the active time. A charge per wake keeps both right and is what idle-tick skipping removes, wake by wake.
 
 The fit of HW5 (AEM = 8.15 mA + 29.7 mA × TX fraction) also holds TX's CPU work: about 0.8 µC per frame in this profile's `tx_frame`, against 680 µC of TX current per frame: 0.1 %, ignored.
 
