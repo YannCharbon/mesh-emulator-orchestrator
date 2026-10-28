@@ -303,6 +303,36 @@ if(COMPILE_SIMULATION_TOOLS)
             target_link_libraries(${variant} PRIVATE ${CMAKE_DL_LIBS})
         endif()
     endforeach()
+    # Two-node check of the FAN 1.1 LFN unicast mechanics in the MAC and FHSS
+    # (GS8 stage 2): the MAC in-process on the emulated radio, no upper layers
+    # (app_lfntest/lfn_mac_test.c, sim_utils/vtime/test_lfn_mac.sh).
+    add_executable(wslfntest-inproc
+        app_lfntest/lfn_mac_test.c
+        # The PHY driver registry the in-process MAC library leaves to the
+        # upper stack, which this program does not link
+        ${NANOSTACK_ROOT}/rcp/mac/rf_driver_storage.c
+        app_wshwsim/sl_rf_driver.c
+        app_wshwsim/sl_rf_inproc.c
+        app_wshwsim/ringbufindex.c
+    )
+    target_include_directories(wslfntest-inproc PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        app_wshwsim/
+        app_wssimserver/
+    )
+    target_compile_definitions(wslfntest-inproc PRIVATE MAC_INPROCESS)
+    target_link_libraries(wslfntest-inproc PRIVATE nanostack_rcp_inproc m util Threads::Threads
+                          MbedTLS::mbedtls MbedTLS::mbedcrypto MbedTLS::mbedx509)
+    target_link_options(wslfntest-inproc PRIVATE
+        -Wl,--wrap=ns_fhss_ws_update_neighbor,--wrap=ns_fhss_ws_drop_neighbor)
+    if(LIBSYSTEMD_FOUND)
+        target_link_libraries(wslfntest-inproc PRIVATE PkgConfig::LIBSYSTEMD)
+    endif()
+    if(LIBDL_FOUND)
+        target_compile_definitions(wslfntest-inproc PRIVATE HAVE_LIBDL)
+        target_link_libraries(wslfntest-inproc PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+
     target_compile_definitions(wsbrd-inproc PRIVATE EXTRA_DEBUG_INFO)
     if(LIBSYSTEMD_FOUND)
         target_compile_definitions(wsbrd-inproc PRIVATE HAVE_LIBSYSTEMD)

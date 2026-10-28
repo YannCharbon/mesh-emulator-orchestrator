@@ -1405,6 +1405,12 @@ static int8_t phy_rf_extension(phy_extension_type_e extension_type, uint8_t *dat
                 *(uint32_t *)data_ptr = rf_get_timestamp();
                 break;
             }
+            case PHY_EXTENSION_READ_RX_ACTIVE: {
+                // A frame is on its way in (its airtime runs): an LFN's
+                // receive window closes only after it (GS8 stage 2)
+                *data_ptr = driver_state == DRVSTATE_RX;
+                break;
+            }
             default:
                 WARN("RF extention not implemented: %02x", extension_type);
                 break;

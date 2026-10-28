@@ -75,6 +75,7 @@ All of them come from the real stack's behaviour, not from a script.
 - **Airtime** (§12.5): TX lasts the frame's bytes on air at the data rate, `rf_airtime_us()`: SHR (preamble + SFD) + PHR + the PSDU the MAC gives + FCS. The rate is the one the MAC sets with `PHY_EXTENSION_SET_RF_CONFIGURATION` (from the PHY mode: 1a/1b 50 kbit/s, 3 150 kbit/s...), 150 kbit/s only before that; `PHY_EXTENSION_GET_SYMBOLS_PER_SECOND` returns it, so the MAC's own timings (ACK wait) follow, and the RX/TX backup timer (`MAX_PACKET_SENDING_TIME`) is recomputed. Each frame's header (`sim_frame_hdr`) carries the sender's SHR and FCS lengths (on air, the FCS length is the PHR's FCS type bit); a receiver stays in `receive` for that SHR, its own PHR, the PSDU and that FCS, at its own rate, and its loss draw covers the PHR, PSDU and FCS bits. The settings are §6.1's `WSSIM_PHY_*`. EM4 will give exact airtimes at the medium later.
 - **Off** (GS8 stage 1, LFN study E1–E2): `PHY_INTERFACE_DOWN` turns the radio off. A frame being received is lost; a CSMA backoff is cancelled; a frame being sent finishes first. While off, a channel change only records the channel (it does not turn RX on), the CCA shared memory and D-Bus show state 7 (`DRVSTATE_OFF`, added last so that the other values do not change), and frames that arrive are lost before the loss draw ("rf rx lost: radio off" in the node's log; they count as unseen frames, §5.3). `PHY_INTERFACE_UP` turns RX on again.
   - Who turns it off: the MAC, when RX-off-when-idle is set (`ws_management_rx_on_when_idle_set()`, or `rx_on_when_idle = false` / `rx_off_when_idle_after = <s>` in `wsnode.conf`): it is off whenever the MAC is idle, and on for a transmission, its CCA and the ACK wait. An FFN keeps RX on: its MAC calls `DOWN` only for an instant when it starts (`DOWN` then `UP`), which now costs a frame that was being received at that instant, as on the hardware.
+  - LFN receive windows (GS8 stage 2, §13): the MAC turns the radio on (`UP`) at a window's start and off (`DOWN`) at its end, but not while a frame is being received: it asks `PHY_EXTENSION_READ_RX_ACTIVE`, which the driver answers with 1 in `DRVSTATE_RX`.
   - `WSSIM_RADIO_OFF=0` in the environment of the nodes keeps the old behaviour (`DOWN` leaves RX on), to compare with runs made before GS8 stage 1: with it and `NANOSTACK_EVENTLOOP_SKIP_IDLE_TICKS=OFF`, `dag_simple` logs are identical to before for seeds 1–10.
 
 ### 3.2 MCU: the run loop's idle intervals
@@ -244,7 +245,7 @@ Recording does not change what the nodes do: the messages go to the conductor, w
 
 | Item | Needs | Then |
 | --- | --- | --- |
-| Radio off, deep sleep in real runs | GS8 stage 1 (done: the driver's off state, the MAC's RX-off-when-idle, idle-tick skipping in the event loop); stage 2: timed RX windows | Done: a node with RX off when idle sleeps deep (§3.1, §5.3); empty ticks are gone. Left: timed RX windows (an LFN listening) |
+| Radio off, deep sleep in real runs | GS8 stage 1 (done: the driver's off state, the MAC's RX-off-when-idle, idle-tick skipping in the event loop); stage 2: timed RX windows | Done: a node with RX off when idle sleeps deep (§3.1, §5.3); empty ticks are gone; timed RX windows in the MAC and FHSS, checked with two MAC-only nodes (§13). Left: an LFN running the protocol (stage 3) |
 | First real deep-sleep figures | GS8 stages 2–4: an LFN | Check against the AEM on the kits |
 | MCU + RCP and module profiles | EM3 step 2 (split programs in virtual time) | The link machine; Spinel messages charged to both chips |
 | Drift | EM3 step 5 | Separate wakes of the timer series; LFN window widening |
@@ -381,3 +382,23 @@ The emulated TX state is the airtime (the CCA is charged apart), so the board's 
 - **`dag_simple` at the board's PHY**: as §12.3 predicted from the frame logs (routers 5.9 %, BR 10.7 %). Joining is slower than with mode 3 at 150 kbit/s over 35 channels, as expected with 69 channels at a third of the rate: 121 of 140 nodes ready within 300 s (11–14 per run), median 162.0 s against 146.4 s; every parent a neighbour. Over the first 300 s the border router transmits 15.3 % of the time.
 
 Reproduce: `CONF=eu1a POWER=examples/power/efr32fg25-soc.ini TOPO=<0,1:-14.0 file> sim_utils/vtime/campaign.sh build-vt $(pwd) runs/eu1a_170 170 $(seq 1 10)`, the same with 470, then the difference of the two `power.json` per seed.
+
+## 13. LFN timed receive windows (GS8 stage 2, 2026-10-28)
+
+The stack's MAC and FHSS now have the FAN 1.1 LFN unicast mechanics (the stack's `docs/LFN_MAC.md`): an LFN's receive windows around the slots of its listen schedule, radio off otherwise except to transmit; its parent holding frames for the LFN's next window. The emulated radio adds `PHY_EXTENSION_READ_RX_ACTIVE` (§3.1). There is no LFN protocol yet (stage 3), so the check uses `wslfntest-inproc`, two nodes whose MACs run in-process on the emulated radio without the upper layers: node 0 is the parent (FFN, 35-channel DH1CF hopping, 1020/255 ms broadcast schedule), node 1 the LFN; the program solicits, learns the schedules from LUTT/LUS and UTT, then sends a 40-byte payload every 3–4 s to the LFN and every 10 s to the parent. `sim_utils/vtime/test_lfn_mac.sh` runs it and checks the logs and the power ledger.
+
+Results with the calibrated FG25 profile (`efr32fg25-soc.ini`), LFN window 5 ms, guard 1 ms, all checks passed:
+
+| Run | LFN listen interval | Duration | Downlink delay, mean | LFN radio off | LFN MCU deep sleep | LFN average |
+| --- | --- | --- | --- | --- | --- | --- |
+| Seeds 1–6, −50 dBm | 1 s | 300 s | 0.47–0.55 s | 98.85–98.87 % | 98.8 % | 122.6–124.5 µA |
+| Seeds 1–2, −100 dBm (losses: 6 and 1 downlink frames retried in the next window) | 1 s | 300 s | 0.50–0.53 s | 98.84–98.85 % | 98.8 % | 124.3–124.7 µA |
+| No broadcast schedule at the parent, window 3 ms, guard 0.5 ms, downlink every 10–15 s | 5 s | 900 s | 2.59 s | 99.65 % | 99.6 % | 48.7 µA |
+| Downlink every 120–180 s, uplink every 30 s | 60 s | 3600 s | 28.2 s | 99.56 % | 99.6 % | 60.0 µA |
+
+- In every run, every frame the LFN received started inside one of its windows, the parent sent each one on the LFN's channel for that slot, and the LFN's radio was on only in its windows (or until the end of a frame and its ACK) and around its own transmissions.
+- **What the LFN's charge is made of** (1 s interval, seed 1, 36.5 mC in 300 s): radio listening 14.6 mC (2.4 s: windows, the CSMA before its own frames, the ACK waits), TX 9.9 mC (0.56 s), receiving 2.7 mC, MCU in EM1 while the radio is on 6.8 mC, deep sleep 1.4 mC (the profile's 4.6 µA), MCU active 1.0 mC. 4.8 wakes/s, no empty tick.
+- **These are not LFN figures yet.** The traffic, the discovery and the timings are the test program's, not the protocol's. With a 60 s interval, the first minute (a solicit on all 35 channels every 2 s until the parent answers in the LFN's first window) has 10.1 s of the 15.8 s of radio-on time; the rest is the windows, the uplinks every 30 s and the downlinks. First real LFN figures: stage 3.
+- **Found:** the emulated radio listens during a CSMA backoff, so each MAC retry of the LFN (retry period 20–45 ms plus the backoff) is listening time; uplinks sent while the parent is on its broadcast channel fail until a restart (the LFN does not follow its parent's broadcast schedule yet, stage 4).
+
+Reproduce: `sim_utils/vtime/test_lfn_mac.sh build-vt $(pwd) runs/lfn_mac` (`WSSIM_SEED`, `RSSI`, `DUR`, `LFN_OPTS`, `PARENT_OPTS`; e.g. `LFN_OPTS="--listen-interval-ms=60000 --lfn-tx-period-ms=30000" PARENT_OPTS="--parent-tx-period-ms=120000 --parent-tx-jitter-ms=60000" DUR=3600`).
