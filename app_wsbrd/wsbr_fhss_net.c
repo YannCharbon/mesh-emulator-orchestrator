@@ -200,6 +200,37 @@ void ns_fhss_ws_lfn_listen_defaults(fhss_ws_lfn_listen_t *cfg)
     cfg->close_retry_us = FHSS_LFN_CLOSE_RETRY_US_DEFAULT;
     cfg->first_slot_delay_us = FHSS_LFN_FIRST_SLOT_DELAY_US_DEFAULT;
     cfg->uplink_guard_us = FHSS_LFN_UPLINK_GUARD_US_DEFAULT;
+    cfg->drift_ppm = FHSS_LFN_DRIFT_PPM_DEFAULT;
+    cfg->widening_max_us = FHSS_LFN_WIDENING_MAX_US_DEFAULT;
+    cfg->bc_rx_window_us = FHSS_LFN_BC_RX_WINDOW_US_DEFAULT;
+    cfg->bc_sync_only = false;
+}
+
+int ns_fhss_ws_lfn_bc_set(const fhss_api_t *fhss_api, const fhss_ws_lfn_bc_t *cfg)
+{
+    (void)fhss_api;
+    return cfg ? -1 : 0;
+}
+
+int ns_fhss_ws_lfn_bc_next(const fhss_api_t *fhss_api, uint16_t *slot, uint32_t *start_us)
+{
+    (void)fhss_api;
+    (void)slot;
+    (void)start_us;
+    return -1;
+}
+
+int ns_fhss_ws_lfn_bc_sync(const fhss_api_t *fhss_api, const fhss_ws_lfn_bc_sync_t *sync)
+{
+    (void)fhss_api;
+    (void)sync;
+    return -1;
+}
+
+int ns_fhss_ws_lfn_bc_stop(const fhss_api_t *fhss_api)
+{
+    (void)fhss_api;
+    return 0;
 }
 
 void ns_fhss_ws_lfn_parent_defaults(fhss_ws_lfn_parent_t *cfg)

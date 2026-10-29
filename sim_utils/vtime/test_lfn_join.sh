@@ -13,7 +13,9 @@
 #   - unicast both ways: the requests and their echoes arrived;
 #   - multicast: the ff02::1 requests reached the LFN, each as a MAC-unicast
 #     copy from the border router;
-#   - every frame the LFN received started inside one of its listen windows;
+#   - every frame the LFN received started inside one of its listen windows
+#     (unicast or LFN broadcast, with their logged length: widening for
+#     drift included, GS8 stage 4);
 #   - the LFN kept its parent (no parent loss, no second discovery);
 #   - LGTK (docs/LFN_STACK.md §8): the LFN joined with an LGTK (4-way
 #     handshake with its NR KDE, LPCS under key index 5-7); for every LGTK
@@ -33,7 +35,8 @@
 # BR_PERIOD (37), LFN_PERIOD (53; both 0: no test traffic, idle LFN), STEADY_FROM (300), JOIN_MAX (120),
 # TX_POWER (10 dBm, both nodes), LGTK_ROTATE_AT (s, 0: none; the border
 # router's lgtk_rotate_at_s, ws_management_lfn_lgtk_rotate()),
-# LFN_EXTRA, BR_EXTRA (more "-o key=value" options), SILENT_AT and
+# LFN_EXTRA, BR_EXTRA (more "-o key=value" options), SIM_OPTS (more
+# wssimserver options, e.g. --drift-random=20 for clock drift), SILENT_AT and
 # SILENT_FOR (s: the parent stops answering the LFN then, for that long; the
 # test then checks the parent-loss rule and the rejoin instead).
 # Exit status 0 if every check passes.
@@ -99,8 +102,9 @@ for t, m in lines('node1.log'):
         lfn['auth'].append(t)
     elif re.search(r'parent .* lost', m):
         lfn['lost'].append(t)
-    elif 'LFN window open' in m:
-        lfn['win'].append(t)
+    elif 'window open: slot' in m:
+        # unicast and broadcast windows, with their length (widened for drift)
+        lfn['win'].append((t, int(re.search(r'for (\d+) us', m).group(1)) / 1e6))
     elif 'LFN listen schedule:' in m:
         lfn['window_us'] = int(re.search(r'window (\d+) us', m).group(1))
     elif m.startswith('Transmitting ...'):
@@ -155,7 +159,7 @@ if silent_at <= 0:
     check(len(lfn['disc']) == 1 and not lfn['lost'], f"LFN kept its parent ({len(lfn['disc'])} discovery, {len(lfn['lost'])} parent losses)")
 else:
     # The parent went silent: lost 1.5 x maintain_parent_time (5) x sync
-    # period (50 s) = 375 s after the last LPC, then a rejoin without EAPOL
+    # period (50 s) = 375 s after the last sync frame, then a rejoin without EAPOL
     loss = lfn['lost'][0] if lfn['lost'] else None
     heard = [t for t in lfn.get('heard', []) if loss and t < loss]
     check(loss is not None and heard and abs(loss - heard[-1] - 375) < 1.5,
@@ -179,11 +183,11 @@ if traffic:
   check(q and len(got) == len(q) and len(back) == len(q), f'LFN -> BR unicast: {len(q)} requests, {len(got)} received, {len(back)} echoes back')
   q, got, back = pairs(br['udp_tx'], lfn['udp_rx'], br['udp_rx'], mc=True)
   check(q and len(got) == len(q) and br['copies'] >= len(q), f'BR -> ff02::1: {len(q)} requests, {len(got)} received by the LFN, {br["copies"]} MAC-unicast copies')
-W = lfn['window_us'] / 1e6
 win = sorted(lfn['win'])
+win_t = [w[0] for w in win]
 def in_window(t):
-    i = bisect.bisect_right(win, t + 1e-6) - 1
-    return i >= 0 and win[i] - 1e-6 <= t < win[i] + W
+    i = bisect.bisect_right(win_t, t + 1e-6) - 1
+    return i >= 0 and win[i][0] - 1e-6 <= t < win[i][0] + win[i][1]
 # An ACK to the LFN's own frame comes right after it (within 60 ms of its start)
 txs = sorted(lfn.get('tx', []))
 def after_own_tx(t):

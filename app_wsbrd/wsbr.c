@@ -237,14 +237,16 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
     }
 }
 
+// Test hooks (GS8 stage 3): in every build
+#define WSBR_LFN_SILENT_EVENT (APPLICATION_EVENT + 0x41)
+#define WSBR_LFN_SILENT_END_EVENT (APPLICATION_EVENT + 0x42)
+#define WSBR_LGTK_ROTATE_EVENT (APPLICATION_EVENT + 0x43)
+
 #ifdef NS_PORT_SIM
 // Batch mode (virtual time): nobody reads D-Bus, so the border router logs
 // the table of D-Bus "Nodes" every 30 s of virtual time, one line per node.
 // sim_utils/migration/analyze.py reads these lines.
 #define WSBR_NODE_TABLE_EVENT (APPLICATION_EVENT + 0x40)
-#define WSBR_LFN_SILENT_EVENT (APPLICATION_EVENT + 0x41)
-#define WSBR_LFN_SILENT_END_EVENT (APPLICATION_EVENT + 0x42)
-#define WSBR_LGTK_ROTATE_EVENT (APPLICATION_EVENT + 0x43)
 #define WSBR_NODE_TABLE_PERIOD_MS 30000
 
 static void wsbr_node_table_log(struct wsbr_ctxt *ctxt)

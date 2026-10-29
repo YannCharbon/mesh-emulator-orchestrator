@@ -540,3 +540,19 @@ Same conditions as §14–15:
 The LGTK work adds no periodic wake to an idle LFN: the hash is checked on the LPCs it already receives, and the key-request timer runs only after a mismatch. A rotation costs the LFN one LPC at each of the three LGTK events (installed, activated, expired), one key request and a group-key handshake. The changes in the averages come from the random draws of the border router, which moved (it now draws LGTKs): the highest traffic run, seed 1, had 28 uplink retries instead of 15, during the border router's PAN configuration sweeps.
 
 Reproduce: `test_lfn_join.sh` as in §14 (`BR_PERIOD=0 LFN_PERIOD=0 DUR=3600` idle; `LGTK_ROTATE_AT=600 DUR=1800` with a rotation).
+
+## 17. LFN broadcast schedule, time sync and clock drift (GS8 stage 4, 2026-10-29)
+
+The border router now runs an LFN broadcast schedule (10 s slots, a sync frame every 5th slot while it has an LFN child), and the LFN listens in those slots, syncs from them and widens its windows by 50 µs per second since the last sync (each side). Each node's clock may drift (`wssimserver --drift`, `--drift-random`; [VIRTUAL_TIME.md](VIRTUAL_TIME.md) §4.1). Design: the stack's `docs/LFN_MAC.md` §2.2–2.3 and `docs/LFN_STACK.md`.
+
+Same conditions as §14 (FG25 profile, mode 3 values, +10 dBm, −50 dBm link, listen interval 5 s after LTO, averaged from 300 s), with each node's clock drawn in ±20 ppm:
+
+| Case | Runs | LFN current | Wakes/s |
+| --- | --- | --- | --- |
+| Idle, listening in every broadcast slot (default) | 3 seeds × 3600 s | 24.0–24.6 µA (24.0–24.4 µA without drift) | 0.7 |
+| Idle, `lfn_bc_sync_only = true` | 3 seeds × 3600 s | 19.5–19.8 µA | 0.6 |
+| UDP test traffic (§14) | 10 seeds × 1800 s | 56.3–64.5 µA | 1.8 |
+
+Idle, seed 1 (24.4 µA): radio listening 13.5 µA (0.22 % of the time), MCU sleep 4.9 µA, deep-sleep floor 4.6 µA, the rest under 0.5 µA each. Before stage 4 the idle LFN drew 16.5 µA (§16): it had no broadcast windows and got one unicast LPC per sync period. Silicon Labs' LFN, measured on the kits with its Test profile (same intervals), drew 49 µA (root repo, `HW5_BlackBox_Phase1_Results.md`); the two are not directly comparable, since its windows are longer (4.3 ms at the minimum) and its floor is 11.9 µA.
+
+Drift does not change the current: once the LFN has measured its clock rate against the parent's (one sync period after the first sync from a broadcast slot), the sync error stays at 0–1 µs, and the widening depends on the time since the last sync, not on the drift.
