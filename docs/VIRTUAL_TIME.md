@@ -69,6 +69,15 @@ Rules:
 - **Logs.** At program start (a constructor), the port replaces `stdout` and `stderr` with `fopencookie()` streams that write whole lines to fds 1 and 2, each prefixed with `"%llu.%06llu "` of `NSIM_EPOCH_S` + virtual time. Lines printed before attach get virtual time 0. `TRACE()`'s own timestamp (`log.h`) also uses virtual time. The run scripts then need no timestamping wrapper, and `analyze.py` reads the same format as today's (`<seconds> <message>`), with `t0` = `NSIM_EPOCH_S`.
 - **Unit tests** in `nanostack-generic-standalone/tests/port_sim/`, against a fake conductor over `socketpair()`: arm, re-arm, stop, zero length, ordering of same-time timers, `_expired`, FHSS remaining slots, 32-bit wrap of `ns_port_time_us()`, frame delivery before timers, idle reports, random reproducibility, quit.
 
+## 4.1 Clock drift (step 5)
+
+Each node's clock may run fast or slow against virtual time, as a crystal does.
+
+- **Setting.** `wssimserver --drift=[IDS:]PPM` (repeatable; without IDS, every node; the last option that names a node wins) and `--drift-random=PPM` (each node draws its error uniformly in [−PPM, +PPM] from `WSSIM_SEED` and its ID, on a stream of its own; a `--drift` that names the node takes precedence). The value goes to the node in the welcome (`drift_ppb`, protocol version 2). `run.sh` passes `SIM_OPTS` to `wssimserver`.
+- **Node side** (`port/sim/sim_scheduler.c`). The node's clock is `local(v) = v + floor(v × ppb / 10⁹)`, with `v` the virtual time in µs. Everything the porting API shows is on that clock: `ns_port_time_us()`, the FHSS timestamp and remaining time, `ns_port_time_wall_s()`, and the length of every timer: a timer of `d` µs fires at the first virtual µs at which `local` has advanced by `d`. The conductor, frame delivery, the `"xi"` deadlines, the log timestamps and the power ledger stay on virtual time. With drift 0 the node's clock is virtual time exactly.
+- **FHSS drift compensation.** The FHSS measures its drift against its parent's broadcast schedule and corrects its own timers. Upstream disables this on Linux (the POSIX timers are not stable); the simulation port's clocks are exact, so it is enabled there (`NS_PORT_SIM`). The measurement has 1 ms resolution, so with no drift it may still apply ±10 ns/ms; this changed `dag_simple` logs, not its statistics (10 seeds: 129/140 routers ready, median 146.8 s, against 130/140 and 146.6 s before).
+- **Checks.** `tests/port_sim` (timers and timestamps at ±100 ppm), `test_conductor.py` (`drift`: options, precedence, reproducible random draws within the bound). `dag_simple` with `--drift-random=20`, 10 seeds × 600 s: 130/140 routers ready, median 150.1 s.
+
 ## 5. Border router in batch mode
 
 `wsbrd-inproc` still opens `tun0` and registers on D-Bus, but neither is read in batch mode. Every 30 s of virtual time it logs one line per node of the table that D-Bus `Nodes` returns (`dbus.c`, `dbus_get_nodes()`): `brtree t=<s> node=<eui64> parent=<eui64>` with real EUI-64s (the table holds IIDs, whose U/L bit is flipped back), then `brtree t=<s> nodes=<n>`. `analyze.py` uses these lines when there is no `dbus_nodes.txt`.

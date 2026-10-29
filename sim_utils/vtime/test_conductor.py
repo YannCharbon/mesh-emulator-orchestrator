@@ -399,6 +399,36 @@ def test_wallclock():
         s.close()
 
 
+def run_drift(opts, seed="1"):
+    nodes = {n: Periodic(n) for n in Periodic.PERIODS}
+    srv = Server([f"--vtime={len(nodes)}", "--vtime-end=0.01", *opts] + graph_args(PERIODIC_EDGES),
+                 {"WSSIM_SEED": seed})
+    d = Driver(ARGS.sock, nodes)
+    d.connect()
+    d.run()
+    check(srv.wait() == 0, "server exit")
+    return d.drift
+
+
+def test_drift():
+    # No option: every node gets 0
+    check(set(run_drift([]).values()) == {0}, "drift without --drift")
+    # --drift for all, then a node list that overrides it (the last one wins)
+    d = run_drift(["--drift=-12.5", "--drift=7,20:30"])
+    check(d[7] == 30000 and d[20] == 30000, f"--drift node list: {d}")
+    check(all(v == -12500 for n, v in d.items() if n not in (7, 20)), f"--drift all: {d}")
+    # --drift-random: within the bound, reproducible, seed-dependent, and a
+    # --drift naming a node takes precedence
+    r1 = run_drift(["--drift-random=50", "--drift=10:1"])
+    r2 = run_drift(["--drift-random=50", "--drift=10:1"])
+    r3 = run_drift(["--drift-random=50", "--drift=10:1"], seed="2")
+    check(r1 == r2, f"--drift-random not reproducible: {r1} {r2}")
+    check(r1 != r3, "--drift-random: same draws for another seed")
+    check(r1[10] == 1000, f"--drift over --drift-random: {r1}")
+    check(all(-50000 <= v <= 50000 for v in r1.values()), f"--drift-random bound: {r1}")
+    check(len(set(r1.values())) == len(r1), f"--drift-random: equal draws {r1}")
+
+
 def main():
     global ARGS
     ap = argparse.ArgumentParser()
@@ -431,6 +461,7 @@ def main():
         ("disconnect", test_disconnect),
         ("vtime_refuses_wallclock_hello", test_vtime_refuses_wallclock_hello),
         ("wallclock", test_wallclock),
+        ("drift", test_drift),
     ]
     for name, fn in tests:
         if ARGS.k not in name:

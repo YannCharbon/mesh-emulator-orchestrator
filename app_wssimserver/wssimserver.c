@@ -293,6 +293,10 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  -f, --fpath[=FILE]        with -l, also write the edges to FILE (/tmp/graph.txt)\n");
     fprintf(stream, "  --vtime=N                 virtual time: conduct N nodes (docs/VIRTUAL_TIME.md)\n");
     fprintf(stream, "  --vtime-end=SECONDS       virtual time: end the run at this time\n");
+    fprintf(stream, "  --drift=[IDS:]PPM         virtual time: clock error of these nodes (all if no IDS), in ppm;\n");
+    fprintf(stream, "                            repeatable, the last one naming a node wins\n");
+    fprintf(stream, "  --drift-random=PPM        virtual time: each node draws its clock error in [-PPM, +PPM]\n");
+    fprintf(stream, "                            from WSSIM_SEED (a --drift naming the node takes precedence)\n");
     fprintf(stream, "  --power=PROFILE           virtual time: record power, every node with this profile\n");
     fprintf(stream, "                            (docs/POWER_MODEL.md)\n");
     fprintf(stream, "  --power-node=IDS:PROFILE  another profile for these nodes (3, 2-5, 1,4); repeatable\n");
@@ -313,7 +317,67 @@ enum {
     OPT_POWER_OUT,
     OPT_POWER_LOG,
     OPT_POWER_CELL,
+    OPT_DRIFT,
+    OPT_DRIFT_RANDOM,
 };
+
+// Clock drift per node (EM3 step 5), sent in the welcome: --drift=[IDS:]PPM,
+// the last one that names the node wins; else --drift-random.
+static struct {
+    uint64_t mask[MAX_NODES / 64];
+    int32_t ppb;
+} drift_specs[64];
+static int drift_specs_n;
+static int32_t drift_random_ppb;
+
+static int32_t ppm_to_ppb(const char *opt, const char *str)
+{
+    char *end;
+    double ppm = strtod(str, &end);
+
+    FATAL_ON(*end || !(ppm > -1e5 && ppm < 1e5), 1, "%s: expected ppm between -100000 and 100000, got %s", opt, str);
+    return (int32_t)(ppm * 1000 + (ppm < 0 ? -0.5 : 0.5));
+}
+
+static void drift_add(char *spec)
+{
+    char *colon = strchr(spec, ':');
+
+    FATAL_ON(drift_specs_n >= 64, 1, "--drift: at most 64");
+    if (colon) {
+        *colon = '\0';
+        FATAL_ON(bitmap_parse(spec, drift_specs[drift_specs_n].mask, MAX_NODES / 64), 1, "--drift: bad node list %s", spec);
+        *colon = ':';
+    } else {
+        memset(drift_specs[drift_specs_n].mask, 0xff, sizeof(drift_specs[drift_specs_n].mask));
+    }
+    drift_specs[drift_specs_n].ppb = ppm_to_ppb("--drift", colon ? colon + 1 : spec);
+    drift_specs_n++;
+}
+
+static uint64_t drift_mix64(uint64_t z)
+{
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+
+static int32_t drift_of(int node, uint64_t seed)
+{
+    int32_t ppb = 0;
+    int i;
+
+    if (drift_random_ppb) {
+        // Uniform in [-max, +max], from the seed and the node only (its own
+        // stream: not the radio's loss draws, not the port's random source)
+        uint64_t r = drift_mix64(seed * 0x9e3779b97f4a7c15ULL + drift_mix64(0x64726966ULL + node));
+        ppb = (int32_t)((int64_t)(r % (2 * (uint64_t)drift_random_ppb + 1)) - drift_random_ppb);
+    }
+    for (i = 0; i < drift_specs_n; i++)
+        if (bitmap_get(node, drift_specs[i].mask, MAX_NODES / 64))
+            ppb = drift_specs[i].ppb;
+    return ppb;
+}
 
 void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
 {
@@ -331,6 +395,8 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "power-out", required_argument, 0, OPT_POWER_OUT },
         { "power-log", required_argument, 0, OPT_POWER_LOG },
         { "power-cell", required_argument, 0, OPT_POWER_CELL },
+        { "drift", required_argument, 0, OPT_DRIFT },
+        { "drift-random", required_argument, 0, OPT_DRIFT_RANDOM },
         { 0,       0,                 0,   0  }
     };
     uint64_t mask[MAX_NODES / 64];
@@ -394,6 +460,13 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             case OPT_POWER_CELL:
                 pwr_set_cell(optarg);
                 break;
+            case OPT_DRIFT:
+                drift_add(optarg);
+                break;
+            case OPT_DRIFT_RANDOM:
+                drift_random_ppb = ppm_to_ppb("--drift-random", optarg);
+                FATAL_ON(drift_random_ppb < 0, 1, "--drift-random: expected a positive bound");
+                break;
             case 'h':
                 print_help(stdout, 0);
                 break;
@@ -406,6 +479,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     }
     FATAL_ON(ctxt->has_vtime_end && !ctxt->vtime_nodes, 1, "--vtime-end needs --vtime");
     FATAL_ON(pwr_enabled() && !ctxt->vtime_nodes, 1, "--power needs --vtime");
+    FATAL_ON((drift_specs_n || drift_random_ppb) && !ctxt->vtime_nodes, 1, "--drift needs --vtime");
     FATAL_ON(ctxt->dump && !ctxt->num_groups, 1, "No graph to dump");
     if (optind >= argc)
         FATAL(1, "Expected argument: socket path");
@@ -943,6 +1017,9 @@ static int vt_run(struct ctxt *ctxt)
         node = vt_nodes[i];
         if (pwr_enabled())
             pwr_wake(node, 0, 0);
+        welcome.drift_ppb = drift_of(node, welcome.seed);
+        if (welcome.drift_ppb)
+            INFO("virtual time: node %d clock drift %+.3f ppm", node, welcome.drift_ppb / 1000.0);
         if (vt_send(node, &welcome, sizeof(welcome)) || vt_read_until_idle(ctxt, node)) {
             status = stop ? 0 : 1;
             reason = stop ? "interrupted" : "a node failed";

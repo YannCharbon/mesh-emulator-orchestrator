@@ -25,7 +25,7 @@ HELLO_VTIME = 0x0001
 
 HELLO = struct.Struct("=2sHHH")      # magic, node_id, flags, reserved
 FRAME = struct.Struct("=2sHHHHBB")   # magic, len, chan, seq, src, shr_len, fcs_len
-WELCOME = struct.Struct("=2sHIQ")    # magic, version, flags, seed
+WELCOME = struct.Struct("=2sHIQiI")  # magic, version, flags, seed, drift_ppb, reserved
 ADVANCE = struct.Struct("=2s3HQ")    # magic, frames, reserved[2], now_us
 IDLE = struct.Struct("=2s3HQ")       # magic, reserved[3], next_us
 
@@ -163,6 +163,7 @@ class Driver:
         self.vtime_flag = vtime_flag
         self.log = []
         self.seed = None
+        self.drift = {}                 # node -> drift_ppb from its welcome
         self.quit = set()
         self.closed = set()            # closed by the conductor without "xq"
         self.on_wake = None            # hook(driver, node, t) -> "close" to drop the node
@@ -210,10 +211,11 @@ class Driver:
                     continue
                 magic = msg[:2]
                 if magic == b"xw":
-                    _, version, _, seed = WELCOME.unpack(msg)
-                    if version != 1:
+                    _, version, _, seed, drift, _ = WELCOME.unpack(msg)
+                    if version != 2:
                         raise TestError(f"node {nid}: welcome version {version}")
                     self.seed = seed
+                    self.drift[nid] = drift
                     self._reply(nid, 0, [], first=True)
                 elif magic == b"xa":
                     _, count, _, _, t = ADVANCE.unpack(msg)

@@ -18,7 +18,7 @@ nothing, and with --power-mode; each case says which values must apply.
 import json, os, socket, struct, subprocess, sys, tempfile, time
 
 HELLO = struct.Struct("=2sHHH")
-WELCOME = struct.Struct("=2sHIQ")
+WELCOME = struct.Struct("=2sHIQiI")
 ADVANCE = struct.Struct("=2s3HQ")
 IDLE = struct.Struct("=2s3HQ")
 RADIO = struct.Struct("=2sBbBBH")         # magic, state, tx_dbm, events, phy_mode, channel
@@ -177,7 +177,7 @@ def run_case(server, work, profile, phy_mode, opts, expect, want_mode, want_valu
     s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     s.connect(sock)
     s.send(HELLO.pack(b"xh", 0, 1, 0))
-    magic, version, flags, seed = recv_exact(s, WELCOME)
+    magic, version, flags, seed, _, _ = recv_exact(s, WELCOME)
     assert magic == b"xw" and flags & 1, (magic, flags)
     for i, (t, msgs, nxt) in enumerate(script()):
         if i:

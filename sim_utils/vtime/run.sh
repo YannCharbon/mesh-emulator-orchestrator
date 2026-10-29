@@ -47,6 +47,8 @@
 #                      (<outdir>/power_log.txt; large)
 #   POWER_CELL=<mAh[:V[:eff]]> with POWER, battery life for this cell
 #   POWER_OPTS         more wssimserver options (e.g. --power-node=3:<profile>)
+#   SIM_OPTS           more wssimserver options, with or without POWER (e.g.
+#                      --drift-random=20, --drift=3:-15: clock drift, EM3 step 5)
 #
 # Output in <outdir>: simserver.log, br.log, node<i>.log (each line starts with
 # NSIM_EPOCH_S + virtual time, written by the simulation port), t0
@@ -157,7 +159,7 @@ if [ -n "${POWER:-}" ]; then
 	PWR+=(${POWER_OPTS:-})
 	echo "power=$POWER log=${POWER_LOG:-0} cell=${POWER_CELL:-}" >> "$OUT/run_info.txt"
 fi
-start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1)) --vtime-end="$DUR" "${PWR[@]}" --dump "$SOCK"
+start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} --dump "$SOCK"
 SIM_PID=$!
 for (( i = 0; i < 200; i++ )); do
 	[ -S "$SOCK" ] && break
