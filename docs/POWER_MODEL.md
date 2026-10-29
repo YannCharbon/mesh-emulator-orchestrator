@@ -556,3 +556,15 @@ Same conditions as §14 (FG25 profile, mode 3 values, +10 dBm, −50 dBm link, l
 Idle, seed 1 (24.4 µA): radio listening 13.5 µA (0.22 % of the time), MCU sleep 4.9 µA, deep-sleep floor 4.6 µA, the rest under 0.5 µA each. Before stage 4 the idle LFN drew 16.5 µA (§16): it had no broadcast windows and got one unicast LPC per sync period. Silicon Labs' LFN, measured on the kits with its Test profile (same intervals), drew 49 µA (root repo, `HW5_BlackBox_Phase1_Results.md`); the two are not directly comparable, since its windows are longer (4.3 ms at the minimum) and its floor is 11.9 µA.
 
 Drift does not change the current: once the LFN has measured its clock rate against the parent's (one sync period after the first sync from a broadcast slot), the sync error stays at 0–1 µs, and the widening depends on the time since the last sync, not on the drift.
+
+## 18. LFNs under FFN routers (GS8 stage 5, 2026-10-29)
+
+FFN routers now parent LFNs, and LFNs choose among the parents that answer their discovery (the stack's `docs/LFN_STACK.md` §9). Same conditions as §17 (each node's clock drawn in ±20 ppm), with test traffic (a UDP request each way every 37–90 s, echoed):
+
+| Case | Runs | LFN current |
+| --- | --- | --- |
+| Border router – router – LFN (`test_lfn_join.sh`, `MESH=1`) | 3 seeds × 1800 s | 46.2–47.1 µA |
+| Six LFNs at the edge of `dag_simple` (`test_lfn_mesh.sh`; one request each way every 60 and 90 s) | 10 seeds × 1800 s, from 600 s | 42.4–48.7 µA |
+| One LFN under the border router (§17, rerun) | 10 seeds | 56.4–60.7 µA; idle 24.0–24.7 µA |
+
+The parent's position in the mesh does not change the LFN's own current: its windows, its sync frames and its uplinks are the same; only the traffic differs. While its parent is gone, an LFN now draws 842 µA instead of 2 002 µA, because its LPAS sweep covers the channels of the plan only (59 frames instead of 240) before each 2.4 s discovery window.

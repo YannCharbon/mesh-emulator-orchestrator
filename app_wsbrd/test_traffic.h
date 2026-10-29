@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #define TEST_UDP_PORT 7
-#define TEST_UDP_DST_MAX 4
+#define TEST_UDP_DST_MAX 8
 
 struct test_traffic_cfg {
     bool echo;                                  // answer requests (test_udp_echo)

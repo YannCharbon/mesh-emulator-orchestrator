@@ -36,7 +36,13 @@
 # TX_POWER (10 dBm, both nodes), LGTK_ROTATE_AT (s, 0: none; the border
 # router's lgtk_rotate_at_s, ws_management_lfn_lgtk_rotate()),
 # LFN_EXTRA, BR_EXTRA (more "-o key=value" options), SIM_OPTS (more
-# wssimserver options, e.g. --drift-random=20 for clock drift), SILENT_AT and
+# wssimserver options, e.g. --drift-random=20 for clock drift), MESH (1: an
+# FFN router, node 1, between the border router and the LFN, node 2, which
+# hears only the router: GS8 stage 5; no ff02::1 check then, since the border
+# router's link-local multicast does not reach the LFN; 2: the LFN also hears
+# the border router, below its minimum sensitivity (-97 dBm), and must choose
+# the router; 3: it hears the border router at -70 dBm and must choose it,
+# routing cost 0), SILENT_AT and
 # SILENT_FOR (s: the parent stops answering the LFN then, for that long; the
 # test then checks the parent-loss rule and the rejoin instead).
 # Exit status 0 if every check passes.
@@ -45,35 +51,51 @@ BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
 PROFILE=${4:-$WORK/examples/power/efr32fg25-soc.ini}
 DUR=${DUR:-900}; RSSI=${RSSI:--50}; TUN=${TUN:-tunvt0}
 BR_PERIOD=${BR_PERIOD:-37}; LFN_PERIOD=${LFN_PERIOD:-53}
-STEADY_FROM=${STEADY_FROM:-300}; JOIN_MAX=${JOIN_MAX:-120}; TX_POWER=${TX_POWER:-10}
+STEADY_FROM=${STEADY_FROM:-300}; JOIN_MAX=${JOIN_MAX:-$( [ "${MESH:-0}" != 0 ] && echo 300 || echo 120)}; TX_POWER=${TX_POWER:-10}
 LGTK_ROTATE_AT=${LGTK_ROTATE_AT:-0}
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT" && OUT=$(realpath "$OUT")
 [ -z "$(ls -A "$OUT")" ] || { echo "test_lfn_join: $OUT is not empty" >&2; exit 1; }
-echo "0,1:$RSSI" > "$OUT.topo"
+MESH=${MESH:-0}
+if [ "$MESH" != 0 ]; then
+    LFN_NODE=2
+    printf '0,1:%s\n1,2:%s\n' "$RSSI" "$RSSI" > "$OUT.topo"
+    [ "$MESH" = 2 ] && echo "0,2:-97" >> "$OUT.topo"
+    [ "$MESH" = 3 ] && echo "0,2:-70" >> "$OUT.topo"
+else
+    LFN_NODE=1
+    echo "0,1:$RSSI" > "$OUT.topo"
+fi
 # The LFN's address comes from DHCPv6 (the prefix of the examples and its
 # EUI-64); the border router's is the one its TUN gives it
-LFN_ADDR=fd12:3456::302:304:506:1
+LFN_ADDR=fd12:3456::302:304:506:$LFN_NODE
 BR_ADDR=fd12:3456::1615:16ff:fe17:1819
-TRAFFIC_BR="-o test_udp_echo=true -o test_udp_dst=$LFN_ADDR -o test_udp_dst=ff02::1 -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60"
+TRAFFIC_BR="-o test_udp_echo=true -o test_udp_dst=$LFN_ADDR $( [ "$MESH" != 0 ] && [ "$MESH" != 3 ] || echo "-o test_udp_dst=ff02::1") -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60"
 TRAFFIC_LFN="-o test_udp_echo=true -o test_udp_dst=$BR_ADDR -o test_udp_period_s=$LFN_PERIOD -o test_udp_start_s=70"
 (( BR_PERIOD > 0 )) || TRAFFIC_BR=
 (( LFN_PERIOD > 0 )) || TRAFFIC_LFN=
 SILENT=
 [ -n "${SILENT_AT:-}" ] && SILENT="-o test_lfn_silent_at_s=$SILENT_AT -o test_lfn_silent_for_s=${SILENT_FOR:-500}"
+LFN_OPTS="$TRAFFIC_LFN ${LFN_EXTRA:-}"
+if [ "$MESH" != 0 ]; then
+    export NODE_OPTS_1="-o device_type=ffn -o enable_lfn=true ${ROUTER_EXTRA:-}" NODE_OPTS_2="$LFN_OPTS"
+    LFN_OPTS=
+fi
 BR_OPTS="-o tx_power=$TX_POWER $TRAFFIC_BR $SILENT $( (( LGTK_ROTATE_AT > 0 )) && echo "-o lgtk_rotate_at_s=$LGTK_ROTATE_AT") ${BR_EXTRA:-}" \
-NODE_OPTS="-o tx_power=$TX_POWER $TRAFFIC_LFN ${LFN_EXTRA:-}" \
+NODE_OPTS="-o tx_power=$TX_POWER $LFN_OPTS" \
 CONF=lfn TOPO="$OUT.topo" TUN=$TUN POWER=$PROFILE POWER_LOG=1 \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT" "$DUR" > "$OUT.run" 2>&1
 RC=$?
 rm -f "$OUT.topo"
 [ $RC = 0 ] || { echo "test_lfn_join: run failed ($OUT.run)"; exit 1; }
 
-python3 - "$OUT" "$DUR" "$STEADY_FROM" "$JOIN_MAX" "$LGTK_ROTATE_AT" "$BR_PERIOD" "${SILENT_AT:-0}" <<'EOF'
+python3 - "$OUT" "$DUR" "$STEADY_FROM" "$JOIN_MAX" "$LGTK_ROTATE_AT" "$BR_PERIOD" "${SILENT_AT:-0}" "$LFN_NODE" "$MESH" <<'EOF'
 import json, re, sys, bisect
 out, dur, steady_from, join_max, rot = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])
 traffic = int(sys.argv[6]) > 0
 silent_at = float(sys.argv[7])
+lfn_node = int(sys.argv[8])
+mesh = int(sys.argv[9])
 T0 = 1700000000.0
 fails = []
 def check(cond, what):
@@ -91,7 +113,7 @@ def lines(name):
 # --- LFN
 lfn = {'disc': [], 'lost': [], 'oper': None, 'oper_all': [], 'auth': [], 'win': [], 'rx': [], 'udp_rx': [], 'udp_tx': [], 'window_us': 5000,
        'lpc': [], 'keyreq': [], 'mismatch': [], 'lgtk_recv': [], 'active': [], 'lpcs_key': []}
-for t, m in lines('node1.log'):
+for t, m in lines(f'node{lfn_node}.log'):
     if 'LFN discovery start' in m:
         lfn['disc'].append(t)
     elif 'LFN operational' in m:
@@ -102,8 +124,9 @@ for t, m in lines('node1.log'):
         lfn['auth'].append(t)
     elif re.search(r'parent .* lost', m):
         lfn['lost'].append(t)
-    elif 'window open: slot' in m:
-        # unicast and broadcast windows, with their length (widened for drift)
+    elif 'window open: slot' in m or 'discovery window open' in m:
+        # unicast, broadcast and discovery windows, with their length
+        # (widened for drift)
         lfn['win'].append((t, int(re.search(r'for (\d+) us', m).group(1)) / 1e6))
     elif 'LFN listen schedule:' in m:
         lfn['window_us'] = int(re.search(r'window (\d+) us', m).group(1))
@@ -172,7 +195,9 @@ last = dur - 15      # requests later than this may still be on their way
 def pairs(tx, rx_peer, rx_back, mc=False):
     # requests "Q n" sent by one side, received by the other, echoed back
     # requests sent once the LFN was operational (before, it has no address)
-    q = [(t, p) for t, d, p in tx if p.startswith('Q') and (lfn['oper'] or dur) < t < last and (d.startswith('ff02') == mc)]
+    # (and 15 s after it: through a router, the route to the LFN reaches the
+    # border router with the router's DAO, RPL's DAO delay later: up to several s)
+    q = [(t, p) for t, d, p in tx if p.startswith('Q') and (lfn['oper'] or dur) + 15 < t < last and (d.startswith('ff02') == mc)]
     got = {p for t, s, p in rx_peer}
     back = {p.replace('R', 'Q', 1) for t, s, p in rx_back if p.startswith('R')}
     return q, [x for x in q if x[1] in got], [x for x in q if x[1] in back]
@@ -182,7 +207,8 @@ if traffic:
   q, got, back = pairs(lfn['udp_tx'], br['udp_rx'], lfn['udp_rx'])
   check(q and len(got) == len(q) and len(back) == len(q), f'LFN -> BR unicast: {len(q)} requests, {len(got)} received, {len(back)} echoes back')
   q, got, back = pairs(br['udp_tx'], lfn['udp_rx'], br['udp_rx'], mc=True)
-  check(q and len(got) == len(q) and br['copies'] >= len(q), f'BR -> ff02::1: {len(q)} requests, {len(got)} received by the LFN, {br["copies"]} MAC-unicast copies')
+  if mesh in (0, 3):
+   check(q and len(got) == len(q) and br['copies'] >= len(q), f'BR -> ff02::1: {len(q)} requests, {len(got)} received by the LFN, {br["copies"]} MAC-unicast copies')
 win = sorted(lfn['win'])
 win_t = [w[0] for w in win]
 def in_window(t):
@@ -197,6 +223,26 @@ acks = [t for t in lfn['rx'] if not in_window(t) and after_own_tx(t)]
 outside = [t for t in lfn['rx'] if not in_window(t) and not after_own_tx(t)]
 check(lfn['rx'] and not outside, f"{len(lfn['rx'])} frames received by the LFN: {len(outside)} outside its windows, "
       f"{len(acks)} ACKs to its own frames" + (f" (first outside at {outside[0]:.6f} s)" if outside else ''))
+# --- GS8 stage 5: the router parents the LFN
+if mesh:
+    rt = {'lgtk': [], 'lpas': 0, 'bc': 0}
+    for t, m in lines('node1.log'):
+        if 'LGTK set:' in m:
+            rt['lgtk'].append(t)
+        elif 'LPAS from LFN' in m:
+            rt['lpas'] += 1
+        elif 'LFN broadcast slot' in m:
+            rt['bc'] += 1
+    parent = None
+    for t, m in lines(f'node{lfn_node}.log'):
+        r = re.search(r'LFN: parent (\S+), PAN', m)
+        if r:
+            parent = r.group(1)
+    check(rt['lgtk'], f"router got an LGTK from the border router at {rt['lgtk'][0]:.1f} s" if rt['lgtk'] else 'router got an LGTK')
+    want = ':00:00' if mesh == 3 else ':00:01'
+    check(parent and parent.endswith(want), f"LFN parent: {parent} ({'the border router' if mesh == 3 else 'the router'})")
+    if mesh != 3:
+      check(rt['lpas'] > 0 and rt['bc'] > 0, f"router answered {rt['lpas']} LPAS, queued {rt['bc']} LFN broadcast-slot frames")
 # --- LGTK
 check(lfn['lgtk_recv'] and lfn['lpcs_key'] and min(lfn['lpcs_key']) >= 5 and br['nr4wh'] > 0,
       f"LFN joined with an LGTK (index {lfn['lgtk_recv'][0][1] if lfn['lgtk_recv'] else '?'}, NR KDE in 4WH message 2, LPCS under key index {lfn['lpcs_key'][0] if lfn['lpcs_key'] else '?'})")
@@ -227,7 +273,7 @@ if br['expired']:
 
 # --- Power from steady_from to the end, node 1
 rep = json.load(open(f'{out}/power.json'))
-n1 = next(n for n in rep['nodes'] if n['node'] == 1)
+n1 = next(n for n in rep['nodes'] if n['node'] == lfn_node)
 ma = {('mcu', k): v['ma'] for k, v in n1['mcu']['states'].items()}
 ma.update({('radio', k): v['ma'] for k, v in n1['radio']['states'].items() if 'ma' in v})
 tx_ma = {lv['dbm']: lv['ma'] for lv in n1['radio']['states']['tx']['levels']}
@@ -239,7 +285,7 @@ for line in open(f'{out}/power_log.txt'):
         continue
     f = line.split()
     s, e, node, part, state = float(f[0]), float(f[1]), int(f[2]), f[3], f[4]
-    if node != 1 or e <= t0 or s >= t1:
+    if node != lfn_node or e <= t0 or s >= t1:
         continue
     if part == 'mcu' and state == 'active' and s >= t0:
         wakes += 1

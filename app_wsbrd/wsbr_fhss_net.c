@@ -233,6 +233,13 @@ int ns_fhss_ws_lfn_bc_stop(const fhss_api_t *fhss_api)
     return 0;
 }
 
+int ns_fhss_ws_lfn_discovery_set(const fhss_api_t *fhss_api, uint32_t start_us, uint32_t duration_us)
+{
+    (void)fhss_api;
+    (void)start_us;
+    return duration_us ? -1 : 0;
+}
+
 void ns_fhss_ws_lfn_parent_defaults(fhss_ws_lfn_parent_t *cfg)
 {
     cfg->tx_offset_us = FHSS_LFN_TX_OFFSET_US_DEFAULT;

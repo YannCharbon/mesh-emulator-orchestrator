@@ -145,6 +145,15 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
         FATAL_ON(ret, 1, "fan_version: not supported by this build (%d)", ret);
         INFO("Wi-SUN FAN version 1.%d", ctxt->ws_fan_version - 1);
     }
+    // FAN 1.1 LFN parenting by an FFN router (GS8 stage 5)
+    if (ctxt->enable_lfn) {
+        FATAL_ON(ctxt->lfn, 1, "enable_lfn: an LFN does not parent LFNs");
+        ret = ws_management_lfn_settings_set(ctxt->rcp_if_id, &ctxt->lfn_cfg);
+        FATAL_ON(ret, 1, "lfn_*: invalid LFN settings (%d)", ret);
+        ret = ws_management_lfn_parent_set(ctxt->rcp_if_id, true);
+        FATAL_ON(ret, 1, "enable_lfn: needs fan_version = 1.1 (%d)", ret);
+        INFO("LFN parenting on");
+    }
     // Radio off when the MAC is idle (LFN study M1): a test of the radio-off
     // path, not an LFN. Applied when the MAC starts.
     if (!ctxt->rx_on_when_idle) {
