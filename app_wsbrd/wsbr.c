@@ -242,6 +242,8 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
 // the table of D-Bus "Nodes" every 30 s of virtual time, one line per node.
 // sim_utils/migration/analyze.py reads these lines.
 #define WSBR_NODE_TABLE_EVENT (APPLICATION_EVENT + 0x40)
+#define WSBR_LFN_SILENT_EVENT (APPLICATION_EVENT + 0x41)
+#define WSBR_LFN_SILENT_END_EVENT (APPLICATION_EVENT + 0x42)
 #define WSBR_NODE_TABLE_PERIOD_MS 30000
 
 static void wsbr_node_table_log(struct wsbr_ctxt *ctxt)
@@ -331,7 +333,22 @@ static void wsbr_tasklet(struct arm_event_s *event)
                  WARN("arm_nwk_interface_up RCP");
             if (ws_bbr_start(ctxt->rcp_if_id, ctxt->tun_if_id))
                  WARN("ws_bbr_start");
+            // Test: the LFN parent goes silent for a while (GS8 stage 3)
+            if (ctxt->test_lfn_silent_at_s > 0)
+                eventOS_event_timer_request(0, WSBR_LFN_SILENT_EVENT, event->receiver,
+                                            (uint32_t)ctxt->test_lfn_silent_at_s * 1000);
             break;
+        case WSBR_LFN_SILENT_EVENT:
+            INFO("LFN parent silent for %d s (test_lfn_silent_*)", ctxt->test_lfn_silent_for_s);
+            WARN_ON(ws_test_lfn_parent_silence(ctxt->rcp_if_id, true));
+            eventOS_event_timer_request(0, WSBR_LFN_SILENT_END_EVENT, event->receiver,
+                                        (uint32_t)ctxt->test_lfn_silent_for_s * 1000);
+            break;
+        case WSBR_LFN_SILENT_END_EVENT:
+            INFO("LFN parent answering again");
+            WARN_ON(ws_test_lfn_parent_silence(ctxt->rcp_if_id, false));
+            break;
+
         case ARM_LIB_NWK_INTERFACE_EVENT:
             if (event->event_id == ctxt->tun_if_id) {
                 DEBUG("get event for tun interface: %s", nwk_events[event->event_data]);

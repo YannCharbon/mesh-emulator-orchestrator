@@ -327,7 +327,12 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
         /* empty */
     } else if (sscanf(line, " test_udp_start_s = %d %c", &ctxt->test_traffic.start_s, &garbage) == 1) {
         /* empty */
+    } else if (sscanf(line, " test_lfn_silent_at_s = %d %c", &ctxt->test_lfn_silent_at_s, &garbage) == 1) {
+        /* empty */
+    } else if (sscanf(line, " test_lfn_silent_for_s = %d %c", &ctxt->test_lfn_silent_for_s, &garbage) == 1) {
+        /* empty */
     } else if (sscanf(line, " test_udp_echo = %s %c", str_arg, &garbage) == 1) {
+
         ctxt->test_traffic.echo = str_to_val(str_arg, valid_booleans);
     } else if (sscanf(line, " enable_lfn = %s %c", str_arg, &garbage) == 1) {
 

@@ -84,6 +84,9 @@ struct wsbr_ctxt {
     bool enable_lfn;            // border router: parent LFNs (FAN 1.1)
     ws_lfn_settings_t lfn_cfg;  // lfn_* settings (defaults: ws_management_lfn_settings_defaults())
     struct test_traffic_cfg test_traffic; // test_udp_* (test_traffic.h)
+    int test_lfn_silent_at_s;   // > 0: the LFN parent goes silent then (ws_test_lfn_parent_silence())
+    int test_lfn_silent_for_s;  // for this long
+
 
     uint8_t ws_gtk[4][16];
     bool ws_gtk_force[4];

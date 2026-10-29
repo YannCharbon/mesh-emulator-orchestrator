@@ -467,3 +467,35 @@ Results with the calibrated FG25 profile (`efr32fg25-soc.ini`), LFN window 5 ms,
 - **Found:** the emulated radio listens during a CSMA backoff, so each MAC retry of the LFN (retry period 20–45 ms plus the backoff) is listening time; uplinks sent while the parent is on its broadcast channel fail until a restart (the LFN does not follow its parent's broadcast schedule yet, stage 4).
 
 Reproduce: `sim_utils/vtime/test_lfn_mac.sh build-vt $(pwd) runs/lfn_mac` (`WSSIM_SEED`, `RSSI`, `DUR`, `LFN_OPTS`, `PARENT_OPTS`; e.g. `LFN_OPTS="--listen-interval-ms=60000 --lfn-tx-period-ms=30000" PARENT_OPTS="--parent-tx-period-ms=120000 --parent-tx-jitter-ms=60000" DUR=3600`).
+
+## 14. First LFN figures: one LFN under the border router (GS8 stage 3, 2026-10-29)
+
+The stack now has a FAN 1.1 LFN and a border router that parents it (the stack's `docs/LFN_STACK.md`); `sim_utils/vtime/test_lfn_join.sh` runs them in virtual time and prints the LFN's current from a steady-state window. Since this stage the emulated radio does not listen during an LFN's CSMA backoff (`PHY_EXTENSION_SET_BACKOFF_RX_OFF`, radio idle in the ledger), and §13's test LFN fell from 123 µA to 91 µA for that reason alone.
+
+**Conditions:** FG25 profile (`efr32fg25-soc.ini`, PHY mode 3 values chosen by the ledger), EU mode 3 (the default example configs), +10 dBm on both nodes, link −50 dBm, no clock drift. LFN: listen interval proposed 6 s, set to 5 s by the parent's LTO-IE; window 5 ms with a 1 ms guard; the parent's sync frame is a unicast LPC every 50 s (10 s × 5; stage 4 replaces it with LTS frames in the LFN broadcast slots). Steady state: from 300 s to the end.
+
+| Run | Seeds | LFN average |
+| --- | --- | --- |
+| Idle (no application traffic), 3600 s | 1–3 | 41.6, 41.6, 42.4 µA |
+| UDP test traffic (a request from the border router every 37 s to the LFN and one to `ff02::1`, a request from the LFN every 53 s, each echoed), 1800 s | 1–10 | 74.6–79.5 µA (mean 76.8) |
+
+**Where the idle 41.6 µA goes** (seed 1):
+
+| Part | µA | Share |
+| --- | --- | --- |
+| Charge per wake (0.56 µC × 20.8 wakes/s) | 11.5 | 28 % |
+| MCU active | 9.5 | 23 % |
+| Radio listening (a 5 ms window every 5 s, the ACK waits) | 5.8 | 14 % |
+| MCU deep sleep (4.6 µA floor) | 4.6 | 11 % |
+| MCU wake-up from deep sleep | 4.5 | 11 % |
+| Radio TX (ACKs to the parent's LPCs, own frames) | 2.5 | 6 % |
+| MCU in EM1 while the radio is on | 2.3 | 6 % |
+| Radio receiving (LPCs) | 0.6 | 1 % |
+
+- **The stack's 50 ms protocol timer dominates.** 72 000 of the 74 966 wakes in 3600 s (20 per second) are `protocol_timer_interrupt` (`nwk_interface/protocol_timer.c`), which re-arms itself whether or not a protocol needs it. Their per-wake charge, wake-up transitions and most of the MCU active time make about 24 µA of the 41.6 µA. The idle-tick skipping of the event loop (DI5) does not cover it. Without it the idle LFN would be near 17 µA, of which 6 µA is listening.
+- With traffic, TX at +10 dBm is the largest part (28.7 µA of 78.7 µA, seed 1).
+- For comparison, Silicon Labs' LFN on the same board idled at 49.0 µA with its Test profile (5 s unicast, 10 s broadcast slots, LTS every 50 s; HW5 results §3.5). Ours has no broadcast-slot wakes (stage 4) and no window widening (no drift in the emulator).
+- **Join**: operational 37–67 s after start (LPAS sweeps every 10 s until one is answered, EAPOL ~13 s at a 1.25 s interval, three waits of up to one 5 s interval); Silicon Labs' LFN: 35–48 s with `wsbrd` (HW5 results §5.2).
+- **Parent loss** (`SILENT_AT=300 SILENT_FOR=500`, 3 seeds): declared 375.2–375.7 s after the last frame from the parent, rejoin without EAPOL, operational again 21–22 s after the parent answers (Silicon Labs: 375 s, 21.6–21.9 s).
+
+Reproduce: `sim_utils/vtime/test_lfn_join.sh build-vt $(pwd) runs/lfn_join` (`BR_PERIOD=0 LFN_PERIOD=0 DUR=3600` for the idle case; `WSSIM_SEED`, `TUN`, `TX_POWER`, `STEADY_FROM`, `SILENT_AT`, `SILENT_FOR`).

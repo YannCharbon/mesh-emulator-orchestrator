@@ -22,9 +22,11 @@
 #
 # usage: test_lfn_join.sh <bindir> <workdir(holds examples/)> <outdir> [profile]
 # Environment: DUR (900), WSSIM_SEED (1), RSSI (-50), TUN (tunvt0),
-# BR_PERIOD (37), LFN_PERIOD (53), STEADY_FROM (300), JOIN_MAX (120),
+# BR_PERIOD (37), LFN_PERIOD (53; both 0: no test traffic, idle LFN), STEADY_FROM (300), JOIN_MAX (120),
 # TX_POWER (10 dBm, both nodes), LGTK_ROTATE_AT (s, 0: none),
-# LFN_EXTRA, BR_EXTRA (more "-o key=value" options).
+# LFN_EXTRA, BR_EXTRA (more "-o key=value" options), SILENT_AT and
+# SILENT_FOR (s: the parent stops answering the LFN then, for that long; the
+# test then checks the parent-loss rule and the rejoin instead).
 # Exit status 0 if every check passes.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
@@ -41,19 +43,25 @@ echo "0,1:$RSSI" > "$OUT.topo"
 # EUI-64); the border router's is the one its TUN gives it
 LFN_ADDR=fd12:3456::302:304:506:1
 BR_ADDR=fd12:3456::1615:16ff:fe17:1819
-BR_OPTS="-o tx_power=$TX_POWER -o test_udp_echo=true -o test_udp_dst=$LFN_ADDR -o test_udp_dst=ff02::1 \
- -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60 $( (( LGTK_ROTATE_AT > 0 )) && echo "-o lgtk_rotate_at_s=$LGTK_ROTATE_AT") ${BR_EXTRA:-}" \
-NODE_OPTS="-o tx_power=$TX_POWER -o test_udp_echo=true -o test_udp_dst=$BR_ADDR -o test_udp_period_s=$LFN_PERIOD \
- -o test_udp_start_s=70 ${LFN_EXTRA:-}" \
+TRAFFIC_BR="-o test_udp_echo=true -o test_udp_dst=$LFN_ADDR -o test_udp_dst=ff02::1 -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60"
+TRAFFIC_LFN="-o test_udp_echo=true -o test_udp_dst=$BR_ADDR -o test_udp_period_s=$LFN_PERIOD -o test_udp_start_s=70"
+(( BR_PERIOD > 0 )) || TRAFFIC_BR=
+(( LFN_PERIOD > 0 )) || TRAFFIC_LFN=
+SILENT=
+[ -n "${SILENT_AT:-}" ] && SILENT="-o test_lfn_silent_at_s=$SILENT_AT -o test_lfn_silent_for_s=${SILENT_FOR:-500}"
+BR_OPTS="-o tx_power=$TX_POWER $TRAFFIC_BR $SILENT $( (( LGTK_ROTATE_AT > 0 )) && echo "-o lgtk_rotate_at_s=$LGTK_ROTATE_AT") ${BR_EXTRA:-}" \
+NODE_OPTS="-o tx_power=$TX_POWER $TRAFFIC_LFN ${LFN_EXTRA:-}" \
 CONF=lfn TOPO="$OUT.topo" TUN=$TUN POWER=$PROFILE POWER_LOG=1 \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT" "$DUR" > "$OUT.run" 2>&1
 RC=$?
 rm -f "$OUT.topo"
 [ $RC = 0 ] || { echo "test_lfn_join: run failed ($OUT.run)"; exit 1; }
 
-python3 - "$OUT" "$DUR" "$STEADY_FROM" "$JOIN_MAX" "$LGTK_ROTATE_AT" <<'EOF'
+python3 - "$OUT" "$DUR" "$STEADY_FROM" "$JOIN_MAX" "$LGTK_ROTATE_AT" "$BR_PERIOD" "${SILENT_AT:-0}" <<'EOF'
 import json, re, sys, bisect
 out, dur, steady_from, join_max, rot = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])
+traffic = int(sys.argv[6]) > 0
+silent_at = float(sys.argv[7])
 T0 = 1700000000.0
 fails = []
 def check(cond, what):
@@ -69,13 +77,17 @@ def lines(name):
             pass
 
 # --- LFN
-lfn = {'disc': [], 'lost': [], 'oper': None, 'win': [], 'rx': [], 'udp_rx': [], 'udp_tx': [], 'window_us': 5000,
+lfn = {'disc': [], 'lost': [], 'oper': None, 'oper_all': [], 'auth': [], 'win': [], 'rx': [], 'udp_rx': [], 'udp_tx': [], 'window_us': 5000,
        'lpc': [], 'keyreq': []}
 for t, m in lines('node1.log'):
     if 'LFN discovery start' in m:
         lfn['disc'].append(t)
-    elif 'LFN operational' in m and lfn['oper'] is None:
-        lfn['oper'] = t
+    elif 'LFN operational' in m:
+        lfn['oper_all'].append(t)
+        if lfn['oper'] is None:
+            lfn['oper'] = t
+    elif 'LFN authentication start' in m:
+        lfn['auth'].append(t)
     elif re.search(r'parent .* lost', m):
         lfn['lost'].append(t)
     elif 'LFN window open' in m:
@@ -95,6 +107,8 @@ for t, m in lines('node1.log'):
         lfn['udp_tx'].append((t, dst, p))
     elif 'LFN: LPC' in m or 'LFN version' in m:
         lfn['lpc'].append(t)
+    elif 'LFN: parent heard' in m:
+        lfn.setdefault('heard', []).append(t)
     elif 'LGTK key request' in m:
         lfn['keyreq'].append(t)
 br = {'udp_rx': [], 'udp_tx': [], 'copies': 0, 'lgtk': []}
@@ -112,7 +126,18 @@ for t, m in lines('br.log'):
 
 check(lfn['oper'] is not None and lfn['oper'] <= join_max,
       f"LFN operational at {lfn['oper']:.1f} s" if lfn['oper'] else 'LFN operational')
-check(len(lfn['disc']) == 1 and not lfn['lost'], f"LFN kept its parent ({len(lfn['disc'])} discovery, {len(lfn['lost'])} parent losses)")
+if silent_at <= 0:
+    check(len(lfn['disc']) == 1 and not lfn['lost'], f"LFN kept its parent ({len(lfn['disc'])} discovery, {len(lfn['lost'])} parent losses)")
+else:
+    # The parent went silent: lost 1.5 x maintain_parent_time (5) x sync
+    # period (50 s) = 375 s after the last LPC, then a rejoin without EAPOL
+    loss = lfn['lost'][0] if lfn['lost'] else None
+    heard = [t for t in lfn.get('heard', []) if loss and t < loss]
+    check(loss is not None and heard and abs(loss - heard[-1] - 375) < 1.5,
+          f"parent lost at {loss:.1f} s, {loss - heard[-1]:.1f} s after the last frame from it (rule: 375 s)" if loss and heard else 'parent lost')
+    again = [t for t in lfn['oper_all'] if loss and t > loss]
+    check(again and not [t for t in lfn['auth'] if loss and t > loss],
+          f"rejoined without EAPOL, operational again at {again[0]:.1f} s" if again else 'rejoined')
 
 last = dur - 15      # requests later than this may still be on their way
 def pairs(tx, rx_peer, rx_back, mc=False):
@@ -122,12 +147,13 @@ def pairs(tx, rx_peer, rx_back, mc=False):
     got = {p for t, s, p in rx_peer}
     back = {p.replace('R', 'Q', 1) for t, s, p in rx_back if p.startswith('R')}
     return q, [x for x in q if x[1] in got], [x for x in q if x[1] in back]
-q, got, back = pairs(br['udp_tx'], lfn['udp_rx'], br['udp_rx'])
-check(q and len(got) == len(q) and len(back) == len(q), f'BR -> LFN unicast: {len(q)} requests, {len(got)} received, {len(back)} echoes back')
-q, got, back = pairs(lfn['udp_tx'], br['udp_rx'], lfn['udp_rx'])
-check(q and len(got) == len(q) and len(back) == len(q), f'LFN -> BR unicast: {len(q)} requests, {len(got)} received, {len(back)} echoes back')
-q, got, back = pairs(br['udp_tx'], lfn['udp_rx'], br['udp_rx'], mc=True)
-check(q and len(got) == len(q) and br['copies'] >= len(q), f'BR -> ff02::1: {len(q)} requests, {len(got)} received by the LFN, {br["copies"]} MAC-unicast copies')
+if traffic:
+  q, got, back = pairs(br['udp_tx'], lfn['udp_rx'], br['udp_rx'])
+  check(q and len(got) == len(q) and len(back) == len(q), f'BR -> LFN unicast: {len(q)} requests, {len(got)} received, {len(back)} echoes back')
+  q, got, back = pairs(lfn['udp_tx'], br['udp_rx'], lfn['udp_rx'])
+  check(q and len(got) == len(q) and len(back) == len(q), f'LFN -> BR unicast: {len(q)} requests, {len(got)} received, {len(back)} echoes back')
+  q, got, back = pairs(br['udp_tx'], lfn['udp_rx'], br['udp_rx'], mc=True)
+  check(q and len(got) == len(q) and br['copies'] >= len(q), f'BR -> ff02::1: {len(q)} requests, {len(got)} received by the LFN, {br["copies"]} MAC-unicast copies')
 W = lfn['window_us'] / 1e6
 win = sorted(lfn['win'])
 def in_window(t):
