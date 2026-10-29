@@ -492,10 +492,36 @@ The stack now has a FAN 1.1 LFN and a border router that parents it (the stack's
 | MCU in EM1 while the radio is on | 2.3 | 6 % |
 | Radio receiving (LPCs) | 0.6 | 1 % |
 
-- **The stack's 50 ms protocol timer dominates.** 72 000 of the 74 966 wakes in 3600 s (20 per second) are `protocol_timer_interrupt` (`nwk_interface/protocol_timer.c`), which re-arms itself whether or not a protocol needs it. Their per-wake charge, wake-up transitions and most of the MCU active time make about 24 µA of the 41.6 µA. The idle-tick skipping of the event loop (DI5) does not cover it. Without it the idle LFN would be near 17 µA, of which 6 µA is listening.
+- **The stack's 50 ms protocol timer dominates.** 72 000 of the 74 966 wakes in 3600 s (20 per second) are `protocol_timer_interrupt` (`nwk_interface/protocol_timer.c`), which re-arms itself whether or not a protocol needs it. Their per-wake charge, wake-up transitions and most of the MCU active time make about 24 µA of the 41.6 µA. The idle-tick skipping of the event loop (DI5) does not cover it. Without it the idle LFN would be near 17 µA, of which 6 µA is listening. Removed by DI6 (§15).
 - With traffic, TX at +10 dBm is the largest part (28.7 µA of 78.7 µA, seed 1).
 - For comparison, Silicon Labs' LFN on the same board idled at 49.0 µA with its Test profile (5 s unicast, 10 s broadcast slots, LTS every 50 s; HW5 results §3.5). Ours has no broadcast-slot wakes (stage 4) and no window widening (no drift in the emulator).
 - **Join**: operational 37–67 s after start (LPAS sweeps every 10 s until one is answered, EAPOL ~13 s at a 1.25 s interval, three waits of up to one 5 s interval); Silicon Labs' LFN: 35–48 s with `wsbrd` (HW5 results §5.2).
 - **Parent loss** (`SILENT_AT=300 SILENT_FOR=500`, 3 seeds): declared 375.2–375.7 s after the last frame from the parent, rejoin without EAPOL, operational again 21–22 s after the parent answers (Silicon Labs: 375 s, 21.6–21.9 s).
 
 Reproduce: `sim_utils/vtime/test_lfn_join.sh build-vt $(pwd) runs/lfn_join` (`BR_PERIOD=0 LFN_PERIOD=0 DUR=3600` for the idle case; `WSSIM_SEED`, `TUN`, `TX_POWER`, `STEADY_FROM`, `SILENT_AT`, `SILENT_FOR`).
+
+## 15. Idle-tick skipping of the protocol timers (DI6, 2026-10-29)
+
+The stack's 50 ms protocol timer and its core timer (the modules' 100 ms and 1 s timers) now run only on the grid points at which a module has work (the stack's `docs/PORTING.md`, "Idle-tick skipping of the protocol timers"; build option `NANOSTACK_PROTOCOL_TIMERS_SKIP_IDLE`, default on, stack `799c242`). Same conditions as §14 and §12 (FG25 profile, EU mode 3 values, +10 dBm).
+
+**Behaviour.** With the option off, `dag_simple` logs are byte-identical to the previous stack commit (10 seeds × 300 s). With it on, they are byte-identical too (10 seeds × 300 s and × 600 s): 130/140 ready, median 146.7 s, no parent outside the topology. The LFN tests pass (idle 3 seeds × 3600 s, test traffic 10 seeds × 1800 s, parent loss 3 seeds × 900 s: lost 375.2–375.7 s after the last frame, operational again 816.6–821.5 s) and give the same logs as before, apart from one trace: `LFN frame 10 to …` prints the unset destination of a broadcast LPAS, whose bytes depend on the memory layout (110 lines over the 16 pairs of runs, no other difference). `test_lfn_mac.sh` and `test_radio_off.sh` pass.
+
+**Idle LFN, steady state 300–3600 s** (3 seeds; `test_lfn_join.sh` with `BR_PERIOD=0 LFN_PERIOD=0 DUR=3600`):
+
+| | Before | After |
+| --- | --- | --- |
+| Average current | 41.6, 42.4, 41.6 µA | 16.6, 17.3, 16.6 µA |
+| Wakes per second | 20.6 | 0.66 (0.66–0.68) |
+| of which protocol timer | 20.0 | 0.07 |
+| FHSS timers (listen windows) | 0.49 | 0.49 |
+| radio driver timers | 0.07 | 0.07 |
+| frames, event-loop tick | 0.02, 0.01 | 0.02, 0.01 |
+
+Where the 16.6 µA go (seed 1): radio listening 5.8, deep-sleep floor 4.6, TX 2.5, MCU in EM1 with the radio on 2.3, RX 0.6, charge per wake 0.36, MCU active 0.34, wake-up from deep sleep 0.07. The protocol wakes left (0.07/s, from the stack's `NS_PROTOCOL_TIMERS_SKIP_STATS` build) are periodic maintenance: the IPv6 neighbour cache GC every 20 s (0.050/s), the blacklist purge about every 60 s with a random draw (0.017/s), MLD's query timer every 125 s (0.006/s).
+
+With the test traffic (10 seeds × 1800 s): 49.6–54.5 µA instead of 74.6–79.5 µA (25.0 µA less in every seed), 1.7 wakes/s instead of 21.6.
+
+**FFN routers once joined** (`dag_simple`, 10 seeds, window 300–600 s, 140 node runs, median [min–max]): 19.3 [15.7–36.8] wakes/s instead of 37.7 [34.2–49.4]; protocol timer 1.17 [1.09–5.59] instead of 20.0; FHSS 13.7, radio 4.2, frames 0.15 unchanged. The current hardly moves (8.67 mA instead of 8.68 mA): RX listening dominates an FFN. The protocol wakes left come mainly from RPL's slow timer, which is not converted and runs every second while an RPL instance exists (0.89/s per router, seed 1), then the Wi-SUN PA/PC trickles (0.16/s) and the timers of routers still joining.
+
+Reproduce: the runs of §14 and `campaign.sh` with `POWER` set; the window figures come from two runs of each seed that differ only in duration: `sim_utils/vtime/wakes_window.py [--nodes 1] <300 s run> <3600 s run> …` (power.json alone covers the whole run).
+
