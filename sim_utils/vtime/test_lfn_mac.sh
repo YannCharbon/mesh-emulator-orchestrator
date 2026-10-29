@@ -86,8 +86,11 @@ opens = {}              # slot -> (time, channel)
 lfn_req, lfn_conf, lfn_rx = {}, {}, {}
 lfn_tx_spans = []       # own transmissions: (request, confirm)
 lfn_tx_starts = []      # start of every frame the LFN sent
+lfn_data_tx = []        # the same, without ACKs
 learnt = None
 stats = None
+pbc = None              # parent broadcast schedule: (interval start, interval, dwell) in s
+lto = None              # (time, offset ms, interval ms, ret)
 for t, m in lines('lfn.log'):
     if 'lfntest lfn: schedule started' in m:
         v = dict(kv.split('=') for kv in m.split()[4:])
@@ -99,6 +102,8 @@ for t, m in lines('lfn.log'):
             rx_frames.append(t)
     elif m.startswith('Transmitting ...'):
         lfn_tx_starts.append(t)
+        if int(re.search(r'len=(\d+)', m).group(1)) >= 30:
+            lfn_data_tx.append(t)         # not an ACK
     elif m.startswith('LFN window open:'):
         s, ch = re.search(r'slot (\d+) ch (\d+)', m).groups()
         opens[int(s)] = (t, int(ch))
@@ -113,6 +118,12 @@ for t, m in lines('lfn.log'):
         lfn_rx.setdefault(k, set()).add(int(seq))
     elif 'parent schedule learnt' in m:
         learnt = t
+    elif 'lfntest lfn: parent bc' in m:
+        v = dict(kv.split('=') for kv in m.split()[4:])
+        pbc = (t - int(v['offset']) / 1e3, int(v['interval']) / 1e3, int(v['dwell']) / 1e3)
+    elif 'lfntest lfn: lto' in m:
+        v = dict(kv.split('=') for kv in m.split()[3:])
+        lto = (t, int(v['offset']), int(v['interval']), int(v['ret']))
     elif 'lfntest stats' in m:
         stats = dict((a, int(b)) for a, b in re.findall(r'(\w+)=(\d+)', m))
 for h, (k, seq, tr) in lfn_req.items():
@@ -122,12 +133,20 @@ for h, (k, seq, tr) in lfn_req.items():
 check(sched is not None, 'LFN schedule started')
 I = sched['interval'] / 1e3; W = sched['window'] / 1e6; G = sched['guard'] / 1e6
 slot0 = sched['t_start'] + sched['first_slot_delay'] / 1e6
+I0 = I
+# With an LTO, the grid after it: anchored on the first window opened after
+# it (checked below against the LTO's offset and interval)
+win_opens = []           # (open time, slot), in order, from the log
+for t, m in lines('lfn.log'):
+    if m.startswith('LFN window open:'):
+        win_opens.append((t, int(re.search(r'slot (\d+)', m).group(1))))
+win_t = [t for t, s in win_opens]
+import bisect
 
-def slot_of(t):          # the slot whose window contains t, or None
-    n = round((t - slot0) / I)
-    for k in (n - 1, n, n + 1):
-        if slot0 + k * I - G - 1e-6 <= t < slot0 + k * I - G + W:
-            return k
+def slot_of(t):          # the window (actually opened) that contains t, or None
+    i = bisect.bisect_right(win_t, t + 1e-6) - 1
+    if i >= 0 and win_t[i] - 1e-6 <= t < win_t[i] + W:
+        return win_opens[i][1]
     return None
 
 # --- parent log
@@ -182,16 +201,33 @@ uok = [x for x in u if x[0] in lfn_conf and lfn_conf[x[0]][0] == 0]
 check(len(u) > 0 and len(uok) >= 0.8 * len(u) and all(x[1] in par_rx.get('U', set()) for x in uok),
       f'LFN -> parent: {len(uok)}/{len(u)} data frames acknowledged and received')
 
-# Windows: one per slot, on time
-last = max(opens) if opens else -1
-late = [s for s, (t, ch) in opens.items() if abs(t - (slot0 + s * I - G)) > 1e-6]
-check(opens and len(opens) == last + 1 and not late, f'{len(opens)} windows opened, slots 0..{last}, {len(late)} off time')
+# Windows: one per slot, on time (on the LTO's grid after an LTO)
+def expected_open(t_open, s):
+    if lto and t_open > lto[0]:
+        # slot n of the old grid nearest to the LTO frame, moved by the offset
+        n = round((lto[0] - slot0) / I0)
+        base = slot0 + n * I0 + lto[1] / 1e3
+        return base + ((s - n) % 65536) * (lto[2] / 1e3 if lto[2] else I0) - G
+    return slot0 + s * I0 - G
+late = [(t, s) for t, s in win_opens if abs(t - expected_open(t, s)) > 1e-6]
+gaps = [b[0] - a[0] for a, b in zip(win_opens, win_opens[1:]) if not (lto and a[0] < lto[0] < b[0] + 1)]
+I_after = (lto[2] / 1e3 if lto and lto[2] else I0)
+check(win_opens and not late and all(abs(g - I0) < 1e-6 or abs(g - I_after) < 1e-6 for g in gaps),
+      f'{len(win_opens)} windows opened, one per slot, {len(late)} off time' + (f' (first {late[0]})' if late else ''))
+if lto:
+    check(lto[3] == 0, f'LFN applied the LTO (offset {lto[1]} ms, interval {lto[2]} ms) at {lto[0]:.3f} s')
+# Uplinks clear of the parent's broadcast dwell (TX start to start + 5 ms)
+if pbc:
+    bs, bi, bd = pbc
+    up = [t for t in lfn_data_tx if learnt and t > learnt]
+    # 2 ms of slack: the BT-IE's offset is in whole ms
+    in_dwell = [t for t in up if ((t - bs) % bi) < bd - 0.002 or ((t - bs) % bi) + 0.005 > bi + 0.002]
+    check(up and not in_dwell, f'{len(up)} LFN uplink transmissions, {len(in_dwell)} in or into the parent broadcast dwell')
 if stats:
     print(f"info LFN FHSS: windows_opened={stats['windows_opened']} skipped={stats['windows_skipped']} closes_deferred={stats['closes_deferred']}")
 
 # Radio: on only in windows (with a deferred close) and around its own
-# transmissions: CSMA before (at most 100 ms: a MAC retry's backoff, which the
-# emulated radio spends listening, is 20-45 ms plus the CSMA backoff), the
+# transmissions: the CCA before (the backoff does not listen: idle), the
 # frame and the ACK wait after (at most 30 ms); off while a failed frame waits
 # for its restart
 CLOSE_SLACK = 0.02
@@ -202,6 +238,7 @@ def near_tx(s, e):
     return i < len(lfn_tx_starts) and lfn_tx_starts[i] - 0.1 <= s and e <= lfn_tx_starts[i] + 0.03 or \
         (i > 0 and lfn_tx_starts[i - 1] <= s and e <= lfn_tx_starts[i - 1] + 0.03)
 on_outside = 0.0
+outside_iv = []
 radio, mcu = {}, {}
 first = slot0 - G
 for line in open(f'{out}/power_log.txt'):
@@ -213,17 +250,19 @@ for line in open(f'{out}/power_log.txt'):
         continue
     s = max(s, first)
     (radio if part == 'radio' else mcu)[state] = (radio if part == 'radio' else mcu).get(state, 0) + (e - s)
-    if part != 'radio' or state == 'off':
-        continue
-    n = round((s - slot0) / I)
-    in_win = any(slot0 + k * I - G - 1e-6 <= s and e <= slot0 + k * I - G + W + CLOSE_SLACK for k in (n - 1, n, n + 1))
+    if part != 'radio' or state in ('off', 'idle'):
+        continue           # idle: a CSMA backoff outside the windows, not listening
+    i = bisect.bisect_right(win_t, s + 1e-6) - 1
+    in_win = i >= 0 and win_t[i] - 1e-6 <= s and e <= win_t[i] + W + CLOSE_SLACK
     in_tx = near_tx(s, e)
     if not in_win and not in_tx:
         on_outside += e - s
+        outside_iv.append((s, e, state))
 span = dur - first
 off = radio.get('off', 0)
-check(on_outside < 1e-3, f'LFN radio on outside its windows and its transmissions (TX, ACK, off): {on_outside*1e3:.3f} ms')
-check(off > (1 - W / I - 0.02) * span, f'LFN radio off {off:.1f} s of {span:.1f} s ({100*off/span:.2f} %; windows are {100*W/I:.2f} % of the time)')
+check(on_outside < 1e-3, f'LFN radio listening or sending outside its windows and its transmissions (TX, ACK, off): {on_outside*1e3:.3f} ms'
+      + (f' (first: {outside_iv[0][0]:.6f}-{outside_iv[0][1]:.6f} s {outside_iv[0][2]})' if outside_iv else ''))
+check(off + radio.get('idle', 0) > (1 - W / I - 0.02) * span, f'LFN radio off {off:.1f} s, idle {radio.get("idle", 0):.2f} s of {span:.1f} s ({100*off/span:.2f} % off; windows are {100*W/I:.2f} % of the time)')
 check(mcu.get('deep_sleep', 0) > 0.9 * span, f'LFN MCU in deep sleep {mcu.get("deep_sleep", 0):.1f} s of {span:.1f} s')
 
 report = json.load(open(f'{out}/power.json'))

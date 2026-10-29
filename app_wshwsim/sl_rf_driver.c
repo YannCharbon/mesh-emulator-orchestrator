@@ -157,6 +157,11 @@ static unsigned long rf_frames_lost_off;
 /* WSSIM_RADIO_OFF=0: PHY_INTERFACE_DOWN leaves the radio listening, as before
  * the off state existed (for comparisons with older runs). Default 1. */
 static bool rf_off_state_enabled = true;
+/* PHY_EXTENSION_SET_BACKOFF_RX_OFF (sent only by an LFN's MAC): the next CSMA
+ * backoff does not listen (power ledger: idle; frames arriving are lost);
+ * rf_csma_deaf holds it for the backoff in progress */
+static bool rf_backoff_rx_off;
+static bool rf_csma_deaf;
 
 /* Buffers for RX and TX */
 #define MAX_TXRX_BUFFERS 128
@@ -379,8 +384,9 @@ static uint8_t rf_power_state(void)
         return SIM_RADIO_OFF;
     case DRVSTATE_IDLE:
         return SIM_RADIO_IDLE;
-    case DRVSTATE_IDLE_WAITING_RX:
     case DRVSTATE_CSMA_STARTED:
+        return rf_csma_deaf ? SIM_RADIO_IDLE : SIM_RADIO_LISTEN;
+    case DRVSTATE_IDLE_WAITING_RX:
         return SIM_RADIO_LISTEN;
     case DRVSTATE_RX:
         return SIM_RADIO_RECEIVE;
@@ -589,7 +595,7 @@ void phy_rf_rx_now(void)
     pkt_len = hdr->len;
     pkt_chan = hdr->chan;
     pkt_seq = hdr->seq;
-    if (driver_state == DRVSTATE_OFF) {
+    if (driver_state == DRVSTATE_OFF || (driver_state == DRVSTATE_CSMA_STARTED && rf_csma_deaf)) {
         rf_frames_lost_off++;
         INFO("rf rx lost: radio off, chan=%d len=%d rxseq=%d (%lu lost)", pkt_chan, pkt_len, pkt_seq,
              rf_frames_lost_off);
@@ -1125,6 +1131,7 @@ static int8_t phy_rf_tx(uint8_t *data_ptr, uint16_t data_len, uint8_t tx_handle,
 
     //platform_enter_critical();
     mac_tx_handle = tx_handle;
+    rf_csma_deaf = rf_backoff_rx_off;
     driver_state = DRVSTATE_CSMA_STARTED;
     set_shm_cca_state();
     // flush, then transfer data to outgoing fifo ring buffer
@@ -1433,6 +1440,12 @@ static int8_t phy_rf_extension(phy_extension_type_e extension_type, uint8_t *dat
                 // A frame is on its way in (its airtime runs): an LFN's
                 // receive window closes only after it (GS8 stage 2)
                 *data_ptr = driver_state == DRVSTATE_RX;
+                break;
+            }
+            case PHY_EXTENSION_SET_BACKOFF_RX_OFF: {
+                // FAN 1.1 LFN outside its windows: no listening during the
+                // coming CSMA backoff (GS8; docs/POWER_MODEL.md §13)
+                rf_backoff_rx_off = *data_ptr != 0;
                 break;
             }
             default:

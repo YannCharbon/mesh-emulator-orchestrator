@@ -59,6 +59,8 @@
 #define PAN_ID          0xabcd
 #define WH_IE_ID        0x2a
 #define SUB_UTT         1
+#define SUB_BT          2
+#define SUB_LTO         17
 #define SUB_LUTT        10
 #define SUB_LUS         13
 
@@ -86,6 +88,9 @@ static struct {
     uint32_t solicit_period_ms;
     uint16_t payload;
     uint8_t max_frame_retries;
+    // LTO-IE in the parent's answer (0, 0: none)
+    uint32_t lto_offset_ms;
+    uint32_t lto_interval_ms;
 } cfg;
 
 static mac_api_t *mac;
@@ -96,6 +101,7 @@ static bool peer_known;                            // its schedule is known
 static uint16_t seq_tx;
 static uint8_t msdu_handle;
 static uint32_t channel_mask[8];
+static int lto_handle = -1;                        // parent: the answer that carries the LTO
 
 /* ------------------------------------------------------------- IEs */
 
@@ -149,14 +155,14 @@ static void peer_channel_plan(void)
 
 /* ------------------------------------------------------------- TX */
 
-static void send_frame(char kind, bool unicast, bool lfn_ies)
+static void send_frame(char kind, bool unicast, bool lfn_ies, bool lto)
 {
     // The MAC keeps pointers to the IEs and the payload until the confirm
     // (an asynchronous frame is rebuilt for every channel): one buffer per
     // MSDU handle
     static struct {
         uint8_t pies[2 + 256];
-        uint8_t ies[32];
+        uint8_t ies[48];
         ns_ie_iovec_t hdr_vec;
         ns_ie_iovec_t pl_vec;
     } bufs[256];
@@ -184,6 +190,18 @@ static void send_frame(char kind, bool unicast, bool lfn_ies)
         *p++ = 0;
         memset(p, 0, 3);
         p += 3;
+        // BT-IE: the parent's broadcast slot and offset (FHSS, TX time)
+        if (cfg.bc_interval_ms && cfg.bc_dwell_ms) {
+            p = wh_write(p, SUB_BT, 5);
+            memset(p, 0, 5);
+            p += 5;
+        }
+        if (lto) {
+            p = wh_write(p, SUB_LTO, 6);
+            p = common_write_24_bit_inverse(cfg.lto_offset_ms, p);
+            p = common_write_24_bit_inverse(cfg.lto_interval_ms, p);
+            lto_handle = handle;
+        }
     }
     hdr_vec->ieBase = ies;
     hdr_vec->iovLen = p - ies;
@@ -260,6 +278,31 @@ static void data_ind_ext(const mac_api_t *api, const mcps_data_ind_t *ind, const
                 timer_ms(TMR_LFN_TX, cfg.lfn_tx_period_ms);
             }
         }
+        // The parent's BT-IE: its broadcast schedule, which uplinks avoid
+        c = wh_find(ie->headerIeList, ie->headerIeListLength, SUB_BT, &clen);
+        if (c && clen >= 5) {
+            broadcast_timing_info_t bt = {
+                .broadcast_channel_function = WS_DH1CF,
+                .broadcast_dwell_interval = cfg.bc_dwell_ms,
+                .broadcast_interval = cfg.bc_interval_ms,
+                .broadcast_slot = common_read_16_bit_inverse(c),
+                .broadcast_interval_offset = common_read_24_bit_inverse(c + 2),
+                .bt_rx_timestamp = ind->timestamp,
+            };
+            ns_fhss_ws_set_parent(fhss, cfg.peer, &bt, true);
+            INFO("lfntest lfn: parent bc offset=%"PRIu32" ts=%"PRIu32" interval=%"PRIu32" dwell=%u",
+                 (uint32_t)bt.broadcast_interval_offset, bt.bt_rx_timestamp, bt.broadcast_interval, bt.broadcast_dwell_interval);
+        }
+        // LTO-IE: move the listen schedule
+        c = wh_find(ie->headerIeList, ie->headerIeListLength, SUB_LTO, &clen);
+        if (c && clen >= 6) {
+            uint32_t off = common_read_24_bit_inverse(c), ivl = common_read_24_bit_inverse(c + 3);
+            int ret = ns_fhss_ws_lfn_timing_set(fhss, off, ivl, ind->timestamp);
+            if (!ret && ivl) {
+                cfg.listen.listen_interval_ms = ivl;
+            }
+            INFO("lfntest lfn: lto offset=%"PRIu32" interval=%"PRIu32" ts=%"PRIu32" ret=%d", off, ivl, ind->timestamp, ret);
+        }
     } else {
         // The LFN's LUTT-IE and LUS-IE: its unicast listen schedule
         const uint8_t *lus = wh_find(ie->headerIeList, ie->headerIeListLength, SUB_LUS, &clen);
@@ -277,7 +320,7 @@ static void data_ind_ext(const mac_api_t *api, const mcps_data_ind_t *ind, const
                  peer_info.lfn_uc_timing_info.listen_interval_ms, peer_info.lfn_uc_timing_info.slot_number,
                  (uint32_t)peer_info.lfn_uc_timing_info.interval_offset_ms);
             if (first) {
-                send_frame('A', true, false);
+                send_frame('A', true, false, cfg.lto_offset_ms || cfg.lto_interval_ms);
                 timer_ms(TMR_PARENT_TX, cfg.parent_tx_period_ms);
             }
         }
@@ -291,6 +334,14 @@ static void data_conf_ext(const mac_api_t *api, const mcps_data_conf_t *conf, co
     (void)payload;
     INFO("lfntest conf handle=%u status=%u tx_retries=%u cca_retries=%u", conf->msduHandle, conf->status,
          conf->tx_retries, conf->cca_retries);
+    if (!cfg.lfn && conf->msduHandle == lto_handle) {
+        lto_handle = -1;
+        if (conf->status == MLME_SUCCESS) {
+            // The LFN applied the LTO: its schedule as it now runs
+            int ret = ns_fhss_ws_lfn_neighbor_lto(fhss, cfg.peer, cfg.lto_offset_ms, cfg.lto_interval_ms, conf->timestamp);
+            INFO("lfntest parent: lto applied ts=%"PRIu32" ret=%d", conf->timestamp, ret);
+        }
+    }
 }
 
 static void ack_req_ext(const mac_api_t *api, mcps_ack_data_payload_t *data, int8_t rssi, uint8_t lqi)
@@ -409,18 +460,18 @@ static void tasklet_cb(arm_event_t *ev)
     switch (ev->event_id) {
         case TMR_SOLICIT:
             if (!peer_known) {
-                send_frame('S', false, true);
+                send_frame('S', false, true, false);
                 timer_ms(TMR_SOLICIT, cfg.solicit_period_ms);
             }
             break;
         case TMR_PARENT_TX:
-            send_frame('D', true, false);
+            send_frame('D', true, false, false);
             stats_report();
             timer_ms(TMR_PARENT_TX, cfg.parent_tx_period_ms +
                      (cfg.parent_tx_jitter_ms ? rand_get_random_in_range(0, cfg.parent_tx_jitter_ms) : 0));
             break;
         case TMR_LFN_TX:
-            send_frame('U', true, true);
+            send_frame('U', true, true, false);
             stats_report();
             timer_ms(TMR_LFN_TX, cfg.lfn_tx_period_ms);
             break;
@@ -443,6 +494,7 @@ static void usage(FILE *f)
             "  --close-retry-us=<us>      --first-slot-delay-us=<us>\n"
             "LFN parent (role parent):\n"
             "  --tx-offset-us=<us>  --tx-lead-us=<us>  --tx-min-prep-us=<us>  --tx-ttl-intervals=<n>\n"
+            "  --lto-offset-ms=<ms> --lto-interval-ms=<ms>  LTO-IE in the answer to the solicit (none)\n"
             "Traffic:\n"
             "  --parent-tx-period-ms=<ms>    (3000)  --parent-tx-jitter-ms=<ms>  (1000)\n"
             "  --lfn-tx-period-ms=<ms>       (10000) --solicit-period-ms=<ms>    (2000)\n"
@@ -463,6 +515,7 @@ static void parse(int argc, char *argv[])
     enum {
         O_ROLE = 256, O_PEER, O_DATARATE, O_CHANNELS, O_UCDWELL, O_BCINT, O_BCDWELL, O_LISTEN, O_WINDOW, O_GUARD,
         O_CLOSERETRY, O_FIRSTSLOT, O_TXOFF, O_TXLEAD, O_TXPREP, O_TTL, O_PTX, O_PJIT, O_LTX, O_SOL, O_PAYLOAD, O_RETRIES,
+        O_LTOOFF, O_LTOIVL,
     };
     static const struct option opts[] = {
         { "role", required_argument, 0, O_ROLE }, { "peer", required_argument, 0, O_PEER },
@@ -476,6 +529,7 @@ static void parse(int argc, char *argv[])
         { "parent-tx-period-ms", required_argument, 0, O_PTX }, { "parent-tx-jitter-ms", required_argument, 0, O_PJIT },
         { "lfn-tx-period-ms", required_argument, 0, O_LTX }, { "solicit-period-ms", required_argument, 0, O_SOL },
         { "payload", required_argument, 0, O_PAYLOAD }, { "max-frame-retries", required_argument, 0, O_RETRIES },
+        { "lto-offset-ms", required_argument, 0, O_LTOOFF }, { "lto-interval-ms", required_argument, 0, O_LTOIVL },
         { "help", no_argument, 0, 'h' },
         { 0 }
     };
@@ -525,6 +579,8 @@ static void parse(int argc, char *argv[])
             case O_SOL: cfg.solicit_period_ms = v; break;
             case O_PAYLOAD: FATAL_ON(v < 3 || v > 200, 1, "--payload 3..200"); cfg.payload = v; break;
             case O_RETRIES: FATAL_ON(v > 7, 1, "--max-frame-retries 0..7"); cfg.max_frame_retries = v; break;
+            case O_LTOOFF: cfg.lto_offset_ms = v; break;
+            case O_LTOIVL: cfg.lto_interval_ms = v; break;
             case 'h': usage(stdout); exit(0);
             default: usage(stderr); exit(1);
         }
