@@ -131,6 +131,14 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
     ret = arm_nwk_set_tx_output_power(ctxt->rcp_if_id, ctxt->tx_power);
     WARN_ON(ret);
 
+    // FAN 1.1 LFN (GS8 stage 3): FAN 1.1, its settings; the receiver is off
+    // outside its windows
+    if (ctxt->lfn) {
+        FATAL_ON(ctxt->ws_fan_version != 2, 1, "device_type = lfn: needs fan_version = 1.1");
+        ret = ws_management_lfn_settings_set(ctxt->rcp_if_id, &ctxt->lfn_cfg);
+        FATAL_ON(ret, 1, "lfn_*: invalid LFN settings (%d)", ret);
+        INFO("LFN (FAN 1.1 Limited Function Node)");
+    }
     // FAN 1.1 at run time (GS8, LFN study U1); FAN 1.0 stays the default
     if (ctxt->ws_fan_version != 1) {
         ret = ws_management_fan_version_set(ctxt->rcp_if_id, ctxt->ws_fan_version);
@@ -192,13 +200,16 @@ static void wsbr_tasklet(struct arm_event_s *event)
             // The tasklet that call arm_nwk_interface_configure_*_bootstrap_set()
             // will be used to receive ARM_LIB_NWK_INTERFACE_EVENT.
             if (arm_nwk_interface_configure_6lowpan_bootstrap_set(ctxt->rcp_if_id,
-                                                                  NET_6LOWPAN_ROUTER,
+                                                                  ctxt->lfn ? NET_6LOWPAN_HOST : NET_6LOWPAN_ROUTER,
                                                                   NET_6LOWPAN_WS))
+
                 WARN("arm_nwk_interface_configure_6lowpan_bootstrap_set");
             wsbr_configure_ws(ctxt);
             if (arm_nwk_interface_up(ctxt->rcp_if_id))
                  WARN("arm_nwk_interface_up RCP");
             multicast_set_parameters(10,0,1,1,75);
+            test_traffic_start(&ctxt->test_traffic);
+
             if (ctxt->rx_off_after_s >= 0)
                 eventOS_event_timer_request(0, WSROUTER_EVENT_RX_OFF, event->receiver,
                                             (uint32_t)ctxt->rx_off_after_s * 1000);

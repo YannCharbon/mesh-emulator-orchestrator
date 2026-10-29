@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Compare the logs of two runs byte for byte.
 
-usage: compare_logs.py <run A> <run B> [--quiet] [--mask-pointers]
+usage: compare_logs.py <run A> <run B> [--quiet] [--mask-pointers] [--mask-source-lines]
 
 Compares every node<i>.log, br.log, log_wsbr and exit_codes.txt that is in
 either run, and reports, per file, "same", "missing in A/B", or the first line
 that differs (line number and both lines). simserver.log is compared too but
 only for information: wssimserver prints wall-clock figures (§3 of
 docs/VIRTUAL_TIME.md), so it is expected to differ.
+
+--mask-source-lines replaces the source line numbers that the programs' own
+traces print ("function():123:") with "N", so that a change elsewhere in a
+program's source does not count as a difference.
 
 --mask-pointers replaces printed addresses (0x and 8 or more hex digits) with
 "PTR" before comparing. They depend on the memory layout, which changes with
@@ -28,6 +32,8 @@ def sort_key(name):
 
 
 POINTER = re.compile(rb'0x[0-9a-fA-F]{8,}')
+mask_lines = False
+SOURCE_LINE = re.compile(rb'(\w+\(\)):\d+:')
 mask = False
 
 
@@ -40,6 +46,8 @@ def first_diff(pa, pb):
             n += 1
             if mask:
                 la, lb = POINTER.sub(b'PTR', la), POINTER.sub(b'PTR', lb)
+            if mask_lines:
+                la, lb = SOURCE_LINE.sub(rb'\1:N:', la), SOURCE_LINE.sub(rb'\1:N:', lb)
             if la != lb:
                 return n, la, lb
             if not la:
@@ -79,8 +87,9 @@ def compare(a, b, quiet=False):
 
 
 if __name__ == '__main__':
-    args = [x for x in sys.argv[1:] if x not in ('--quiet', '--mask-pointers')]
+    args = [x for x in sys.argv[1:] if x not in ('--quiet', '--mask-pointers', '--mask-source-lines')]
     mask = '--mask-pointers' in sys.argv
+    mask_lines = '--mask-source-lines' in sys.argv
     if len(args) != 2:
         print(__doc__, file=sys.stderr)
         sys.exit(2)

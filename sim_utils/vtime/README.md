@@ -5,7 +5,7 @@ Scripts for the step-1 gate of `docs/VIRTUAL_TIME.md` (§7). They need a virtual
 | Script | What |
 | --- | --- |
 | `run.sh` | One run: `wssimserver --vtime=<nodes> --vtime-end=<s>`, `wsbrd-inproc` and one `wsnode-inproc` per router, all on a socket of the run's own |
-| `compare_logs.py` | Compares two runs' logs byte for byte; prints the first differing line of each file |
+| `compare_logs.py` | Compares two runs' logs byte for byte; prints the first differing line of each file (`--mask-pointers`, `--mask-source-lines`) |
 | `determinism.sh` | Same seed twice and another seed once (§7.2) |
 | `gen_topology.py` | Connected topologies (random geometric graph or grid), deterministic from a seed |
 | `tun_setup.sh` | Creates `tunvt0`… (run once per boot with sudo): one TUN per border router running at the same time, all with the same fixed link-local address |
@@ -13,6 +13,7 @@ Scripts for the step-1 gate of `docs/VIRTUAL_TIME.md` (§7). They need a virtual
 | `speed.sh` | Wall time per simulated second and peak RSS at several sizes (§7.4) |
 | `test_radio_off.sh` | Radio off end to end (GS8 stage 1): router 1 turns RX off when idle at 150 s; checks that it then receives nothing, that frames are lost, that the ledger shows its radio off and its MCU in deep sleep, and the sums: `test_radio_off.sh build-vt $(pwd) runs/radio_off` (`TUN=tunvt0`) |
 | `test_lfn_mac.sh` | FAN 1.1 LFN unicast mechanics in the MAC and FHSS (GS8 stage 2): a parent and an LFN (`wslfntest-inproc`, MAC only); checks that the LFN receives only in its windows (on the LTO grid after an LTO, `PARENT_OPTS="--lto-offset-ms=1200 --lto-interval-ms=5000"`), on the right channels, that its radio does not listen otherwise (TX, ACK, off; idle during backoffs), that its uplinks avoid the parent's broadcast dwell and that the parent's frames wait for a window: `test_lfn_mac.sh build-vt $(pwd) runs/lfn_mac` (`WSSIM_SEED`, `RSSI`, `DUR`, `LFN_OPTS`, `PARENT_OPTS`; `docs/POWER_MODEL.md` §13) |
+| `test_lfn_join.sh` | FAN 1.1 LFN under the border router (GS8 stage 3; the stack's `docs/LFN_STACK.md`): `wsbrd-inproc` with `examples/wsbrd-lfn.conf`, `wsnode-inproc` as an LFN with `examples/wsnode-lfn.conf`, UDP test traffic both ways and to `ff02::1` (`app_wsbrd/test_traffic.c`, keys `test_udp_*`); checks the join, the traffic, the multicast copies, that the LFN receives only in its windows and keeps its parent, and prints the LFN's steady-state current by part: `test_lfn_join.sh build-vt $(pwd) runs/lfn_join` (`TUN`, `WSSIM_SEED`, `DUR`, `RSSI`, `STEADY_FROM`, `TX_POWER`, `BR_PERIOD`, `LFN_PERIOD`, `LFN_EXTRA`, `BR_EXTRA`) |
 | `test_power.py` | Test of the power ledger (`docs/POWER_MODEL.md`): one scripted node, totals checked against hand-computed ones, also with per-PHY-mode profile values (§6.2) and `--power-mode`, and profiles the parser must reject: `test_power.py build-vt/wssimserver` |
 
 Analysis: `sim_utils/migration/analyze.py` reads these runs as it reads the wall-clock ones (`brtree` lines of `br.log` instead of `dbus_nodes.txt`).

@@ -189,6 +189,16 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
     }
     FATAL_ON(!ctxt->rx_on_when_idle || ctxt->rx_off_after_s >= 0, 1,
              "rx_on_when_idle, rx_off_when_idle_after: router only (a border router must listen)");
+    FATAL_ON(ctxt->lfn, 1, "device_type = lfn: router program only");
+    // FAN 1.1 LFN parenting (GS8 stage 3)
+    if (ctxt->enable_lfn) {
+        ret = ws_management_lfn_settings_set(ctxt->rcp_if_id, &ctxt->lfn_cfg);
+        FATAL_ON(ret, 1, "lfn_*: invalid LFN settings (%d)", ret);
+        ret = ws_management_lfn_parent_set(ctxt->rcp_if_id, true);
+        FATAL_ON(ret, 1, "enable_lfn: needs fan_version = 1.1 (%d)", ret);
+        INFO("LFN parenting on");
+    }
+
 
     ret = ws_device_min_sens_set(ctxt->rcp_if_id, 174 - 93);
     WARN_ON(ret);
@@ -309,6 +319,8 @@ static void wsbr_tasklet(struct arm_event_s *event)
             // multicast ZigBee params with timer expiration = 0
             // Imin=10*50, Imax=Imin, k=1, t exp=0, window=75
             multicast_set_parameters(10,0,1,1,75);
+            test_traffic_start(&ctxt->test_traffic);
+
             INFO("Subscribing to multicast address");
             multicast_add_address(multi_cast_addr, 1);
 

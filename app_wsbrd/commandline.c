@@ -4,6 +4,7 @@
  *     - Jérôme Pouiller <jerome.pouiller@silabs.com>
  */
 #define _GNU_SOURCE
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -227,6 +228,7 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
 {
     char garbage; // detect garbage at end of the line
     char str_arg[256];
+    char str_arg2[64];
     char *substr;
     int int_arg;
     int i;
@@ -309,6 +311,58 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
         ctxt->ws_size = str_to_val(str_arg, valid_ws_size);
     } else if (sscanf(line, " fan_version = %s %c", str_arg, &garbage) == 1) {
         ctxt->ws_fan_version = str_to_val(str_arg, valid_fan_versions);
+    } else if (sscanf(line, " device_type = %s %c", str_arg, &garbage) == 1) {
+        if (!strcmp(str_arg, "lfn"))
+            ctxt->lfn = true;
+        else if (!strcmp(str_arg, "ffn"))
+            ctxt->lfn = false;
+        else
+            FATAL(1, "%s:%d: invalid device_type: %s (ffn or lfn)", filename, line_no, str_arg);
+    } else if (sscanf(line, " test_udp_dst = %s %c", str_arg, &garbage) == 1) {
+        if (ctxt->test_traffic.dst_count >= TEST_UDP_DST_MAX)
+            FATAL(1, "%s:%d: at most %d test_udp_dst", filename, line_no, TEST_UDP_DST_MAX);
+        if (!stoip6(str_arg, strlen(str_arg), ctxt->test_traffic.dst[ctxt->test_traffic.dst_count++]))
+            FATAL(1, "%s:%d: invalid address: %s", filename, line_no, str_arg);
+    } else if (sscanf(line, " test_udp_period_s = %d %c", &ctxt->test_traffic.period_s, &garbage) == 1) {
+        /* empty */
+    } else if (sscanf(line, " test_udp_start_s = %d %c", &ctxt->test_traffic.start_s, &garbage) == 1) {
+        /* empty */
+    } else if (sscanf(line, " test_udp_echo = %s %c", str_arg, &garbage) == 1) {
+        ctxt->test_traffic.echo = str_to_val(str_arg, valid_booleans);
+    } else if (sscanf(line, " enable_lfn = %s %c", str_arg, &garbage) == 1) {
+
+        ctxt->enable_lfn = str_to_val(str_arg, valid_booleans);
+    } else if (sscanf(line, " lfn_%63[a-z_] = %s %c", str_arg2, str_arg, &garbage) == 2) {
+        // FAN 1.1 LFN settings (GS8 stage 3): lfn_<field of ws_lfn_settings_t> = <value>
+        static const struct { const char *name; size_t off; int size; } lfn_keys[] = {
+#define K(f) { #f, offsetof(ws_lfn_settings_t, f), sizeof(((ws_lfn_settings_t *)0)->f) }
+            K(listen_interval_ms), K(listen_interval_min_ms), K(listen_interval_max_ms), K(eapol_listen_interval_ms),
+            K(rx_window_us), K(rx_guard_us), K(close_retry_us), K(uplink_guard_us), K(lpas_interval_s),
+            K(lnd_slot_time_ms), K(lnd_slots), K(lpcs_retry_intervals), K(maintain_parent_time),
+            K(lgtk_max_mismatch_s), K(registration_lifetime_min), K(bc_interval_ms), K(bc_sync_period), K(lto),
+            K(tx_offset_us), K(tx_lead_us), K(tx_min_prep_us), K(tx_ttl_intervals),
+#undef K
+        };
+        unsigned long v;
+        char *end;
+
+        for (i = 0; i < ARRAY_SIZE(lfn_keys); i++)
+            if (!strcmp(lfn_keys[i].name, str_arg2))
+                break;
+        if (i == ARRAY_SIZE(lfn_keys))
+            FATAL(1, "%s:%d: unknown setting: lfn_%s", filename, line_no, str_arg2);
+        if (!strcmp(str_arg, "true") || !strcmp(str_arg, "false"))
+            v = !strcmp(str_arg, "true");
+        else
+            v = strtoul(str_arg, &end, 0);
+        if (lfn_keys[i].size < (int)sizeof(v) && v >> (8 * lfn_keys[i].size))
+            FATAL(1, "%s:%d: lfn_%s: %s out of range", filename, line_no, str_arg2, str_arg);
+        uint8_t *dst = (uint8_t *)&ctxt->lfn_cfg + lfn_keys[i].off;
+        switch (lfn_keys[i].size) {
+            case 1: *dst = v; break;
+            case 2: *(uint16_t *)dst = v; break;
+            default: *(uint32_t *)dst = v; break;
+        }
     } else if (sscanf(line, " rx_on_when_idle = %s %c", str_arg, &garbage) == 1) {
         ctxt->rx_on_when_idle = str_to_val(str_arg, valid_booleans);
     } else if (sscanf(line, " rx_off_when_idle_after = %d %c", &ctxt->rx_off_after_s, &garbage) == 1) {
@@ -443,6 +497,8 @@ void parse_commandline(struct wsbr_ctxt *ctxt, int argc, char *argv[],
     ctxt->ws_fan_version = 1;
     ctxt->rx_on_when_idle = true;
     ctxt->rx_off_after_s = -1;
+    ws_management_lfn_settings_defaults(&ctxt->lfn_cfg);
+
     ctxt->uc_dwell_interval = WS_FHSS_UC_DWELL_INTERVAL;
     ctxt->bc_interval = WS_FHSS_BC_INTERVAL;
     ctxt->bc_dwell_interval = WS_FHSS_BC_DWELL_INTERVAL;

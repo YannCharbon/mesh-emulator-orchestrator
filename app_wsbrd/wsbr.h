@@ -23,6 +23,9 @@ typedef struct sd_bus sd_bus;
 #include "nanostack/mac/fhss_config.h"
 #include "nanostack/net_interface.h"
 #include "nanostack/source/mac/rf_driver_storage.h"
+#include "nanostack/ws_management_api.h"
+#include "test_traffic.h"
+
 
 struct phy_device_driver_s;
 struct eth_mac_api_s;
@@ -77,6 +80,11 @@ struct wsbr_ctxt {
     int  ws_fan_version;        // 1: FAN 1.0 (default), 2: FAN 1.1
     bool rx_on_when_idle;       // false: the MAC turns the radio off when idle
     int  rx_off_after_s;        // >= 0: RX off when idle from this many seconds after start
+    bool lfn;                   // device_type = lfn: a FAN 1.1 LFN (router program only)
+    bool enable_lfn;            // border router: parent LFNs (FAN 1.1)
+    ws_lfn_settings_t lfn_cfg;  // lfn_* settings (defaults: ws_management_lfn_settings_defaults())
+    struct test_traffic_cfg test_traffic; // test_udp_* (test_traffic.h)
+
     uint8_t ws_gtk[4][16];
     bool ws_gtk_force[4];
     uint8_t ipv6_prefix[16];

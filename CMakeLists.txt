@@ -96,6 +96,7 @@ add_executable(wsbrd
     app_wsbrd/wsbr.c
     app_wsbrd/node_table.c
     app_wsbrd/multicast_helper.c
+    app_wsbrd/test_traffic.c
     app_wsbrd/wsbr_mac.c
     app_wsbrd/wsbr_fhss_mac.c
     app_wsbrd/wsbr_fhss_net.c
@@ -167,6 +168,7 @@ if(COMPILE_SIMULATION_TOOLS)
     add_executable(wsnode
         version.c
         app_wsbrd/multicast_helper.c
+        app_wsbrd/test_traffic.c
         app_wsbrd/wsrouter.c
         app_wsbrd/wsbr_mac.c
         app_wsbrd/wsbr_fhss_mac.c
@@ -257,6 +259,7 @@ if(COMPILE_SIMULATION_TOOLS)
             version.c
             ${app_sources}
             app_wsbrd/multicast_helper.c
+            app_wsbrd/test_traffic.c
             app_wsbrd/commandline.c
             app_wsbrd/named_values.c
             application_protocols/mqtt/MQTTClient-C/src/MQTTClient.c

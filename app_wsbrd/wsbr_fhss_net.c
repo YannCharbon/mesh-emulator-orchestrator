@@ -188,3 +188,58 @@ int ns_fhss_ws_set_hop_count(const struct fhss_api *fhss_api, const uint8_t hop_
     return 0;
 }
 
+
+/* FAN 1.1 LFN (GS8): the Spinel protocol does not carry the LFN schedule,
+ * the LFN parent role or the neighbours' LFN timing yet (LFN study M12): the
+ * split programs refuse them, the in-process ones support them. */
+void ns_fhss_ws_lfn_listen_defaults(fhss_ws_lfn_listen_t *cfg)
+{
+    cfg->listen_interval_ms = FHSS_LFN_LISTEN_INTERVAL_MS_DEFAULT;
+    cfg->rx_window_us = FHSS_LFN_RX_WINDOW_US_DEFAULT;
+    cfg->rx_guard_us = FHSS_LFN_RX_GUARD_US_DEFAULT;
+    cfg->close_retry_us = FHSS_LFN_CLOSE_RETRY_US_DEFAULT;
+    cfg->first_slot_delay_us = FHSS_LFN_FIRST_SLOT_DELAY_US_DEFAULT;
+    cfg->uplink_guard_us = FHSS_LFN_UPLINK_GUARD_US_DEFAULT;
+}
+
+void ns_fhss_ws_lfn_parent_defaults(fhss_ws_lfn_parent_t *cfg)
+{
+    cfg->tx_offset_us = FHSS_LFN_TX_OFFSET_US_DEFAULT;
+    cfg->tx_lead_us = FHSS_LFN_TX_LEAD_US_DEFAULT;
+    cfg->tx_min_prep_us = FHSS_LFN_TX_MIN_PREP_US_DEFAULT;
+    cfg->tx_ttl_intervals = FHSS_LFN_TX_TTL_INTERVALS_DEFAULT;
+}
+
+int ns_fhss_ws_lfn_listen_set(const fhss_api_t *fhss_api, const fhss_ws_lfn_listen_t *cfg)
+{
+    (void)fhss_api;
+    if (cfg)
+        WARN("FAN 1.1 LFN: not supported by the split programs (Spinel, LFN study M12)");
+    return cfg ? -1 : 0;
+}
+
+int ns_fhss_ws_lfn_parent_set(const fhss_api_t *fhss_api, const fhss_ws_lfn_parent_t *cfg)
+{
+    (void)fhss_api;
+    if (cfg)
+        WARN("FAN 1.1 LFN parenting: not supported by the split programs (Spinel, LFN study M12)");
+    return cfg ? -1 : 0;
+}
+
+int ns_fhss_ws_lfn_listen_start(const fhss_api_t *fhss_api)
+{
+    (void)fhss_api;
+    return -1;
+}
+
+int ns_fhss_ws_lfn_timing_set(const fhss_api_t *fhss_api, uint32_t offset_ms, uint32_t interval_ms, uint32_t rx_timestamp_us)
+{
+    (void)fhss_api; (void)offset_ms; (void)interval_ms; (void)rx_timestamp_us;
+    return -1;
+}
+
+int ns_fhss_ws_lfn_neighbor_lto(const fhss_api_t *fhss_api, const uint8_t eui64[8], uint32_t offset_ms, uint32_t interval_ms, uint32_t tx_timestamp_us)
+{
+    (void)fhss_api; (void)eui64; (void)offset_ms; (void)interval_ms; (void)tx_timestamp_us;
+    return -1;
+}
