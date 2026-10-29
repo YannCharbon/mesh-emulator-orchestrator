@@ -4,7 +4,8 @@
 usage: power_summary.py [options] <run dir or power.json>...
 
 Per run: one line per node (average current, MCU and radio time shares,
-wakes and empty ticks per second, battery life) and the checks: the MCU's and
+wakes and empty ticks per second, battery life, the PHY mode the node ran and
+whose profile values were used: docs/POWER_MODEL.md §6.2) and the checks: the MCU's and
 the radio's state times (transitions included) must each add up to the run
 time. With several runs: per node, the median and range of the average
 current over the runs.
@@ -77,7 +78,7 @@ def main(argv):
             print(f"== {path}: {run_us / 1e6:.1f} s, seed {d['seed']}, profiles "
                   + ', '.join(f"{pr['name']} ({pr['kind']})" for pr in d['profiles']))
             print(f"{'node':>4} {'avg mA':>8} {'MCU act%':>8} {'deep%':>6} {'listen%':>7} {'recv%':>6} "
-                  f"{'TX%':>6} {'CCA/s':>6} {'wakes/s':>7} {'empty/s':>7} {'unseen/s':>8} {'life y':>7}")
+                  f"{'TX%':>6} {'CCA/s':>6} {'wakes/s':>7} {'empty/s':>7} {'unseen/s':>8} {'life y':>7} {'mode':>4} {'values':>6}")
         for n in d['nodes']:
             if only is not None and n['node'] not in only:
                 continue
@@ -97,7 +98,8 @@ def main(argv):
                       f"{pct(rs['receive']['time_us']):>6.3f} {pct(rs['tx']['time_us']):>6.3f} "
                       f"{rs['cca']['count'] / sec:>6.2f} {w['per_s']:>7.1f} {w['empty_ticks_per_s']:>7.1f} "
                       f"{w['unseen_frame_wakes'] / sec:>8.2f} "
-                      + (f"{life:>7.3f}" if life is not None else f"{'-':>7}"))
+                      + (f"{life:>7.3f}" if life is not None else f"{'-':>7}")
+                      + f" {n.get('phy_mode') or '-':>4} {n.get('profile_values', '-'):>6}")
         if not quiet:
             print()
     if len(paths) > 1:

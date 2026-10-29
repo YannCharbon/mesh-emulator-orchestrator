@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "common/log.h"
 #include "ns_port/power.h"
@@ -29,6 +30,8 @@ static const char *const mcu_names[MCU_STATES] = { "active", "sleep", "deep_slee
 static const char *const mt_names[MT_COUNT] = { "sleep_enter", "sleep_wake", "deep_enter", "deep_wake" };
 static const char *const radio_names[SIM_RADIO_STATES] = { "off", "idle", "listen", "receive", "tx" };
 static const char *const cause_names[NSIM_CAUSE_COUNT] = { "tick", "protocol", "mac", "fhss", "radio", "other" };
+// PHY modes (sim_proto.h, SIM_PHY_MODE_*), as wsbrd.conf's "mode" names them
+static const char *const mode_names[SIM_PHY_MODES] = { "", "1a", "1b", "2a", "2b", "3", "4a", "4b", "5" };
 
 struct pwr_profile {
     char path[512];
@@ -51,7 +54,20 @@ struct pwr_profile {
     // [radio_transitions]
     double t_rt[SIM_RADIO_STATES][SIM_RADIO_STATES], i_rt[SIM_RADIO_STATES][SIM_RADIO_STATES];
     struct ns_port_sleep_rule rule;
+    // Per PHY mode (docs/POWER_MODEL.md §6.2): the profile with the values
+    // of "key@MODE" lines, NULL for a mode without any. mode: the PHY mode
+    // of this copy's values, 0 for the common values (the profile itself).
+    int mode;
+    struct pwr_profile *by_mode[SIM_PHY_MODES];
     struct pwr_profile *next;
+};
+
+// A "key@MODE = value" line, applied once the common values are read
+struct pwr_mode_line {
+    int mode, line;
+    char key[160];
+    char val[1024];
+    struct pwr_mode_line *next;
 };
 
 #define F(field) offsetof(struct pwr_profile, field)
@@ -175,12 +191,100 @@ static void parse_string(char *dst, size_t size, const char *path, int line, con
     strcpy(dst, val);
 }
 
+#define PWR_NKEYS (sizeof(profile_keys) / sizeof(profile_keys[0]))
+
+// A mode name ("1a", "3"; any case) to its SIM_PHY_MODE_*, -1 if none
+static int mode_by_name(const char *name)
+{
+    int i;
+
+    for (i = 1; i < SIM_PHY_MODES; i++)
+        if (!strcasecmp(name, mode_names[i]))
+            return i;
+    return -1;
+}
+
+// One "section.key = value" of the [mcu], [cycles], [radio] or
+// [radio_transitions] sections. seen[PWR_NKEYS] stands for radio.tx_ma.
+static void profile_set(struct pwr_profile *p, bool *seen, int line, const char *key, char *val)
+{
+    size_t i;
+
+    if (!strncmp(key, "radio_transitions.", strlen("radio_transitions."))) {
+        parse_transition(p, line, key + strlen("radio_transitions."), val);
+        return;
+    }
+    if (!strcmp(key, "radio.tx_ma")) {
+        FATAL_ON(seen[PWR_NKEYS], 1, "%s:%d: %s given twice", p->path, line, key);
+        seen[PWR_NKEYS] = true;
+        p->tx_n = 0;
+        parse_tx_levels(p, line, val);
+        return;
+    }
+    for (i = 0; i < PWR_NKEYS; i++)
+        if (!strcmp(key, profile_keys[i].key))
+            break;
+    FATAL_ON(i == PWR_NKEYS, 1, "%s:%d: unknown key %s", p->path, line, key);
+    FATAL_ON(seen[i], 1, "%s:%d: %s given twice", p->path, line, key);
+    seen[i] = true;
+    *(double *)((char *)p + profile_keys[i].off) = parse_number(p->path, line, key, val);
+}
+
+static void profile_check(struct pwr_profile *p)
+{
+    const char *path = p->path;
+
+    FATAL_ON(!p->tx_n, 1, "%s: missing radio.tx_ma", path);
+    FATAL_ON(p->clock_mhz <= 0 || p->supply_v <= 0, 1, "%s: clock and supply must be > 0", path);
+    p->rule.deep_min_us = ns_port_deep_min_us(p->i_mcu[MCU_SLEEP], p->i_mcu[MCU_DEEP],
+                                              p->t_mt[MT_DEEP_ENTER], p->i_mt[MT_DEEP_ENTER],
+                                              p->t_mt[MT_DEEP_WAKE], p->i_mt[MT_DEEP_WAKE]);
+}
+
+// The profile for each PHY mode that has "key@MODE" lines: a copy of the
+// common values with that mode's lines applied, in file order.
+static void profile_modes(struct pwr_profile *p, struct pwr_mode_line *lines)
+{
+    struct pwr_mode_line *l;
+    struct pwr_profile *q;
+    int m;
+
+    for (m = 1; m < SIM_PHY_MODES; m++) {
+        bool seen[PWR_NKEYS + 1] = { };
+
+        q = NULL;
+        for (l = lines; l; l = l->next) {
+            if (l->mode != m)
+                continue;
+            if (!q) {
+                q = malloc(sizeof(*q));
+                FATAL_ON(!q, 1, "malloc: %m");
+                *q = *p;
+                q->mode = m;
+                q->next = NULL;
+                memset(q->by_mode, 0, sizeof(q->by_mode));
+            }
+            profile_set(q, seen, l->line, l->key, l->val);
+        }
+        if (q) {
+            profile_check(q);
+            p->by_mode[m] = q;
+        }
+    }
+    while (lines) {
+        l = lines->next;
+        free(lines);
+        lines = l;
+    }
+}
+
 static struct pwr_profile *profile_load(const char *path)
 {
-    bool seen[sizeof(profile_keys) / sizeof(profile_keys[0])] = { };
-    char section[64] = "", key[160], buf[1024], *s, *eq, *val, *c;
+    bool seen[PWR_NKEYS + 1] = { };
+    char section[64] = "", key[160], buf[1024], *s, *eq, *val, *c, *at;
     struct pwr_profile *p = calloc(1, sizeof(*p));
-    int line = 0;
+    struct pwr_mode_line *lines = NULL, **tail = &lines, *l;
+    int line = 0, mode;
     size_t i;
     FILE *f;
 
@@ -213,10 +317,27 @@ static struct pwr_profile *profile_load(const char *path)
         FATAL_ON(!eq || !*section, 1, "%s:%d: expected \"key = value\" in a section", path, line);
         *eq = '\0';
         val = trim(eq + 1);
+        // "key@MODE": the value for nodes that run this PHY mode
+        mode = 0;
+        if ((at = strchr(s, '@'))) {
+            *at = '\0';
+            mode = mode_by_name(trim(at + 1));
+            FATAL_ON(mode < 0, 1, "%s:%d: unknown PHY mode \"%s\" (1a 1b 2a 2b 3 4a 4b 5)",
+                     path, line, trim(at + 1));
+            FATAL_ON(!strcmp(section, "profile"), 1, "%s:%d: [profile] keys do not depend on the PHY mode",
+                     path, line);
+        }
         FATAL_ON(snprintf(key, sizeof(key), "%s.%s", section, trim(s)) >= sizeof(key), 1,
                  "%s:%d: key too long", path, line);
-        if (!strcmp(section, "radio_transitions")) {
-            parse_transition(p, line, key + strlen("radio_transitions."), val);
+        if (mode) {
+            l = calloc(1, sizeof(*l));
+            FATAL_ON(!l, 1, "calloc: %m");
+            l->mode = mode;
+            l->line = line;
+            strcpy(l->key, key);
+            strcpy(l->val, val);
+            *tail = l;
+            tail = &l->next;
             continue;
         }
         if (!strcmp(key, "profile.name")) {
@@ -227,32 +348,19 @@ static struct pwr_profile *profile_load(const char *path)
             parse_string(p->kind, sizeof(p->kind), path, line, val);
             continue;
         }
-        if (!strcmp(key, "radio.tx_ma")) {
-            parse_tx_levels(p, line, val);
-            continue;
-        }
-        for (i = 0; i < sizeof(profile_keys) / sizeof(profile_keys[0]); i++)
-            if (!strcmp(key, profile_keys[i].key))
-                break;
-        FATAL_ON(i == sizeof(profile_keys) / sizeof(profile_keys[0]), 1, "%s:%d: unknown key %s",
-                 path, line, key);
-        FATAL_ON(seen[i], 1, "%s:%d: %s given twice", path, line, key);
-        seen[i] = true;
-        *(double *)((char *)p + profile_keys[i].off) = parse_number(path, line, key, val);
+        profile_set(p, seen, line, key, val);
     }
     fclose(f);
     FATAL_ON(!p->name[0], 1, "%s: missing profile.name", path);
     FATAL_ON(!p->tx_n, 1, "%s: missing radio.tx_ma", path);
-    for (i = 0; i < sizeof(profile_keys) / sizeof(profile_keys[0]); i++)
+    for (i = 0; i < PWR_NKEYS; i++)
         FATAL_ON(!seen[i] && !profile_keys[i].optional, 1, "%s: missing %s", path, profile_keys[i].key);
     if (!strcmp(p->kind, "mcu+rcp"))
         FATAL(1, "%s: MCU + RCP profiles need the split programs in virtual time (EM3 step 2)", path);
     FATAL_ON(strcmp(p->kind, "soc") && strcmp(p->kind, "mcu+transceiver"), 1,
              "%s: profile.kind must be soc or mcu+transceiver, got \"%s\"", path, p->kind);
-    FATAL_ON(p->clock_mhz <= 0 || p->supply_v <= 0, 1, "%s: clock and supply must be > 0", path);
-    p->rule.deep_min_us = ns_port_deep_min_us(p->i_mcu[MCU_SLEEP], p->i_mcu[MCU_DEEP],
-                                              p->t_mt[MT_DEEP_ENTER], p->i_mt[MT_DEEP_ENTER],
-                                              p->t_mt[MT_DEEP_WAKE], p->i_mt[MT_DEEP_WAKE]);
+    profile_check(p);
+    profile_modes(p, lines);
     return p;
 }
 
@@ -281,7 +389,10 @@ static double tx_current(const struct pwr_profile *p, double dbm, bool *clamped)
 
 struct pwr_node {
     int id;
-    const struct pwr_profile *p;
+    const struct pwr_profile *base;     // the node's profile (common values)
+    const struct pwr_profile *p;        // the values in use: base, or its copy for a PHY mode
+    int mode_radio;                     // PHY mode the radio reported (0: none yet)
+    int mode_user;                      // --power-mode: -1 auto (the radio's), 0 common values, or a mode
 
     // MCU: active from act_start until busy_until (the modelled work), then
     // asleep at depth until the next wake.
@@ -332,6 +443,8 @@ static struct {
         char *spec;
     } node_specs[64];
     int node_specs_n;
+    char *mode_specs[64];               // --power-mode=[IDS:]MODE
+    int mode_specs_n;
     const char *out_path;
     const char *log_path;
     bool has_cell;
@@ -356,6 +469,29 @@ void pwr_add_node_profile(const char *spec)
     FATAL_ON(pwr.node_specs_n >= 64, 1, "--power-node: at most 64");
     FATAL_ON(!strchr(spec, ':'), 1, "--power-node: expected IDS:PROFILE, got %s", spec);
     pwr.node_specs[pwr.node_specs_n++].spec = strdup(spec);
+}
+
+// "auto" -1, "common" 0, or a mode name
+static int mode_choice(const char *name)
+{
+    int m;
+
+    if (!strcmp(name, "auto"))
+        return -1;
+    if (!strcmp(name, "common"))
+        return 0;
+    m = mode_by_name(name);
+    FATAL_ON(m < 0, 1, "--power-mode: expected auto, common or a PHY mode (1a 1b 2a 2b 3 4a 4b 5), got %s", name);
+    return m;
+}
+
+void pwr_set_mode(const char *spec)
+{
+    const char *colon = strchr(spec, ':');
+
+    FATAL_ON(pwr.mode_specs_n >= 64, 1, "--power-mode: at most 64");
+    mode_choice(colon ? colon + 1 : spec);
+    pwr.mode_specs[pwr.mode_specs_n++] = strdup(spec);
 }
 
 void pwr_set_out(const char *path)
@@ -399,6 +535,9 @@ static struct pwr_profile *profile_get(const char *path)
     pwr.profiles = p;
     INFO("power: profile %s (%s, %s): deep sleep from %llu us of idle", p->name, p->kind, path,
          (unsigned long long)p->rule.deep_min_us);
+    for (int m = 1; m < SIM_PHY_MODES; m++)
+        if (p->by_mode[m])
+            INFO("power: profile %s: values for PHY mode %s", p->name, mode_names[m]);
     return p;
 }
 
@@ -439,6 +578,28 @@ static const struct pwr_profile *profile_of(int node)
     return profile_get(path);
 }
 
+// The node's --power-mode: the last one that names it (or names no node) wins
+static int mode_user_of(int node)
+{
+    const char *spec, *colon;
+    int i, m = -1;
+
+    for (i = 0; i < pwr.mode_specs_n; i++) {
+        spec = pwr.mode_specs[i];
+        colon = strchr(spec, ':');
+        if (!colon)
+            m = mode_choice(spec);
+        else if (spec_has_node(spec, colon - spec, node))
+            m = mode_choice(colon + 1);
+    }
+    return m;
+}
+
+static const struct pwr_profile *profile_for_mode(const struct pwr_profile *base, int mode)
+{
+    return mode > 0 && base->by_mode[mode] ? base->by_mode[mode] : base;
+}
+
 void pwr_start(int num_nodes, const int *nodes)
 {
     struct pwr_node *n;
@@ -448,7 +609,12 @@ void pwr_start(int num_nodes, const int *nodes)
         n = calloc(1, sizeof(*n));
         FATAL_ON(!n, 1, "calloc: %m");
         n->id = nodes[i];
-        n->p = profile_of(nodes[i]);
+        n->base = profile_of(nodes[i]);
+        n->mode_user = mode_user_of(nodes[i]);
+        n->p = profile_for_mode(n->base, n->mode_user);
+        if (n->mode_user > 0 && n->p == n->base)
+            INFO("power: node %d: --power-mode=%s, but profile %s has no values for it: common values",
+                 n->id, mode_names[n->mode_user], n->base->name);
         n->depth = MCU_SLEEP;
         n->r_state = SIM_RADIO_OFF;
         n->r_carve_from = -1;
@@ -562,6 +728,21 @@ void pwr_radio(int node, uint64_t t, const struct sim_radio_report *r)
     if (r->state >= SIM_RADIO_STATES) {
         WARN("node %d: radio report with state %u, ignored", node, r->state);
         return;
+    }
+    // The PHY mode the MAC configured: the profile's values for it. Every
+    // time and count is charged at the end with the values in use then
+    // (the MAC configures its PHY once, at its start).
+    if (r->phy_mode && r->phy_mode != n->mode_radio) {
+        if (r->phy_mode >= SIM_PHY_MODES) {
+            WARN("node %d: radio report with PHY mode %u, ignored", node, r->phy_mode);
+        } else {
+            if (n->mode_radio)
+                WARN("node %d: PHY mode %s, then %s: the whole run is charged with the values of the last",
+                     node, mode_names[n->mode_radio], mode_names[r->phy_mode]);
+            n->mode_radio = r->phy_mode;
+            if (n->mode_user < 0)
+                n->p = profile_for_mode(n->base, n->mode_radio);
+        }
     }
     if (r->events & SIM_RADIO_EV_CCA)
         radio_close(n, t, n->p->t_cca);
@@ -769,6 +950,13 @@ static void write_node(FILE *f, const struct pwr_node *n, double t_end, bool las
     node_totals(n, &tt);
     avg_ma = t_end > 0 ? tt.charge * 1000 / t_end : 0;
     fprintf(f, "    {\n      \"node\": %d,\n      \"profile\": \"%s\",\n", n->id, p->name);
+    // PHY mode: the radio's; the profile values used (a mode, or "common"), and why
+    if (n->mode_radio)
+        fprintf(f, "      \"phy_mode\": \"%s\",\n", mode_names[n->mode_radio]);
+    else
+        fprintf(f, "      \"phy_mode\": null,\n");
+    fprintf(f, "      \"profile_values\": \"%s\",\n      \"profile_values_from\": \"%s\",\n",
+            p->mode ? mode_names[p->mode] : "common", n->mode_user < 0 ? "radio" : "--power-mode");
     fprintf(f, "      \"avg_current_ma\": %.6f,\n      \"charge_uc\": %.6f,\n      \"energy_mj\": %.6f,\n",
             avg_ma, tt.charge, tt.charge * p->supply_v / 1000);
     fprintf(f, "      \"check\": {\"mcu_time_us\": %.3f, \"radio_time_us\": %.3f, \"run_time_us\": %.3f},\n",
@@ -860,9 +1048,18 @@ void pwr_finish(uint64_t t_end_us, uint64_t seed)
             (unsigned long long)t_end_us, (unsigned long long)seed);
     fprintf(f, "  \"profiles\": [");
     for (struct pwr_profile *p = pwr.profiles; p; p = p->next)
+    {
         fprintf(f, "%s{\"name\": \"%s\", \"kind\": \"%s\", \"path\": \"%s\", \"supply_v\": %g, "
-                "\"deep_min_us\": %llu}", p == pwr.profiles ? "" : ", ", p->name, p->kind, p->path,
+                "\"deep_min_us\": %llu, \"modes\": [", p == pwr.profiles ? "" : ", ", p->name, p->kind, p->path,
                 p->supply_v, (unsigned long long)p->rule.deep_min_us);
+        for (int m = 1, first = 1; m < SIM_PHY_MODES; m++) {
+            if (!p->by_mode[m])
+                continue;
+            fprintf(f, "%s\"%s\"", first ? "" : ", ", mode_names[m]);
+            first = 0;
+        }
+        fprintf(f, "]}");
+    }
     fprintf(f, "],\n  \"nodes\": [\n");
     for (i = 0; i < pwr.num_nodes; i++)
         write_node(f, pwr.nodes[pwr.ids[i]], t_end, i == pwr.num_nodes - 1);
@@ -871,8 +1068,8 @@ void pwr_finish(uint64_t t_end_us, uint64_t seed)
     for (i = 0; i < pwr.num_nodes; i++) {
         n = pwr.nodes[pwr.ids[i]];
         node_totals(n, &tt);
-        INFO("power: node %d: %.4f mA average, MCU active %.3f%%, radio RX %.2f%% TX %.3f%%, %.1f wakes/s, %.1f empty ticks/s",
-             n->id, t_end > 0 ? tt.charge * 1000 / t_end : 0,
+        INFO("power: node %d (values %s): %.4f mA average, MCU active %.3f%%, radio RX %.2f%% TX %.3f%%, %.1f wakes/s, %.1f empty ticks/s",
+             n->id, n->p->mode ? mode_names[n->p->mode] : "common", t_end > 0 ? tt.charge * 1000 / t_end : 0,
              t_end > 0 ? 100 * n->mcu_time[MCU_ACTIVE] / t_end : 0,
              t_end > 0 ? 100 * (n->r_time[SIM_RADIO_LISTEN] + n->r_time[SIM_RADIO_RECEIVE]) / t_end : 0,
              t_end > 0 ? 100 * tt.tx_t / t_end : 0,

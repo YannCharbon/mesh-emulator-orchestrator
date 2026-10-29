@@ -311,9 +311,32 @@ static void rf_phy_settings_init(void)
              rf_preamble_len, rf_sfd_len, rf_phr_len, rf_fcs_len);
 }
 
+// The PHY mode the MAC configured (sim_proto.h, SIM_PHY_MODE_*), for the
+// power ledger's per-mode profile values: from the configured FSK data rate
+// and modulation index, whatever WSSIM_PHY_DATARATE or WSSIM_PHY_LEGACY do
+// to the airtime. 0 until configured, or for another modulation.
+static uint8_t rf_phy_mode;
+
+static uint8_t rf_phy_mode_of(const phy_rf_channel_configuration_s *config)
+{
+    bool h1 = config->modulation_index == MODULATION_INDEX_1_0;
+
+    if (config->modulation != M_2FSK)
+        return SIM_PHY_MODE_NONE;
+    switch (config->datarate) {
+    case 50000:  return h1 ? SIM_PHY_MODE_1B : SIM_PHY_MODE_1A;
+    case 100000: return h1 ? SIM_PHY_MODE_2B : SIM_PHY_MODE_2A;
+    case 150000: return h1 ? SIM_PHY_MODE_NONE : SIM_PHY_MODE_3;
+    case 200000: return h1 ? SIM_PHY_MODE_4B : SIM_PHY_MODE_4A;
+    case 300000: return h1 ? SIM_PHY_MODE_NONE : SIM_PHY_MODE_5;
+    default:     return SIM_PHY_MODE_NONE;
+    }
+}
+
 // The MAC's PHY configuration (PHY mode): its data rate, unless fixed.
 static void rf_phy_configure(const phy_rf_channel_configuration_s *config)
 {
+    rf_phy_mode = rf_phy_mode_of(config);
     if (rf_phy_legacy || rf_datarate_fixed || !config->datarate || config->datarate == rf_datarate)
         return;
     rf_datarate = config->datarate;
@@ -338,6 +361,7 @@ static void rf_power_send(uint8_t state, uint8_t events)
         .state = state,
         .tx_dbm = rf_tx_dbm,
         .events = events,
+        .phy_mode = rf_phy_mode,
         .channel = channel,
     };
     int ret;

@@ -67,12 +67,28 @@ enum sim_radio_state {
 
 #define SIM_RADIO_EV_CCA 0x01   // a CCA ended now (it is not a state of the driver)
 
+// FSK PHY modes, numbered as Wi-SUN FAN 1.1's PhyModeId (1 = mode 1a ...
+// 8 = mode 5). The conductor's ledger picks the profile's values for the mode
+// (docs/POWER_MODEL.md §6.2). 0: not configured yet, or not one of these.
+enum sim_phy_mode {
+    SIM_PHY_MODE_NONE,
+    SIM_PHY_MODE_1A,            // 2-FSK 50 kbit/s, h = 0.5
+    SIM_PHY_MODE_1B,            // 50 kbit/s, h = 1
+    SIM_PHY_MODE_2A,            // 100 kbit/s, h = 0.5
+    SIM_PHY_MODE_2B,            // 100 kbit/s, h = 1
+    SIM_PHY_MODE_3,             // 150 kbit/s, h = 0.5
+    SIM_PHY_MODE_4A,            // 200 kbit/s, h = 0.5
+    SIM_PHY_MODE_4B,            // 200 kbit/s, h = 1
+    SIM_PHY_MODE_5,             // 300 kbit/s, h = 0.5
+    SIM_PHY_MODES
+};
+
 struct sim_radio_report {
     char magic[2];              // "xr"
     uint8_t state;              // enum sim_radio_state
     int8_t tx_dbm;              // TX power the MAC asked for
     uint8_t events;             // SIM_RADIO_EV_*
-    uint8_t reserved;
+    uint8_t phy_mode;           // SIM_PHY_MODE_*: the PHY mode the MAC configured, 0 until then
     uint16_t channel;
 };
 

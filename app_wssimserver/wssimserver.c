@@ -296,6 +296,8 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --power=PROFILE           virtual time: record power, every node with this profile\n");
     fprintf(stream, "                            (docs/POWER_MODEL.md)\n");
     fprintf(stream, "  --power-node=IDS:PROFILE  another profile for these nodes (3, 2-5, 1,4); repeatable\n");
+    fprintf(stream, "  --power-mode=[IDS:]MODE   profile values of this PHY mode (1a ... 5), common, or auto (the\n");
+    fprintf(stream, "                            default: the mode the node's MAC configured); repeatable\n");
     fprintf(stream, "  --power-out=FILE          the power report (default power.json)\n");
     fprintf(stream, "  --power-log=FILE          also log every state interval of every node\n");
     fprintf(stream, "  --power-cell=MAH[:V[:EFF]] battery life for this cell (capacity, voltage, converter efficiency)\n");
@@ -307,6 +309,7 @@ enum {
     OPT_VTIME_END,
     OPT_POWER,
     OPT_POWER_NODE,
+    OPT_POWER_MODE,
     OPT_POWER_OUT,
     OPT_POWER_LOG,
     OPT_POWER_CELL,
@@ -324,6 +327,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "vtime-end", required_argument, 0, OPT_VTIME_END },
         { "power", required_argument, 0, OPT_POWER },
         { "power-node", required_argument, 0, OPT_POWER_NODE },
+        { "power-mode", required_argument, 0, OPT_POWER_MODE },
         { "power-out", required_argument, 0, OPT_POWER_OUT },
         { "power-log", required_argument, 0, OPT_POWER_LOG },
         { "power-cell", required_argument, 0, OPT_POWER_CELL },
@@ -377,6 +381,9 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
                 break;
             case OPT_POWER_NODE:
                 pwr_add_node_profile(optarg);
+                break;
+            case OPT_POWER_MODE:
+                pwr_set_mode(optarg);
                 break;
             case OPT_POWER_OUT:
                 pwr_set_out(optarg);

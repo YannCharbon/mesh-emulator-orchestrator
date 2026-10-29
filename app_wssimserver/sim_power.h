@@ -21,6 +21,7 @@
 // Options, before pwr_start()
 void pwr_set_profile(const char *path);         // --power: every node's profile
 void pwr_add_node_profile(const char *spec);    // --power-node=IDS:PROFILE (IDS: 3, 2-5, 1,4)
+void pwr_set_mode(const char *spec);             // --power-mode=[IDS:]MODE: auto, common or a PHY mode
 void pwr_set_out(const char *path);             // --power-out (default power.json)
 void pwr_set_log(const char *path);             // --power-log: every state interval
 void pwr_set_cell(const char *spec);            // --power-cell=MAH[:VOLT[:EFF]]

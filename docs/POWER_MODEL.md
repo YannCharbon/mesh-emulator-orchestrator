@@ -9,10 +9,10 @@ Paths: `NGS` = `nanostack-generic-standalone/`; others are in this repo.
 | Piece | Where | What |
 | --- | --- | --- |
 | Power ledger | `app_wssimserver/sim_power.c`, `sim_power.h` | In the conductor. Per node: the MCU and radio state machines, the profile, the totals, the report. Stack-neutral: it only reads the conductor protocol |
-| Conductor options | `app_wssimserver/wssimserver.c` | `--power`, `--power-node`, `--power-out`, `--power-log`, `--power-cell` (§7). Off unless given |
+| Conductor options | `app_wssimserver/wssimserver.c` | `--power`, `--power-node`, `--power-mode`, `--power-out`, `--power-log`, `--power-cell` (§7). Off unless given |
 | Port: wake report | `NGS/port/sim/sim_power.c`, `ns_port_sim.h` | The "xc" message: timer callbacks per cause, events dispatched, for each wake |
 | Sleep-depth rule | `NGS/include/ns_port/power.h` | Header-only rule, for the emulator and the firmware port alike (§4) |
-| Radio states | `app_wshwsim/sl_rf_driver.c`, `app_wssimserver/sim_proto.h` | The "xr" message at each change of the emulated radio's state |
+| Radio states | `app_wshwsim/sl_rf_driver.c`, `app_wssimserver/sim_proto.h` | The "xr" message at each change of the emulated radio's state, with the PHY mode the MAC configured (§6.2) |
 | Profiles | `examples/power/*.ini` | `efr32fg25-soc.ini`: the FG25 SoC calibrated with HW5's measurements (§6, §12); `efr32fg25-soc-datasheet.ini`: the same from the datasheet only, for comparison |
 | Tools | `sim_utils/power_summary.py`, `sim_utils/vtime/run.sh` (`POWER=`), `sim_utils/vtime/test_power.py` | Summary of runs; runs with recording; a test of the ledger's arithmetic |
 
@@ -157,7 +157,7 @@ Per node the report counts:
 
 ## 6. Profile format
 
-An INI file; `#` or `;` start a comment; every key is required unless said otherwise. Currents in mA, times in µs, clock in MHz. Each figure should say where it comes from (`[M]` measured, with the document and section, `[D]` datasheet table, `[V]` our code, `[I]` estimate).
+An INI file; `#` or `;` start a comment; every key is required unless said otherwise. A key of `[mcu]`, `[cycles]`, `[radio]` or `[radio_transitions]` may also have values for given PHY modes, `key@MODE = value` (§6.2). Currents in mA, times in µs, clock in MHz. Each figure should say where it comes from (`[M]` measured, with the document and section, `[D]` datasheet table, `[V]` our code, `[I]` estimate).
 
 | Section | Keys |
 | --- | --- |
@@ -172,7 +172,7 @@ An INI file; `#` or `;` start a comment; every key is required unless said other
 
 Two FG25 profiles:
 
-- **`examples/power/efr32fg25-soc.ini`, the default:** HW5's measurements where HW5 has them (RX listening, TX at +10 dBm, the charge per wake, the cycles per kind of work, the supply voltage), the datasheet or an estimate elsewhere, each figure tagged. Its conditions: 3.33 V, EU mode 1a (50 kbit/s), +10 dBm: the nodes' configuration `CONF=eu1a` (§12.5). §12.1 lists every change and what is still not measured. The values for EU mode 3 (150 kbit/s, the default configs' mode), measured on the same kits, are in the comments next to the keys that depend on the mode (`mode 3: ...`): §12.6.
+- **`examples/power/efr32fg25-soc.ini`, the default:** HW5's measurements where HW5 has them (RX listening, TX at +10 dBm, the charge per wake, the cycles per kind of work, the supply voltage), the datasheet or an estimate elsewhere, each figure tagged. Its common values are for 3.33 V, EU mode 1a (50 kbit/s), +10 dBm: the nodes' configuration `CONF=eu1a` (§12.5). §12.1 lists every change and what is still not measured. Its `@3` values (`tx_ma`, `cca_us`, `tx_frame`) are for EU mode 3 (150 kbit/s, the default configs' mode), measured on the same kits (§12.6); a node running mode 3 gets them without any setting.
 - **`examples/power/efr32fg25-soc-datasheet.ini`:** the profile as it was before HW5, from the datasheet (Rev. 1.2) only, with placeholder cycles. Kept so that a user can see how far the datasheet is from the board (§12.2): its radio currents are the datasheet's whole-chip RX/TX figures minus EM1 at 39 MHz, because they were measured with the MCU in EM1 at 39 MHz.
 
 ### 6.1 Every consumption parameter is the user's to set
@@ -181,13 +181,34 @@ The profiles are examples, not fixed models: a user sets them to the hardware an
 
 | Parameter | Where it is set | Per node |
 | --- | --- | --- |
-| Currents, transition times and charges, MCU clock, supply voltage, cycles per kind of work, charge per wake, CCA time, TX current per dBm | The profile file (§6); copy `examples/power/efr32fg25-soc.ini` and edit it | `--power-node=IDS:PROFILE` |
+| Currents, transition times and charges, MCU clock, supply voltage, cycles per kind of work, charge per wake, CCA time, TX current per dBm | The profile file (§6); copy `examples/power/efr32fg25-soc.ini` and edit it. Per PHY mode: `key@MODE` (§6.2) | `--power-node=IDS:PROFILE` |
+| Which PHY mode's profile values apply | The mode the node's MAC configures (§6.2); `--power-mode=[IDS:]MODE\|common` overrides it (`POWER_OPTS`) | `--power-mode=IDS:MODE` |
 | TX power (dBm) the stack asks for | `tx_power` in `wsbrd.conf` / `wsnode.conf` (default 20, the stack's), or `-o tx_power=N` | `run.sh`: `NODE_OPTS_<i>="-o tx_power=N"` |
 | Battery cell | `--power-cell=mAh[:V[:eff]]` (`POWER_CELL`) | One per run |
 | PHY data rate | The PHY mode in `wsbrd.conf` / `wsnode.conf` (`mode`; `examples/ws*-eu1a.conf`: the FG25 firmware's, 1a), or `-o`/`-m`; `WSSIM_PHY_DATARATE=<bit/s>` in the nodes' environment fixes it whatever the mode | `run.sh`: `NODE_OPTS_<i>`, `NODE_ENV_<i>` |
 | PHY overhead per frame (it lengthens every TX and RX) | `WSSIM_PHY_PREAMBLE` (bytes, default 8, Wi-SUN FAN's minimum), `WSSIM_PHY_SFD` (2), `WSSIM_PHY_PHR` (2), `WSSIM_PHY_FCS` (4 or 2, default 4 as FAN requires) in the nodes' environment. `WSSIM_PHY_LEGACY=1`: the PHY before 2026-10-28 (150 kbit/s whatever the mode, PSDU only), to compare with older runs | `run.sh`: `NODE_ENV_<i>="WSSIM_PHY_PREAMBLE=16"`, `BR_ENV` |
 
 The profile's TX table clamps the requested power to the hardware's maximum, as the radio would (the FG25: 15.9 dBm).
+
+### 6.2 Values per PHY mode
+
+Some figures depend on the PHY mode: the TX current, the CCA time (8 symbols), the CPU work of a TX. A profile can give them per mode next to the common value:
+
+```ini
+[radio]
+cca_us = 160                # common value: every mode without its own
+cca_us@3 = 53               # nodes running EU mode 3
+tx_ma = 0:17.59 10:35.75 12:39.38 15.9:55.80
+tx_ma@3 = 0:17.36 10:35.29 12:38.88 15.9:55.09
+```
+
+- **Modes:** the FSK modes as `wsbrd.conf`'s `mode` names them, `1a 1b 2a 2b 3 4a 4b 5` (any case).
+- **Keys:** any key of `[mcu]`, `[cycles]`, `[radio]` (`tx_ma` included: the mode's table replaces the common one) and `[radio_transitions]`. `[profile]` keys (`name`, `kind`, `supply_v`) do not depend on the mode. The common value stays required; a `key@MODE` line may come before or after it. A mode's key given twice, an unknown mode or an unknown key stop the run, as for the common values.
+- **Selection, automatic:** the emulated radio derives the mode from the configuration the MAC gives it (`PHY_EXTENSION_SET_RF_CONFIGURATION`: 2-FSK data rate and modulation index; Wi-SUN FAN 1.1's `PhyModeId` numbering, `SIM_PHY_MODE_*` in `sim_proto.h`) and sends it in every "xr" report (the former `reserved` byte; 0 until the MAC configures the PHY, or for a modulation other than 2-FSK). The ledger then charges the node with that mode's values, or the common ones if the profile has none for it. The mode is the MAC's, whatever `WSSIM_PHY_DATARATE` or `WSSIM_PHY_LEGACY` do to the airtime.
+- **Selection, by the user:** `wssimserver --power-mode=[IDS:]MODE`, repeatable, the last one that names a node (or names no node) wins. `MODE` is a mode name, `common` (the common values whatever the radio says) or `auto` (the default). With `run.sh`: `POWER_OPTS="--power-mode=3"`.
+- **Timing:** the MAC configures its PHY once, at its start, before it sends anything. The CCA time and the cycles are charged as they happen, with the values of the mode known then; the state times are charged at the end of the run with the values in use then, so the few milliseconds before the configuration take the mode's currents. A node whose mode changes during a run gets a warning in `simserver.log`.
+- **Report:** per node, `phy_mode` (the radio's, `null` if it never said), `profile_values` (the mode whose values were used, or `common`) and `profile_values_from` (`radio` or `--power-mode`); per profile, `modes` (those with values). `power_summary.py` shows the mode and the values per node; `simserver.log`'s line per node names the values.
+- **Old profiles** load unchanged and give the same figures: without `key@MODE` lines every mode takes the common values. One rule is stricter: `radio.tx_ma` given twice is an error (it used to add the second table's levels to the first).
 
 ## 7. Running and outputs
 
@@ -200,7 +221,7 @@ POWER=examples/power/efr32fg25-soc.ini sim_utils/vtime/campaign.sh build-vt $(pw
 python3 sim_utils/power_summary.py runs/pw/seed*           # --cell 3000:6:0.9, --nodes 1-14, --quiet
 ```
 
-`wssimserver` options (virtual time only): `--power=PROFILE` (every node), `--power-node=IDS:PROFILE` (repeatable, the last match wins: mixed networks), `--power-out=FILE` (default `power.json`), `--power-log=FILE`, `--power-cell=MAH[:V[:EFF]]`. `run.sh` maps them from `POWER`, `POWER_LOG=1`, `POWER_CELL` and `POWER_OPTS`.
+`wssimserver` options (virtual time only): `--power=PROFILE` (every node), `--power-node=IDS:PROFILE` (repeatable, the last match wins: mixed networks), `--power-mode=[IDS:]MODE` (repeatable: whose profile values apply, §6.2), `--power-out=FILE` (default `power.json`), `--power-log=FILE`, `--power-cell=MAH[:V[:EFF]]`. `run.sh` maps them from `POWER`, `POWER_LOG=1`, `POWER_CELL` and `POWER_OPTS`.
 
 - **Report** (`power.json`, format `wssim-power 1`): per node, the average current, total charge and energy; per MCU and radio state and transition, time, charge and count (TX per power level); wakes, causes, empty ticks, unseen frames; the sum check; the battery life when `--power-cell` is given (cell current = average × supply V / (cell V × efficiency); without a voltage, the average itself). `simserver.log` gets one line per node.
 - **State log** (`--power-log`, optional, about 90 MB per `dag_simple` run of 300 s): `start_us end_us node mcu|radio state [dBm]`, one line per interval, in time order per node and part.
@@ -214,7 +235,7 @@ All are sent only when the welcome has `NSIM_WELCOME_POWER`, which the conductor
 | --- | --- | --- | --- |
 | "xw" | conductor | `ns_port_sim.h` | the former `reserved` word is `flags`; `NSIM_WELCOME_POWER` |
 | "xc" | the port, just before each "xi" | `ns_port_sim.h` | `events`, `timers[NSIM_CAUSE_COUNT]` (saturating 16-bit counts) |
-| "xr" | the radio driver, during a wake | `sim_proto.h` | `state`, `tx_dbm`, `events` (`SIM_RADIO_EV_CCA`), `channel` |
+| "xr" | the radio driver, during a wake | `sim_proto.h` | `state`, `tx_dbm`, `events` (`SIM_RADIO_EV_CCA`), `phy_mode` (§6.2), `channel` |
 
 Recording does not change what the nodes do: the messages go to the conductor, which does not relay them, and nothing is printed in the nodes' logs.
 
@@ -236,7 +257,7 @@ Recording does not change what the nodes do: the messages go to the conductor, w
 - **Hardware-only interrupts** (UART, sleeptimer, RAIL events other than the driver's timers) are absent; the timer series do not drift apart, so separate wakes are undercounted (about 15–20 %, study §5.1).
 - **Frames lost to the link** never enter `receive`; a real radio would often receive them up to a failed CRC.
 - **The emulated driver has no RX→TX turnaround or idle→RX settling of its own:** the profile's transitions only move time between states. RAIL's state timings are HW5.
-- **CCA duration** is the profile's, not the PHY's; it is cut from the backoff, which is long enough in practice.
+- **CCA duration** is the profile's (per PHY mode, §6.2), not the emulated PHY's; it is cut from the backoff, which is long enough in practice.
 - **Supply voltage:** the measured profile is at HW5's 3.33 V; its EM0/EM1 figures are still the datasheet's (3.6 V), only their sum with the radio was measured.
 - **Airtime: fixed** (§12.5). The emulated PHY used to send at a fixed 150 kbit/s with no preamble, SFD, PHR or FCS; it now takes the PHY mode's rate and counts the overhead. `examples/wsbrd.conf`/`wsnode.conf` stay EU mode 3, class 2 (35 channels, 150 kbit/s), the mode most of our hardware applications use (decided 2026-10-28); `examples/ws*-eu1a.conf` (`CONF=eu1a`) are the board's mode 1a, class 1. Left: the RX timestamp the MAC reads (`PHY_EXTENSION_READ_RX_TIME`) is the frame's arrival at the sender's TX start, not the end of the SHR as on RAIL; a receiver on another PHY mode than the sender's still decodes its frames (on its own rate).
 - **Routers' TX power, fixed:** `wsnode` used to ignore `tx_power` (only `wsbrd` called `arm_nwk_set_tx_output_power()`), so routers sent at the driver's default, 0 dBm. It now applies it like `wsbrd` (default 20 dBm, clamped to 15.9 dBm by the FG25 profile). Seeds 1–10: logs identical apart from the new "change tx power" lines and line numbers, the same join milestones; routers 7.42 mA instead of 6.99 mA.
@@ -278,7 +299,7 @@ Runs below: `wssimserver` with this change; `wsbrd-inproc` and `wsnode-inproc` f
 | `cycles.tx_frame` | 15 000 | 67 000 | [M] HW5 §2.5: TX-prepare wake 56 200 + TX-event wake 31 600 − 2 × (`wake` + `radio`); RAIL's TX start alone is 43 800 |
 | `cycles.mac`, `other` | 2 000, 2 000 | 5 000, 5 000 | [I] not seen in HW5's idle windows; like the other callback timers |
 
-Unchanged, **still not measured**: EM0 and EM1 on their own (HW5 measured EM1 + RX), EM2 and every MCU transition (the FFN firmware never goes below EM1: HW8), the radio's idle and off currents, every radio transition, TX at levels other than +10 dBm, the CCA alone (HW5 bounds CCA + PA ramp + RAIL's wait at ≤ 0.25 ms per frame: TX-state time minus airtime; `cca_us` stays 128).
+Unchanged, **still not measured**: EM0 and EM1 on their own (HW5 measured EM1 + RX), EM2 and every MCU transition (the FFN firmware never goes below EM1: HW8), the radio's idle and off currents, every radio transition, TX at levels other than +10 dBm, the CCA alone (HW5 bounds CCA + PA ramp + RAIL's wait at ≤ 0.25 ms per frame: TX-state time minus airtime; `cca_us` stays 128; 160, the firmware's, since 2026-10-29: §12.6).
 
 Why a new key rather than more cycles: the measured cost per wake is 3.5–6 times what the cycle counter and the datasheet's EM0 − EM1 give. Raising `active_ma` to about 8.6 mA would reproduce the charge but make the EM0 current and the active time inconsistent with the datasheet and with the measured EM0 time (2.5 %); adding cycles would stretch the active time. A charge per wake keeps both right and is what idle-tick skipping removes, wake by wake.
 
@@ -387,13 +408,13 @@ Reproduce: `CONF=eu1a POWER=examples/power/efr32fg25-soc.ini TOPO=<0,1:-14.0 fil
 
 The firmware gained a mode 3 build (`FW_PHY_MODE=3`: EU class 2, 2-FSK 150 kbit/s, 35 channels at 200 kHz), measured on the same kits with the same method as HW5: border router and one router, idle, +10 dBm, 3.33 V, 10 windows of 30 s per run on the AEM, firmware counters, and 10 kHz traces. One router run and two border-router runs (20 windows); mode 1a was measured again the same day with the same firmware (idle-tick skipping on). Results: the firmware's `README.md`, "Hardware results: idle-tick skipping and PHY mode 3".
 
-Which mode each figure of `examples/power/efr32fg25-soc.ini` comes from:
+Which mode each figure of `examples/power/efr32fg25-soc.ini` comes from (since 2026-10-29 the mode 3 values are `key@3` lines, §6.2; they were comments before):
 
-| Key | Active value (mode 1a) | Mode 3 value (in the comment) | Mode 3 source |
+| Key | Common value (mode 1a) | Mode 3 value (`@3`) | Mode 3 source |
 | --- | --- | --- | --- |
-| `radio.listen_ma`, `receive_ma`, `cca_ma` | 6.0, HW5 | 6.0 (same) | [M3] chip with RX on and the MCU in EM1: 8.12–8.13 mA (fit), 8.10 mA (trace median); mode 1a the same day 8.07–8.13 mA |
+| `radio.listen_ma`, `receive_ma`, `cca_ma` | 6.0, HW5 | none: 6.0 (same) | [M3] chip with RX on and the MCU in EM1: 8.12–8.13 mA (fit), 8.10 mA (trace median); mode 1a the same day 8.07–8.13 mA |
 | `radio.tx_ma` | 10:35.75, HW5; other levels scaled from the datasheet | 0:17.36 **10:35.29** 12:38.88 15.9:55.09 | [M3] 37.43 mA chip in TX at +10 dBm (fit 8.12 + 29.31 mA × TX share), trace plateau 37.36 mA over 422 frames; other levels [I] scaled by 0.727 |
-| `radio.cca_us` | 128 [I] | 53 | [V] the firmware's CCA: 8 symbols at 150 ksym/s (its mode 1a CCA is 160 µs) |
+| `radio.cca_us` | 160 [V], the firmware's mode 1a CCA (128 [I] before 2026-10-29) | 53 | [V] the firmware's CCA: 8 symbols at 150 ksym/s |
 | `cycles.tx_frame` | 67 000, HW5 | 47 200 | [M3] TX-prepare wake 41 900 + TX-event wake 26 100 − 2 × (`wake` + `radio`); RAIL's TX start 30 300 cycles against 43 900 in mode 1a |
 | All other keys | HW5, the datasheet or an estimate | same | Not mode-dependent, or not measured apart: `cycles.rx_frame` (RX wake 31 100 in mode 3, 31 300 in 1a), `wake_charge_uc`, the MCU states |
 
@@ -405,7 +426,27 @@ Board figures in mode 3, to compare with the emulator's default configuration (m
 | Frames sent/s | 1.71 [0.03–3.45] | 3.54 [0.03–6.81] | 3.43 [2.30–4.64] | 6.90 [4.57–9.12] |
 | Average current | 8.38 mA [8.13–8.72] | 9.61 mA [8.11–10.93] | 8.67 mA [8.49–8.88] | 11.18 mA [10.20–12.26] |
 
-The profile file holds one value per key and the parser rejects unknown keys, so the mode 3 values are comments: copy the file and set them for a mode 3 run.
+A node running mode 3 gets the `@3` values without any setting (§6.2); §12.7 compares such runs with these figures.
+
+### 12.7 Mode 3 runs against the board (2026-10-29)
+
+The board's setup in the emulator's default configuration (EU mode 3, class 2, 35 channels): a border router and one router (`0,1:-14.0`), `-o tx_power=10` for both, `examples/power/efr32fg25-soc.ini` with its `@3` values selected from the nodes' PHY mode (§6.2). Seeds 1–10, `SETARCH=1`; figures over 170–470 s, from the difference of two runs per seed as in §12.5 (the router joined at 60–120 s in every seed). Emulator: median over the seeds [range]; board: mean over the windows [range], §12.6.
+
+| | TX share | Frames sent/s | Average current |
+| --- | --- | --- | --- |
+| Board router, mode 3 (10 windows) | 0.89 % [0.03–2.03] | 1.71 [0.03–3.45] | 8.38 mA [8.13–8.72] |
+| Emulated router | **0.94 %** [0.52–1.28] | **1.65** [0.95–2.47] | **8.45 mA** [8.32–8.55] |
+| Board border router, mode 3 (20 windows) | 1.89 % [1.25–2.52] | 3.43 [2.30–4.64] | 8.67 mA [8.49–8.88] |
+| Emulated border router | **1.80 %** [1.69–1.84] | **3.52** [3.34–3.63] | **8.70 mA** [8.67–8.71] |
+
+- **Both match within the board's spread.** Average current: router +0.8 % (mean 8.43 mA, +0.6 %), border router +0.3 %. Frames: router −3.6 %, border router +2.5 %. TX share: router +6 % (mean 0.87 %, −2 %), border router −5 %.
+- **The border router's TX share is 5 % below with 2.5 % more frames:** 5.1 ms of TX per frame against 5.5 ms on the board. The emulated TX state is the airtime only, and the CCA is charged apart (53 µs, at the listening current); the board's TX state also holds the PA ramp and RAIL's own time around each frame. In mode 1a HW5 bounded that extra time at 0.25 ms per frame (§12.1); in mode 3 it is not measured apart; the 0.4 ms here is TX share over frame rate on both sides, not a direct measurement.
+- **The router's spread is narrower than the board's** because the board's figure is over 30 s windows and the emulator's over 300 s: a 30 s window holds zero, one or two PA/PC sweeps.
+- **The `@3` values change little at idle:** with `--power-mode=common` (mode 1a's `tx_ma`, `cca_us`, `tx_frame`) the same runs give 8.45 mA (router) and 8.71 mA (border router), 0.004–0.009 mA more. The TX share is 1–2 % here; the values matter more where nodes send more.
+
+**Mode 1a, again** (`CONF=eu1a`, the same window and seeds, `cca_us` now 160 µs): border router 11.32 mA [11.26–11.40], TX 10.6 %, 6.91 frames/s; router 10.03 mA [9.12–10.71], TX 6.2 %, 3.87 frames/s. The same as §12.5 to 0.01 mA: `cca_ma` equals `listen_ma` in this profile, so a longer CCA only moves time between two states at the same current (the runs with the former 128 µs profile give the same figures to three decimals). Against the board's same-day mode 1a figures (§12.6: router 9.61 mA [8.11–10.93], border router 11.18 mA [10.20–12.26]): router +4.3 %, border router +1.3 %, both inside the board's range; the router's TX share (6.2 % against 5.28 %) is the excess of PA/PC sweeps discussed in §12.5.
+
+Reproduce: `TOPO=<0,1:-14.0 file> POWER=examples/power/efr32fg25-soc.ini BR_OPTS="-o tx_power=10" NODE_OPTS="-o tx_power=10" sim_utils/vtime/campaign.sh build-vt $(pwd) runs/m3_170 170 $(seq 1 10)`, the same with 470, then the difference of the two `power.json` per seed. Non-regression of the change (seeds 1–10, `SETARCH=1`): `dag_simple` 300 s with recording off, node, BR and `log_wsbr` logs byte-identical to the build before it (unmasked); with the former profile (no `@` lines) and recording on, logs identical and every figure of `power.json` identical (only the new fields added); `test_radio_off.sh` and `test_power.py` (now also 7 per-mode cases and 4 profiles it must reject) pass.
 
 ## 13. LFN timed receive windows (GS8 stage 2, 2026-10-28)
 
