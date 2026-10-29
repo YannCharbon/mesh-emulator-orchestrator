@@ -15,15 +15,24 @@
 #     copy from the border router;
 #   - every frame the LFN received started inside one of its listen windows;
 #   - the LFN kept its parent (no parent loss, no second discovery);
-#   - LGTK (if LGTK_ROTATE_AT is set): the rotation was followed by an LPC,
-#     the LFN fetched the new key and traffic went on.
+#   - LGTK (docs/LFN_STACK.md §8): the LFN joined with an LGTK (4-way
+#     handshake with its NR KDE, LPCS under key index 5-7); for every LGTK
+#     the border router installs after the join (LGTK_ROTATE_AT, or short
+#     LGTK lifetimes in BR_EXTRA), an LPC brought the new hash, the LFN made
+#     its key request lgtk_max_mismatch_s after that LPC, got the LGTK
+#     (group-key handshake) before the border router activated it, and took
+#     the new active index from the next LPC; the traffic checks above then
+#     cover the rotation. The timings are printed (Silicon Labs' LFN: key
+#     request 113-117 s after the first LPC with the new hash, black-box item
+#     49).
 # It prints the LFN's average current from STEADY_FROM s to the end, with
 # the share of each part (EM2 ledger, the profile given).
 #
 # usage: test_lfn_join.sh <bindir> <workdir(holds examples/)> <outdir> [profile]
 # Environment: DUR (900), WSSIM_SEED (1), RSSI (-50), TUN (tunvt0),
 # BR_PERIOD (37), LFN_PERIOD (53; both 0: no test traffic, idle LFN), STEADY_FROM (300), JOIN_MAX (120),
-# TX_POWER (10 dBm, both nodes), LGTK_ROTATE_AT (s, 0: none),
+# TX_POWER (10 dBm, both nodes), LGTK_ROTATE_AT (s, 0: none; the border
+# router's lgtk_rotate_at_s, ws_management_lfn_lgtk_rotate()),
 # LFN_EXTRA, BR_EXTRA (more "-o key=value" options), SILENT_AT and
 # SILENT_FOR (s: the parent stops answering the LFN then, for that long; the
 # test then checks the parent-loss rule and the rejoin instead).
@@ -78,7 +87,7 @@ def lines(name):
 
 # --- LFN
 lfn = {'disc': [], 'lost': [], 'oper': None, 'oper_all': [], 'auth': [], 'win': [], 'rx': [], 'udp_rx': [], 'udp_tx': [], 'window_us': 5000,
-       'lpc': [], 'keyreq': []}
+       'lpc': [], 'keyreq': [], 'mismatch': [], 'lgtk_recv': [], 'active': [], 'lpcs_key': []}
 for t, m in lines('node1.log'):
     if 'LFN discovery start' in m:
         lfn['disc'].append(t)
@@ -109,9 +118,17 @@ for t, m in lines('node1.log'):
         lfn['lpc'].append(t)
     elif 'LFN: parent heard' in m:
         lfn.setdefault('heard', []).append(t)
-    elif 'LGTK key request' in m:
+    elif 'LFN: LGTK key request' in m:
         lfn['keyreq'].append(t)
-br = {'udp_rx': [], 'udp_tx': [], 'copies': 0, 'lgtk': []}
+    elif 'LGTK hash mismatch' in m:
+        lfn['mismatch'].append((t, int(re.search(r'key request in (\d+) s', m).group(1))))
+    elif 'LGTK recv index' in m:
+        lfn['lgtk_recv'].append((t, int(re.search(r'index (-?\d+)', m).group(1))))
+    elif 'LFN: active LGTK index' in m:
+        lfn['active'].append((t, int(re.search(r'index (\d+)', m).group(1))))
+    if 'LFN: LPCS to' in m:
+        lfn['lpcs_key'].append(int(re.search(r'\(key (\d+)', m).group(1)))
+br = {'udp_rx': [], 'udp_tx': [], 'copies': 0, 'lgtk': [], 'installed': [], 'activated': [], 'expired': [], 'nr4wh': 0}
 for t, m in lines('br.log'):
     if 'test-udp rx from' in m:
         src, p = re.search(r'from (\S+): (.*)', m).groups()
@@ -121,8 +138,16 @@ for t, m in lines('br.log'):
         br['udp_tx'].append((t, dst, p))
     elif 'multicast copy to LFN' in m:
         br['copies'] += 1
-    elif 'LGTK rotation' in m:
+    elif 'LGTK rotation:' in m:
         br['lgtk'].append(t)
+    elif '[wspa]: LGTK installed:' in m:
+        br['installed'].append((t, int(re.search(r'index (\d+)', m).group(1))))
+    elif '[wspa]: LGTK activated:' in m:
+        br['activated'].append((t, int(re.search(r'index (\d+)', m).group(1))))
+    elif '[wspa]: LGTK expired:' in m:
+        br['expired'].append(t)
+    elif '4WH: Message 2 NR 2' in m:
+        br['nr4wh'] += 1
 
 check(lfn['oper'] is not None and lfn['oper'] <= join_max,
       f"LFN operational at {lfn['oper']:.1f} s" if lfn['oper'] else 'LFN operational')
@@ -168,10 +193,33 @@ acks = [t for t in lfn['rx'] if not in_window(t) and after_own_tx(t)]
 outside = [t for t in lfn['rx'] if not in_window(t) and not after_own_tx(t)]
 check(lfn['rx'] and not outside, f"{len(lfn['rx'])} frames received by the LFN: {len(outside)} outside its windows, "
       f"{len(acks)} ACKs to its own frames" + (f" (first outside at {outside[0]:.6f} s)" if outside else ''))
+# --- LGTK
+check(lfn['lgtk_recv'] and lfn['lpcs_key'] and min(lfn['lpcs_key']) >= 5 and br['nr4wh'] > 0,
+      f"LFN joined with an LGTK (index {lfn['lgtk_recv'][0][1] if lfn['lgtk_recv'] else '?'}, NR KDE in 4WH message 2, LPCS under key index {lfn['lpcs_key'][0] if lfn['lpcs_key'] else '?'})")
 if rot > 0:
-    check(br['lgtk'] and any(t > br['lgtk'][0] for t in lfn['lpc']), f"LGTK rotation at {br['lgtk'][0]:.1f} s followed by an LPC" if br['lgtk'] else 'LGTK rotation')
-    check(lfn['keyreq'] and lfn['keyreq'][0] > br['lgtk'][0] if br['lgtk'] else False,
-          f"LFN key request at {lfn['keyreq'][0]:.1f} s" if lfn['keyreq'] else 'LFN key request')
+    check(br['lgtk'] and br['installed'] and any(t >= br['lgtk'][0] for t, i in br['installed']), f"LGTK rotation at {br['lgtk'][0]:.1f} s installed a new LGTK" if br['lgtk'] else 'LGTK rotation')
+oper = lfn['oper'] or dur
+for ti, idx in [x for x in br['installed'] if x[0] > oper]:
+    # The LPC that brought the new hash, the key request, the key, its activation
+    mm = [x for x in lfn['mismatch'] if x[0] > ti]
+    req = [t for t in lfn['keyreq'] if t > ti]
+    got = [t for t, i in lfn['lgtk_recv'] if t > ti and i == idx]
+    act = [t for t, i in br['activated'] if t > ti and i == idx]
+    sw = [t for t, i in lfn['active'] if act and t > act[0] and i == idx]
+    if act and act[0] > dur - 60:
+        act = []      # activated too late in the run to see the LFN switch
+    if not mm or not req or not got:
+        check(False, f"LGTK {idx} installed at {ti:.1f} s: LPC with the new hash {'yes' if mm else 'no'}, key request {'yes' if req else 'no'}, key {'yes' if got else 'no'}")
+        continue
+    lpc_t, delay = mm[0]
+    check(abs(req[0] - lpc_t - delay) < 1.5 and got[0] < (act[0] if act else dur + 1),
+          f"LGTK {idx} installed at {ti:.1f} s: hash at the LFN {lpc_t - ti:.1f} s later (LPC), key request {req[0] - lpc_t:.1f} s after that "
+          f"(setting {delay} s; Silicon Labs 113-117 s), LGTK received {got[0] - req[0]:.1f} s after the request"
+          + (f", activated by the border router {act[0] - ti:.1f} s after its installation" if act else ''))
+    if act:
+        check(sw and sw[0] - act[0] < 60, f"LGTK {idx} activated at {act[0]:.1f} s: the LFN took it as active {sw[0] - act[0]:.1f} s later" if sw else f"LGTK {idx} activated at {act[0]:.1f} s: LFN switch")
+if br['expired']:
+    print(f"info LGTKs expired at the border router: {', '.join(f'{t:.1f}' for t in br['expired'])} s")
 
 # --- Power from steady_from to the end, node 1
 rep = json.load(open(f'{out}/power.json'))

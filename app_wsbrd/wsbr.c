@@ -244,6 +244,7 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
 #define WSBR_NODE_TABLE_EVENT (APPLICATION_EVENT + 0x40)
 #define WSBR_LFN_SILENT_EVENT (APPLICATION_EVENT + 0x41)
 #define WSBR_LFN_SILENT_END_EVENT (APPLICATION_EVENT + 0x42)
+#define WSBR_LGTK_ROTATE_EVENT (APPLICATION_EVENT + 0x43)
 #define WSBR_NODE_TABLE_PERIOD_MS 30000
 
 static void wsbr_node_table_log(struct wsbr_ctxt *ctxt)
@@ -337,6 +338,14 @@ static void wsbr_tasklet(struct arm_event_s *event)
             if (ctxt->test_lfn_silent_at_s > 0)
                 eventOS_event_timer_request(0, WSBR_LFN_SILENT_EVENT, event->receiver,
                                             (uint32_t)ctxt->test_lfn_silent_at_s * 1000);
+            // An LGTK rotation (GS8 stage 3, LGTK)
+            if (ctxt->lgtk_rotate_at_s > 0)
+                eventOS_event_timer_request(0, WSBR_LGTK_ROTATE_EVENT, event->receiver,
+                                            (uint32_t)ctxt->lgtk_rotate_at_s * 1000);
+            break;
+        case WSBR_LGTK_ROTATE_EVENT:
+            INFO("LGTK rotation (lgtk_rotate_at_s)");
+            WARN_ON(ws_management_lfn_lgtk_rotate(ctxt->rcp_if_id));
             break;
         case WSBR_LFN_SILENT_EVENT:
             INFO("LFN parent silent for %d s (test_lfn_silent_*)", ctxt->test_lfn_silent_for_s);

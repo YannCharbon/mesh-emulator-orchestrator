@@ -331,6 +331,8 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
         /* empty */
     } else if (sscanf(line, " test_lfn_silent_for_s = %d %c", &ctxt->test_lfn_silent_for_s, &garbage) == 1) {
         /* empty */
+    } else if (sscanf(line, " lgtk_rotate_at_s = %d %c", &ctxt->lgtk_rotate_at_s, &garbage) == 1) {
+        /* empty */
     } else if (sscanf(line, " test_udp_echo = %s %c", str_arg, &garbage) == 1) {
 
         ctxt->test_traffic.echo = str_to_val(str_arg, valid_booleans);
@@ -346,6 +348,7 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
             K(lnd_slot_time_ms), K(lnd_slots), K(lpcs_retry_intervals), K(maintain_parent_time),
             K(lgtk_max_mismatch_s), K(registration_lifetime_min), K(bc_interval_ms), K(bc_sync_period), K(lto),
             K(tx_offset_us), K(tx_lead_us), K(tx_min_prep_us), K(tx_ttl_intervals),
+            K(lgtk_lifetime_s), K(lgtk_new_install_required), K(lgtk_new_activation_time), K(lgtk_activation_guard_s),
 #undef K
         };
         unsigned long v;

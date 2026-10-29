@@ -26,7 +26,7 @@
 static struct neighbor_timings neighbors[255];
 static mac_description_storage_size_t storage_sizes = {
     .device_description_table_size = ARRAY_SIZE(neighbors),
-    .key_description_table_size = 4,
+    .key_description_table_size = 7,   // GTKs 1-4 and FAN 1.1 LGTKs 5-7
     .key_lookup_size = 1,
     .key_usage_size = 3,
 };

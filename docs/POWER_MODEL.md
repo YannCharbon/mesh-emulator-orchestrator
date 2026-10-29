@@ -525,3 +525,18 @@ With the test traffic (10 seeds × 1800 s): 49.6–54.5 µA instead of 74.6–79
 
 Reproduce: the runs of §14 and `campaign.sh` with `POWER` set; the window figures come from two runs of each seed that differ only in duration: `sim_utils/vtime/wakes_window.py [--nodes 1] <300 s run> <3600 s run> …` (power.json alone covers the whole run).
 
+## 16. LGTKs for the LFN (GS8 stage 3, 2026-10-29)
+
+The LFN now uses LFN group keys (LGTKs, key indexes 5–7) instead of the network's GTKs; the border router rotates them and the LFN fetches each new one `lgtk_max_mismatch_s` (120 s) after the LPC that shows its hash (the stack's `docs/LFN_STACK.md` §8). The emulated MAC's key table has 7 entries (`app_wshwsim/sl_rf_inproc.c`; the split `wshwsim` keeps 4, as the split programs refuse the LFN roles). Border-router options: `lfn_lgtk_lifetime_s`, `lfn_lgtk_new_install_required`, `lfn_lgtk_new_activation_time`, `lfn_lgtk_activation_guard_s`, and `lgtk_rotate_at_s` (a rotation then); `test_lfn_join.sh` checks each LGTK change (`LGTK_ROTATE_AT`).
+
+Same conditions as §14–15:
+
+| Run | Seeds | LFN average |
+| --- | --- | --- |
+| Idle, 3600 s, steady state from 300 s | 1–3 | 16.5, 16.5, 16.5 µA (0.6 wakes/s); before LGTK 16.6, 17.3, 16.6 µA |
+| UDP test traffic, 1800 s | 1–10 | 49.5–57.6 µA; before 49.6–54.5 µA |
+| UDP test traffic and an LGTK rotation at 600 s, 1800 s | 1–10 | 50.7–53.9 µA |
+
+The LGTK work adds no periodic wake to an idle LFN: the hash is checked on the LPCs it already receives, and the key-request timer runs only after a mismatch. A rotation costs the LFN one LPC at each of the three LGTK events (installed, activated, expired), one key request and a group-key handshake. The changes in the averages come from the random draws of the border router, which moved (it now draws LGTKs): the highest traffic run, seed 1, had 28 uplink retries instead of 15, during the border router's PAN configuration sweeps.
+
+Reproduce: `test_lfn_join.sh` as in §14 (`BR_PERIOD=0 LFN_PERIOD=0 DUR=3600` idle; `LGTK_ROTATE_AT=600 DUR=1800` with a rotation).
