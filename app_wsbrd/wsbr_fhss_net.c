@@ -233,10 +233,12 @@ int ns_fhss_ws_lfn_bc_stop(const fhss_api_t *fhss_api)
     return 0;
 }
 
-int ns_fhss_ws_lfn_discovery_set(const fhss_api_t *fhss_api, uint32_t start_us, uint32_t duration_us)
+int ns_fhss_ws_lfn_discovery_set(const fhss_api_t *fhss_api, uint32_t start_us, uint32_t duration_us, uint16_t first_slot, uint32_t slot_us)
 {
     (void)fhss_api;
     (void)start_us;
+    (void)first_slot;
+    (void)slot_us;
     return duration_us ? -1 : 0;
 }
 

@@ -131,7 +131,8 @@ for t, m in lines(f'node{lfn_node}.log'):
     elif 'LFN listen schedule:' in m:
         lfn['window_us'] = int(re.search(r'window (\d+) us', m).group(1))
     elif m.startswith('Transmitting ...'):
-        lfn.setdefault('tx', []).append(t)
+        # its end at the slowest PHY (50 kbit/s): the ACK follows the end
+        lfn.setdefault('tx', []).append((t, t + int(re.search(r'len=(\d+)', m).group(1)) * 8 / 50000))
     elif m.startswith('Receiving ...'):
         if int(re.search(r'pkt_len=(\d+)', m).group(1)) >= 30:
             lfn['rx'].append(t)
@@ -213,12 +214,13 @@ win = sorted(lfn['win'])
 win_t = [w[0] for w in win]
 def in_window(t):
     i = bisect.bisect_right(win_t, t + 1e-6) - 1
-    return i >= 0 and win[i][0] - 1e-6 <= t < win[i][0] + win[i][1]
-# An ACK to the LFN's own frame comes right after it (within 60 ms of its start)
-txs = sorted(lfn.get('tx', []))
+    return i >= 0 and win[i][0] - 1e-6 <= t <= win[i][0] + win[i][1] + 1e-6
+# An ACK to the LFN's own frame comes right after it (within 60 ms of its end)
+txl = sorted(lfn.get('tx', []))
+txs = [x[0] for x in txl]
 def after_own_tx(t):
     i = bisect.bisect_right(txs, t) - 1
-    return i >= 0 and t - txs[i] < 0.06
+    return i >= 0 and t - txl[i][1] < 0.06
 acks = [t for t in lfn['rx'] if not in_window(t) and after_own_tx(t)]
 outside = [t for t in lfn['rx'] if not in_window(t) and not after_own_tx(t)]
 check(lfn['rx'] and not outside, f"{len(lfn['rx'])} frames received by the LFN: {len(outside)} outside its windows, "

@@ -99,7 +99,8 @@ for n in lfns:
         elif 'window open' in m and 'for ' in m:
             d['win'].append((t, int(re.search(r'for (\d+) us', m).group(1)) / 1e6))
         elif m.startswith('Transmitting ...'):
-            d['tx'].append(t)
+            # its end at the slowest PHY (50 kbit/s): the ACK follows the end
+            d['tx'].append((t, t + int(re.search(r'len=(\d+)', m).group(1)) * 8 / 50000))
         elif m.startswith('Receiving ...') and int(re.search(r'pkt_len=(\d+)', m).group(1)) >= 30:
             d['rx'].append(t)
         r = re.search(r'test-udp (tx to|rx from) (\S+): (\S+ \d+)', m)
@@ -127,11 +128,12 @@ for n in lfns:
     wt = [w[0] for w in win]
     def in_window(t):
         i = bisect.bisect_right(wt, t + 1e-6) - 1
-        return i >= 0 and win[i][0] - 1e-6 <= t < win[i][0] + win[i][1]
-    txs = sorted(d['tx'])
+        return i >= 0 and win[i][0] - 1e-6 <= t <= win[i][0] + win[i][1] + 1e-6
+    txl = sorted(d['tx'])
+    txs = [x[0] for x in txl]
     def after_own_tx(t):
         i = bisect.bisect_right(txs, t) - 1
-        return i >= 0 and t - txs[i] < 0.06
+        return i >= 0 and t - txl[i][1] < 0.06
     outside = [t for t in d['rx'] if not in_window(t) and not after_own_tx(t)]
     check(not outside, f"LFN {n}: {len(d['rx'])} frames received, {len(outside)} outside its windows")
     node = next(x for x in rep['nodes'] if x['node'] == n)

@@ -156,6 +156,11 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
     ret = ws_management_regulatory_domain_set(ctxt->rcp_if_id, ctxt->ws_domain,
                                               ctxt->ws_class, ctxt->ws_mode);
     WARN_ON(ret);
+    if (ctxt->ws_phy_mode_id && ctxt->ws_chan_plan_id) {
+        ret = ws_management_domain_configuration_set(ctxt->rcp_if_id, ctxt->ws_domain,
+                                                     ctxt->ws_phy_mode_id, ctxt->ws_chan_plan_id);
+        WARN_ON(ret);
+    }
 
     // Note that calling ws_management_fhss_timing_configure() is redundant
     // with the two function calls bellow.

@@ -73,6 +73,8 @@ struct wsbr_ctxt {
     int  ws_domain;
     int  ws_mode;
     int  ws_class;
+    int  ws_phy_mode_id;        // FAN 1.1 PHY mode ID with ws_chan_plan_id (0: class and mode only)
+    int  ws_chan_plan_id;
     int  ws_size;
     char ws_name[33]; // null-terminated string of 32 chars
     int  ws_pan_id;
