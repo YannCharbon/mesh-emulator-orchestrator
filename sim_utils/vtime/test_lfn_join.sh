@@ -124,6 +124,8 @@ for t, m in lines(f'node{lfn_node}.log'):
         lfn['auth'].append(t)
     elif re.search(r'parent .* lost', m):
         lfn['lost'].append(t)
+    elif 'LFN: parent changed' in m:
+        lfn.setdefault('changed', []).append((t, m))
     elif 'window open: slot' in m or 'discovery window open' in m:
         # unicast, broadcast and discovery windows, with their length
         # (widened for drift)
@@ -181,6 +183,13 @@ check(lfn['oper'] is not None and lfn['oper'] <= join_max,
       f"LFN operational at {lfn['oper']:.1f} s" if lfn['oper'] else 'LFN operational')
 if silent_at <= 0:
     check(len(lfn['disc']) == 1 and not lfn['lost'], f"LFN kept its parent ({len(lfn['disc'])} discovery, {len(lfn['lost'])} parent losses)")
+elif mesh == 3:
+    # The border router (the LFN's parent) went silent while a router is in
+    # range: the LFN changes parent without losing it, after
+    # search_sync_periods (2) sync periods (50 s) without a sync frame
+    ch = [t for t, m in lfn.get('changed', []) if t > silent_at and m.rstrip().split(' -> ')[1].startswith('01:02:03:04:05:06:00:01')]
+    check(ch and not lfn['lost'] and ch[0] - silent_at < 200 and not [t for t in lfn['auth'] if t > silent_at],
+          f"parent changed to the router {ch[0] - silent_at:.1f} s after the parent went silent, no parent loss, no EAPOL" if ch else 'parent changed to the router')
 else:
     # The parent went silent: lost 1.5 x maintain_parent_time (5) x sync
     # period (50 s) = 375 s after the last sync frame, then a rejoin without EAPOL
@@ -241,8 +250,8 @@ if mesh:
         if r:
             parent = r.group(1)
     check(rt['lgtk'], f"router got an LGTK from the border router at {rt['lgtk'][0]:.1f} s" if rt['lgtk'] else 'router got an LGTK')
-    want = ':00:00' if mesh == 3 else ':00:01'
-    check(parent and parent.endswith(want), f"LFN parent: {parent} ({'the border router' if mesh == 3 else 'the router'})")
+    want = ':00:00' if mesh == 3 and silent_at <= 0 else ':00:01'
+    check(parent and parent.endswith(want), f"LFN parent: {parent} ({'the border router' if want == ':00:00' else 'the router'})")
     if mesh != 3:
       check(rt['lpas'] > 0 and rt['bc'] > 0, f"router answered {rt['lpas']} LPAS, queued {rt['bc']} LFN broadcast-slot frames")
 # --- LGTK
