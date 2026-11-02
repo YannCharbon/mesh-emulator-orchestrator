@@ -20,7 +20,7 @@
 #
 # usage: test_lfn_mesh.sh <bindir> <workdir(holds examples/)> <outdir> [profile]
 # Environment: DUR (1800), WSSIM_SEED (1), TUN (tunvt0), BR_PERIOD (60),
-# LFN_PERIOD (90), STEADY_FROM (600), JOIN_MAX (400), SIM_OPTS (more
+# LFN_PERIOD (90), STEADY_FROM (600), JOIN_MAX (600), SIM_OPTS (more
 # wssimserver options, e.g. --drift-random=20), LFN_EXTRA, ROUTER_EXTRA.
 # Exit status 0 if every check passes.
 set -u
@@ -28,7 +28,11 @@ BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
 PROFILE=${4:-$WORK/examples/power/efr32fg25-soc.ini}
 DUR=${DUR:-1800}; TUN=${TUN:-tunvt0}
 BR_PERIOD=${BR_PERIOD:-60}; LFN_PERIOD=${LFN_PERIOD:-90}
-STEADY_FROM=${STEADY_FROM:-600}; JOIN_MAX=${JOIN_MAX:-400}
+# JOIN_MAX: an LFN joins only once its parent router is ready, and in
+# dag_simple a router can take up to about 400 s (seed 1: router 10 ready at
+# 391 s, its LFN 18 operational at 448 s, the same before and after the
+# interoperability changes); 600 s covers that tail
+STEADY_FROM=${STEADY_FROM:-600}; JOIN_MAX=${JOIN_MAX:-600}
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT" && OUT=$(realpath "$OUT")
 [ -z "$(ls -A "$OUT")" ] || { echo "test_lfn_mesh: $OUT is not empty" >&2; exit 1; }
