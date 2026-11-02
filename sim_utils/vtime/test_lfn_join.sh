@@ -138,6 +138,7 @@ for t, m in lines(f'node{lfn_node}.log'):
     elif m.startswith('Receiving ...'):
         if int(re.search(r'pkt_len=(\d+)', m).group(1)) >= 30:
             lfn['rx'].append(t)
+            lfn.setdefault('rxe', []).append((t, t + int(re.search(r'pkt_len=(\d+)', m).group(1)) * 8 / 50000))
     elif 'test-udp rx from' in m:
         src, p = re.search(r'from (\S+): (.*)', m).groups()
         lfn['udp_rx'].append((t, src, p))
@@ -231,7 +232,12 @@ def after_own_tx(t):
     i = bisect.bisect_right(txs, t) - 1
     return i >= 0 and t - txl[i][1] < 0.06
 acks = [t for t in lfn['rx'] if not in_window(t) and after_own_tx(t)]
-outside = [t for t in lfn['rx'] if not in_window(t) and not after_own_tx(t)]
+# A frame that starts while the LFN is still on for the ACK of a frame it has
+# just received (within 10 ms of that frame's end) is overheard there
+rxe = sorted(lfn.get('rxe', []))
+def during_ack(t):
+    return any(s < t and t - e < 0.01 for s, e in rxe if s > t - 1)
+outside = [t for t in lfn['rx'] if not in_window(t) and not after_own_tx(t) and not during_ack(t)]
 check(lfn['rx'] and not outside, f"{len(lfn['rx'])} frames received by the LFN: {len(outside)} outside its windows, "
       f"{len(acks)} ACKs to its own frames" + (f" (first outside at {outside[0]:.6f} s)" if outside else ''))
 # --- GS8 stage 5: the router parents the LFN

@@ -107,6 +107,7 @@ for n in lfns:
             d['tx'].append((t, t + int(re.search(r'len=(\d+)', m).group(1)) * 8 / 50000))
         elif m.startswith('Receiving ...') and int(re.search(r'pkt_len=(\d+)', m).group(1)) >= 30:
             d['rx'].append(t)
+            d.setdefault('rxe', []).append((t, t + int(re.search(r'pkt_len=(\d+)', m).group(1)) * 8 / 50000))
         r = re.search(r'test-udp (tx to|rx from) (\S+): (\S+ \d+)', m)
         if r:
             d['utx' if r.group(1) == 'tx to' else 'urx'].append((t, r.group(2), r.group(3)))
@@ -138,7 +139,12 @@ for n in lfns:
     def after_own_tx(t):
         i = bisect.bisect_right(txs, t) - 1
         return i >= 0 and t - txl[i][1] < 0.06
-    outside = [t for t in d['rx'] if not in_window(t) and not after_own_tx(t)]
+    # A frame that starts while the LFN is still on for the ACK of a frame it
+    # has just received (within 10 ms of that frame's end) is overheard there
+    rxe = sorted(d.get('rxe', []))
+    def during_ack(t):
+        return any(s < t and t - e < 0.01 for s, e in rxe if s > t - 1)
+    outside = [t for t in d['rx'] if not in_window(t) and not after_own_tx(t) and not during_ack(t)]
     check(not outside, f"LFN {n}: {len(d['rx'])} frames received, {len(outside)} outside its windows")
     node = next(x for x in rep['nodes'] if x['node'] == n)
     pwr[n] = node
