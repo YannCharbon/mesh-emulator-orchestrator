@@ -88,6 +88,7 @@ struct wsbr_ctxt {
     struct test_traffic_cfg test_traffic; // test_udp_* (test_traffic.h)
     int test_lfn_silent_at_s;   // > 0: the LFN parent goes silent then (ws_test_lfn_parent_silence())
     int test_lfn_silent_for_s;  // for this long
+    uint32_t dhcp_lifetime_s;   // > 0: the DHCPv6 address lifetime given (0xffffffff: infinite); 0: the network size's
     int lgtk_rotate_at_s;       // > 0: an LGTK rotation then (ws_management_lfn_lgtk_rotate())
 
 

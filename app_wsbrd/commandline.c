@@ -335,6 +335,8 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
         /* empty */
     } else if (sscanf(line, " test_lfn_silent_for_s = %d %c", &ctxt->test_lfn_silent_for_s, &garbage) == 1) {
         /* empty */
+    } else if (sscanf(line, " dhcp_lifetime_s = %u %c", &ctxt->dhcp_lifetime_s, &garbage) == 1) {
+        /* empty */
     } else if (sscanf(line, " lgtk_rotate_at_s = %d %c", &ctxt->lgtk_rotate_at_s, &garbage) == 1) {
         /* empty */
     } else if (sscanf(line, " test_udp_echo = %s %c", str_arg, &garbage) == 1) {
@@ -350,7 +352,7 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
             K(listen_interval_ms), K(listen_interval_min_ms), K(listen_interval_max_ms), K(eapol_listen_interval_ms),
             K(rx_window_us), K(rx_guard_us), K(close_retry_us), K(uplink_guard_us), K(lpas_interval_s),
             K(lnd_slot_time_ms), K(lnd_slots), K(lpcs_retry_intervals), K(maintain_parent_time),
-            K(lgtk_max_mismatch_s), K(registration_lifetime_min), K(drift_ppm), K(widening_max_us), K(bc_rx_window_us),
+            K(lgtk_max_mismatch_s), K(registration_lifetime_min), K(drift_ppm), K(widening_max_us), K(bc_widening_max_us), K(bc_rx_window_us),
             K(bc_sync_only), K(restart_min_ms), K(restart_max_ms), K(search_sync_periods), K(search_uplink_fails), K(bc_interval_ms), K(bc_sync_period), K(lto),
             K(tx_offset_us), K(tx_lead_us), K(tx_min_prep_us), K(tx_ttl_intervals),
             K(lgtk_lifetime_s), K(lgtk_new_install_required), K(lgtk_new_activation_time), K(lgtk_activation_guard_s),

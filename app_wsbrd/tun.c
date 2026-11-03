@@ -52,10 +52,27 @@ static struct phy_device_driver_s tun_driver = {
     .tx = wsbr_tun_tx,
 };
 
+// tun_device = none: no TUN device (virtual-time runs with test traffic only,
+// which need no host networking). The border router writes its IPv6 output to
+// /dev/null, reads nothing, and takes the link-local address the tunvt devices
+// carry (sim_utils/vtime/tun_setup.sh), so its logs match a run on a tunvt.
+static bool wsbr_tun_none(const char *devname)
+{
+    return devname && !strcmp(devname, "none");
+}
+
 int get_link_local_addr(char* if_name, uint8_t ip[static 16])
 {
+    static const uint8_t none_ll[16] = {
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0xf4, 0x7d, 0x24, 0x95, 0xc4, 0x76, 0xe1, 0xe0
+    };
     struct sockaddr_in6 *ipv6;
     struct ifaddrs *ifaddr, *ifa;
+
+    if (wsbr_tun_none(if_name)) {
+        memcpy(ip, none_ll, 16);
+        return 0;
+    }
 
     if (getifaddrs(&ifaddr) < 0) {
             WARN("getifaddrs: %m");
@@ -96,6 +113,12 @@ static int wsbr_tun_open(char *devname)
     };
     int fd, ifindex;
 
+    if (wsbr_tun_none(devname)) {
+        fd = open("/dev/null", O_WRONLY);
+        if (fd < 0)
+            FATAL(2, "open /dev/null: %m");
+        return fd;
+    }
     if (devname && *devname)
         strcpy(ifr.ifr_name, devname);
     fd = open("/dev/net/tun", O_RDWR);
@@ -159,7 +182,7 @@ static void wsbr_tun_accept_ra(char *devname)
 void wsbr_tun_init(struct wsbr_ctxt *ctxt)
 {
     ctxt->tun_fd = wsbr_tun_open(ctxt->tun_dev);
-    if (ctxt->tun_autoconf)
+    if (ctxt->tun_autoconf && !wsbr_tun_none(ctxt->tun_dev))
         wsbr_tun_accept_ra(ctxt->tun_dev);
 
     ctxt->tun_driver = &tun_driver;
@@ -172,6 +195,11 @@ void wsbr_tun_init(struct wsbr_ctxt *ctxt)
     ctxt->tun_if_id = arm_nwk_interface_ethernet_init(ctxt->tun_mac_api, "bh0");
     if (ctxt->tun_if_id < 0)
         FATAL(2, "%s: arm_nwk_interface_ethernet_init: %d", __func__, ctxt->tun_if_id);
+}
+
+bool wsbr_tun_is_none(const struct wsbr_ctxt *ctxt)
+{
+    return wsbr_tun_none(ctxt->tun_dev);
 }
 
 void wsbr_tun_read(struct wsbr_ctxt *ctxt)
