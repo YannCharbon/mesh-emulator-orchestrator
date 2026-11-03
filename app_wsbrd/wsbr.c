@@ -214,6 +214,8 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
         FATAL_ON(ret, 1, "lfn_*: invalid LFN settings (%d)", ret);
         ret = ws_management_lfn_parent_set(ctxt->rcp_if_id, true);
         FATAL_ON(ret, 1, "enable_lfn: needs fan_version = 1.1 (%d)", ret);
+        if (ctxt->test_lfn_lpa_drop > 0)
+            WARN_ON(ws_test_lfn_lpa_drop(ctxt->rcp_if_id, ctxt->test_lfn_lpa_drop));
         INFO("LFN parenting on");
     }
 
