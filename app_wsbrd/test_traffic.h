@@ -13,6 +13,7 @@
 
 #define TEST_UDP_PORT 7
 #define TEST_UDP_DST_MAX 8
+#define TEST_UDP_GROUP_MAX 4
 
 struct test_traffic_cfg {
     bool echo;                                  // answer requests (test_udp_echo)
@@ -20,6 +21,9 @@ struct test_traffic_cfg {
     int start_s;                                // first request after this (test_udp_start_s)
     int dst_count;
     uint8_t dst[TEST_UDP_DST_MAX][16];          // test_udp_dst (repeatable)
+    int group_count;
+    uint8_t group[TEST_UDP_GROUP_MAX][16];      // multicast groups joined (test_udp_group, repeatable)
+    int group_leave_s;                          // > 0: leave them after this (test_udp_group_leave_s)
 };
 
 void test_traffic_start(const struct test_traffic_cfg *cfg);

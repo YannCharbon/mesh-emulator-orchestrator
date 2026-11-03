@@ -12,7 +12,7 @@
 #include "mbed-client-libservice/mbed-client-libservice/ip6string.h"
 #include "test_traffic.h"
 
-enum { EV_INIT = 0, EV_SEND = 1 };
+enum { EV_INIT = 0, EV_SEND = 1, EV_LEAVE = 2 };
 
 static struct test_traffic_cfg tt;
 static int8_t tt_sock = -1;
@@ -58,6 +58,21 @@ static void tt_send(void)
     }
 }
 
+/* Join or leave the groups of test_udp_group (an LFN registers them with its
+ * parent, RFC 9685) */
+static void tt_groups(bool join)
+{
+    ns_ipv6_mreq_t mreq = { .ipv6mr_interface = 0 };
+    char a[40];
+
+    for (int i = 0; i < tt.group_count; i++) {
+        memcpy(mreq.ipv6mr_multiaddr, tt.group[i], 16);
+        ip6tos(tt.group[i], a);
+        INFO("test-udp %s group %s (%d)", join ? "join" : "leave", a,
+             socket_setsockopt(tt_sock, SOCKET_IPPROTO_IPV6, join ? SOCKET_IPV6_JOIN_GROUP : SOCKET_IPV6_LEAVE_GROUP, &mreq, sizeof(mreq)));
+    }
+}
+
 static void tt_tasklet_cb(arm_event_t *ev)
 {
     if (ev->event_type == EV_INIT) {
@@ -66,9 +81,19 @@ static void tt_tasklet_cb(arm_event_t *ev)
             WARN("test-udp: socket_open failed");
             return;
         }
+        if (tt.group_count) {
+            tt_groups(true);
+            if (tt.group_leave_s > 0) {
+                eventOS_event_timer_request(EV_LEAVE, EV_LEAVE, tt_tasklet, (uint32_t)tt.group_leave_s * 1000);
+            }
+        }
         if (tt.period_s > 0 && tt.dst_count) {
             eventOS_event_timer_request(EV_SEND, EV_SEND, tt_tasklet, (uint32_t)(tt.start_s > 0 ? tt.start_s : tt.period_s) * 1000);
         }
+        return;
+    }
+    if (ev->event_type == EV_LEAVE) {
+        tt_groups(false);
         return;
     }
     if (ev->event_type == EV_SEND) {
@@ -79,7 +104,7 @@ static void tt_tasklet_cb(arm_event_t *ev)
 
 void test_traffic_start(const struct test_traffic_cfg *cfg)
 {
-    if (!cfg->echo && !(cfg->period_s > 0 && cfg->dst_count)) {
+    if (!cfg->echo && !cfg->group_count && !(cfg->period_s > 0 && cfg->dst_count)) {
         return;
     }
     tt = *cfg;

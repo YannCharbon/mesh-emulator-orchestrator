@@ -218,6 +218,11 @@ if traffic:
   q, got, back = pairs(lfn['udp_tx'], br['udp_rx'], lfn['udp_rx'])
   check(q and len(got) == len(q) and len(back) == len(q), f'LFN -> BR unicast: {len(q)} requests, {len(got)} received, {len(back)} echoes back')
   q, got, back = pairs(br['udp_tx'], lfn['udp_rx'], br['udp_rx'], mc=True)
+  if mesh == 3 and silent_at > 0:
+    # Under the router after the change: the border router's link-local
+    # multicast no longer reaches the LFN, and the border router stops its
+    # copies once the LFN deregisters (docs/LFN_STACK.md §9)
+    q, got = [x for x in q if x[0] < silent_at], [x for x in got if x[0] < silent_at]
   if mesh in (0, 3):
    check(q and len(got) == len(q) and br['copies'] >= len(q), f'BR -> ff02::1: {len(q)} requests, {len(got)} received by the LFN, {br["copies"]} MAC-unicast copies')
 win = sorted(lfn['win'])

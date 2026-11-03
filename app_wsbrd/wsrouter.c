@@ -191,6 +191,8 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
 
 // Event of wsbr_tasklet: rx_off_when_idle_after has passed
 #define WSROUTER_EVENT_RX_OFF 100
+#define WSROUTER_EVENT_LFN_SILENT 101
+#define WSROUTER_EVENT_LFN_SILENT_END 102
 
 static void wsbr_tasklet(struct arm_event_s *event)
 {
@@ -227,6 +229,21 @@ static void wsbr_tasklet(struct arm_event_s *event)
             if (ctxt->rx_off_after_s >= 0)
                 eventOS_event_timer_request(0, WSROUTER_EVENT_RX_OFF, event->receiver,
                                             (uint32_t)ctxt->rx_off_after_s * 1000);
+            // Test: an LFN parent silent for a while (test_lfn_silent_*): a
+            // router that answers LFNs only later (a better parent appears)
+            if (ctxt->test_lfn_silent_at_s > 0)
+                eventOS_event_timer_request(0, WSROUTER_EVENT_LFN_SILENT, event->receiver,
+                                            (uint32_t)ctxt->test_lfn_silent_at_s * 1000);
+            break;
+        case WSROUTER_EVENT_LFN_SILENT:
+            INFO("LFN parent silent for %d s (test_lfn_silent_*)", ctxt->test_lfn_silent_for_s);
+            WARN_ON(ws_test_lfn_parent_silence(ctxt->rcp_if_id, true));
+            eventOS_event_timer_request(0, WSROUTER_EVENT_LFN_SILENT_END, event->receiver,
+                                        (uint32_t)ctxt->test_lfn_silent_for_s * 1000);
+            break;
+        case WSROUTER_EVENT_LFN_SILENT_END:
+            INFO("LFN parent answering again");
+            WARN_ON(ws_test_lfn_parent_silence(ctxt->rcp_if_id, false));
             break;
         case WSROUTER_EVENT_RX_OFF:
             INFO("RX off when idle (rx_off_when_idle_after = %d s)", ctxt->rx_off_after_s);
