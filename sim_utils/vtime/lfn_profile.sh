@@ -1,6 +1,6 @@
 # Silicon Labs' LFN profiles as our settings, sourced by test_lfn_profiles.sh
 # and test_lfn_mcast.sh: sets LI, LIMAX, MPT, MISMATCH, REG, SYNCONLY, BCI,
-# BCSP, BCW, the phase B2 timers NAW (NA wait), DHD, DHI, DHM (DHCPv6 Solicit
+# BCSP, the phase B2 timers NAW (NA wait), DHD, DHI, DHM (DHCPv6 Solicit
 # delay, IRT, MRT), IKM, IKR, IKX, IKL (EAPOL key request: first within,
 # retries from, doubling to, count), LFN_PROF (the LFN's options) and PARENT_PROF (the parents') for
 # PROF = test, balanced or eco.
@@ -10,20 +10,20 @@
 # (SL_WISUN_BR_PARAMS_LFN_*). Eco's maximum unicast interval (16 776 s) is
 # above our 2^31 us limit (LFN study M11): 2 147 483 ms instead. The B2
 # timers: the same header (the stack's ws_management_api.h, LFN_STACK.md §11).
-# Ours: the broadcast windows widen up to drift_ppm (50) x the sync period
-# when that exceeds widening_max_us (100 ms): Eco, 1.8 s each side.
+# The broadcast windows' widening bound follows the sync period on its own
+# (the stack's automatic bound, LFN_STACK.md §5): no lfn_bc_widening_max_us.
 case $PROF in
-test)     LI=6000;   LIMAX=60000;   MPT=5;  MISMATCH=120;  REG=2160; SYNCONLY=false; BCI=10000;  BCSP=5;  BCW=0
+test)     LI=6000;   LIMAX=60000;   MPT=5;  MISMATCH=120;  REG=2160; SYNCONLY=false; BCI=10000;  BCSP=5
           NAW=300;  DHD=10;  DHI=10;   DHM=3600; IKM=3;  IKR=18;  IKX=42;  IKL=3 ;;
-balanced) LI=60000;  LIMAX=300000;  MPT=20; MISMATCH=3600; REG=3600; SYNCONLY=false; BCI=60000;  BCSP=15; BCW=0
+balanced) LI=60000;  LIMAX=300000;  MPT=20; MISMATCH=3600; REG=3600; SYNCONLY=false; BCI=60000;  BCSP=15
           NAW=3600; DHD=300; DHI=900;  DHM=3600; IKM=30; IKR=180; IKX=420; IKL=3 ;;
-eco)      LI=300000; LIMAX=2147483; MPT=60; MISMATCH=3600; REG=5040; SYNCONLY=true;  BCI=600000; BCSP=60; BCW=1800000
+eco)      LI=300000; LIMAX=2147483; MPT=60; MISMATCH=3600; REG=5040; SYNCONLY=true;  BCI=600000; BCSP=60
           NAW=7200; DHD=600; DHI=1800; DHM=3600; IKM=30; IKR=300; IKX=900; IKL=5 ;;
 *) echo "lfn_profile.sh: profile test, balanced or eco" >&2; exit 2 ;;
 esac
 LFN_PROF="-o lfn_listen_interval_ms=$LI -o lfn_listen_interval_min_ms=1000 -o lfn_listen_interval_max_ms=$LIMAX
  -o lfn_eapol_listen_interval_ms=1300 -o lfn_maintain_parent_time=$MPT -o lfn_lgtk_max_mismatch_s=$MISMATCH
- -o lfn_registration_lifetime_min=$REG -o lfn_bc_sync_only=$SYNCONLY -o lfn_bc_widening_max_us=$BCW
+ -o lfn_registration_lifetime_min=$REG -o lfn_bc_sync_only=$SYNCONLY
  -o lfn_na_wait_s=$NAW -o lfn_dhcp_max_delay_s=$DHD -o lfn_dhcp_irt_s=$DHI -o lfn_dhcp_mrt_s=$DHM
  -o lfn_initial_key_max_s=$IKM -o lfn_initial_key_retry_min_s=$IKR -o lfn_initial_key_retry_max_limit_s=$IKX
  -o lfn_initial_key_retry_limit=$IKL"
