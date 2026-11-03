@@ -360,7 +360,14 @@ static void wsbr_tasklet(struct arm_event_s *event)
             multicast_fwd_full_for_scope(ctxt->rcp_if_id, 3);
             // multicast ZigBee params with timer expiration = 0
             // Imin=10*50, Imax=Imin, k=1, t exp=0, window=75
-            multicast_set_parameters(10,0,1,1,75);
+            /* MPL: the stack's Wi-SUN values (ws_cfg mpl: Imin 1 s, Imax 10 s,
+               k 8, 1 expiration for a small network). The value inherited
+               here, k = 1, made every router that heard the border router's
+               transmission suppress its own: MPL messages never went
+               beyond the first hop (test_lfn_scale.sh mesh). Opt-in with
+               mpl_legacy_k1 = true for the old behaviour */
+            if (ctxt->mpl_legacy_k1)
+                multicast_set_parameters(10,0,1,1,75);
             test_traffic_start(&ctxt->test_traffic);
 
             INFO("Subscribing to multicast address");

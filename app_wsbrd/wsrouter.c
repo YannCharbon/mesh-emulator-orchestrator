@@ -229,7 +229,14 @@ static void wsbr_tasklet(struct arm_event_s *event)
             wsbr_configure_ws(ctxt);
             if (arm_nwk_interface_up(ctxt->rcp_if_id))
                  WARN("arm_nwk_interface_up RCP");
-            multicast_set_parameters(10,0,1,1,75);
+            /* MPL: the stack's Wi-SUN values (ws_cfg mpl: Imin 1 s, Imax 10 s,
+               k 8, 1 expiration for a small network). The value inherited
+               here, k = 1, made every router that heard the border router's
+               transmission suppress its own: MPL messages never went
+               beyond the first hop (test_lfn_scale.sh mesh). Opt-in with
+               mpl_legacy_k1 = true for the old behaviour */
+            if (ctxt->mpl_legacy_k1)
+                multicast_set_parameters(10,0,1,1,75);
             test_traffic_start(&ctxt->test_traffic);
 
             if (ctxt->rx_off_after_s >= 0)
@@ -395,8 +402,13 @@ int main(int argc, char *argv[])
         WARN("Err open logfile %s", file_path);
 
     multicast_start();
-    INFO("Subscribing to multicast address");
-    multicast_add_address(multi_cast_addr, 1);
+    // The demo multicast application's group (multicast_helper.c). Not on
+    // an LFN: it would register it with its parent (RFC 9685) and take one
+    // of the parent's registrations for a group nothing sends to
+    if (!ctxt->lfn) {
+        INFO("Subscribing to multicast address");
+        multicast_add_address(multi_cast_addr, 1);
+    }
 
 
 #ifdef MAC_INPROCESS

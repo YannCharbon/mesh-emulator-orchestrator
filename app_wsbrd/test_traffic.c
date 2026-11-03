@@ -95,6 +95,13 @@ static void tt_tasklet_cb(arm_event_t *ev)
             WARN("test-udp: socket_open failed");
             return;
         }
+        {
+            // Group requests cross the mesh: MPL forwards a message only
+            // while its hop limit lasts (the socket default is 1: the border
+            // router's neighbours only)
+            int16_t hops = 16;
+            socket_setsockopt(tt_sock, SOCKET_IPPROTO_IPV6, SOCKET_IPV6_MULTICAST_HOPS, &hops, sizeof(hops));
+        }
         if (tt.group_count) {
             tt_groups(true);
             if (tt.group_leave_s > 0) {

@@ -3,7 +3,8 @@
 # docs/LFN_STACK.md §4), in virtual time. Node 0 is the border router, nodes
 # 1..LFNS LFNs that hear only it; each LFN joins NGROUPS groups (test_udp_group)
 # besides those the stack joins (ff03::1 and others), and registers them all. The border router keeps
-# WS_LFN_MC_REG_MAX (CAPACITY, 32) registrations.
+# CAPACITY (32) registrations in all (lfn_mc_reg_max; the default is 2048,
+# and 16 per LFN child).
 #
 # Checks:
 #   - every LFN joined;
@@ -32,7 +33,7 @@ for i in $(seq 1 "$LFNS"); do
     for g in $(seq 1 "$GROUPS_N"); do G="$G -o test_udp_group=ff05::$i:$g"; done
     export NODE_OPTS_$i="-o device_type=lfn -o enable_lfn=false -o lfn_parent_check_s=0 $G"
 done
-CONF=lfn TOPO="$OUT.topo" TUN=$TUN SIM_OPTS="$SIM_OPTS" \
+BR_OPTS="-o lfn_mc_reg_max=$CAPACITY" CONF=lfn TOPO="$OUT.topo" TUN=$TUN SIM_OPTS="$SIM_OPTS" \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT" "$DUR" > "$OUT.run" 2>&1
 RC=$?
 rm -f "$OUT.topo"
