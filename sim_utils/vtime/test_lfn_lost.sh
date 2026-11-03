@@ -70,32 +70,42 @@ run() {   # run <dir> [DROP/LINK assignments]
         "$HERE/run.sh" "$BIN" "$WORK" "$d" "$DUR" > "$d.run" 2>&1 || { echo "test_lfn_lost: run failed ($d.run)"; exit 1; }
 }
 finish() { [ "${KEEP:-0}" = 1 ] || rm -rf "$OUT"; exit "$1"; }
-# The frame to lose: the first data frame from <src> to the LFN after the
-# n-th "LFN: ARO" of <dir>'s LFN log: "<seq> <time>"
-pick() {   # pick <dir> <n>
-    PYTHONPATH=$HERE python3 - "$1" "$2" "$LFN" <<'PY'
+# The frame to lose: the first data frame from the parent to the LFN after the
+# n-th "LFN: ARO" of <dir>'s LFN log (of the PSDU length <len>, if given: the
+# first NA's, as a test request may come first): "<seq> <time> <length>"
+pick() {   # pick <dir> <n> [len]
+    PYTHONPATH=$HERE python3 - "$1" "$2" "$LFN" "${3:-0}" <<'PY'
 import sys
-from lfn_lib import lines, frames, mac
-d, n, lfn = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+from lfn_lib import lines, mac, parse_frame
+d, n, lfn, want = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 aro = [t for t, m in lines(f'{d}/node{lfn}.log') if 'LFN: ARO ' in m and ' 0 min' not in m]
 if len(aro) < n:
     sys.exit(1)
 dst = mac(lfn).replace(':', '')
-f = next(((t, x) for t, s, ch, x in frames(f'{d}/frames.txt') if t > aro[n - 1] and x['dst'] == dst and x['type'] == 1), None)
+f = None
+for line in open(f'{d}/frames.txt'):
+    p = line.split()
+    t = int(p[0]) / 1e6
+    if t <= aro[n - 1]:
+        continue
+    x = parse_frame(p[3])
+    if x and x['dst'] == dst and x['type'] == 1 and (not want or len(p[3]) // 2 == want):
+        f = (t, x, len(p[3]) // 2)
+        break
 if not f:
     sys.exit(1)
-print(f[1]['seq'], f'{aro[n - 1]:.6f}')
+print(f[1]['seq'], f'{aro[n - 1]:.6f}', f[2])
 PY
 }
 EV=()
 case $MODE in
 na|na2)
     run "$OUT/pilot1"
-    read -r S1 T1 < <(pick "$OUT/pilot1" 1) || { echo "test_lfn_lost: no registration in the pilot"; finish 1; }
+    read -r S1 T1 N1 < <(pick "$OUT/pilot1" 1) || { echo "test_lfn_lost: no registration in the pilot"; finish 1; }
     EV=(DROP="0:$LFN:$S1:$T1:$(echo "$T1 + $DROPWIN" | bc)")
     if [ $MODE = na2 ]; then
         run "$OUT/pilot2" "${EV[@]}"
-        read -r S2 T2 < <(pick "$OUT/pilot2" 2) || { echo "test_lfn_lost: no second registration in the pilot"; finish 1; }
+        read -r S2 T2 N2 < <(pick "$OUT/pilot2" 2 "$N1") || { echo "test_lfn_lost: no second registration in the pilot"; finish 1; }
         EV=(DROP="0:$LFN:$S1:$T1:$(echo "$T1 + $DROPWIN" | bc) 0:$LFN:$S2:$T2:$(echo "$T2 + $DROPWIN" | bc)")
     fi ;;
 release)
@@ -103,7 +113,13 @@ release)
     run "$OUT/pilot1" LINK="$L1"
     TR=$(sed 's/\x1b\[[0-9;]*m//g' "$OUT/pilot1/node3.log" | awk '/old parent .* released \(try 1\)/ {print $1 - 1700000000; exit}')
     [ -n "$TR" ] || { echo "test_lfn_lost: no release in the pilot"; finish 1; }
-    EV=(LINK="$L1 1:3:$(echo "$TR - 1" | bc):-140 1:3:$(echo "$TR + 10 * $LOST - 0.5" | bc):-50") ;;
+    BACK=$(echo "$TR + 10 * $LOST - 0.5" | bc)
+    if (( $(echo "$TR - 1 < $MOVE_AT + 90" | bc) )); then
+        # the first try comes before the link's return: one dead window
+        EV=(LINK="1:3:$MOVE_AT:-140 1:3:$BACK:-50")
+    else
+        EV=(LINK="$L1 1:3:$(echo "$TR - 1" | bc):-140 1:3:$BACK:-50")
+    fi ;;
 esac
 run "$OUT/run" "${EV[@]}"
 echo "info events: ${EV[*]}"

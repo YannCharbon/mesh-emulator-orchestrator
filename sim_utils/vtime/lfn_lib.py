@@ -163,6 +163,8 @@ def frames(path):
 
 ACK_WAIT_S = 0.0105     # the MAC's wait for an ACK after its frame (TX_done to no_ack:
                         # 10.3 ms in mode 3), when the log shows no "no_ack"
+PENDING_HOLD_S = 0.030  # a window held for a frame with the frame-pending bit stays open
+                        # this long after it (FHSS pending_hold_us, the stack's default)
 ACK_ON_S = 0.010        # the LFN stays on this long after a frame it received (its ACK)
 
 
@@ -188,7 +190,9 @@ def lfn_reception(path, t_from=0.0):
     cca = []            # [start, end] of the MAC's TX attempts
     cca_open = None
     for t, m in lines(path):
-        if 'window open: slot' in m or 'discovery window open' in m:
+        if 'LFN window held for a pending frame' in m:
+            win.append((t, PENDING_HOLD_S))
+        elif 'window open: slot' in m or 'discovery window open' in m:
             r = re.search(r'for (\d+) us', m)
             if r:
                 win.append((t, int(r.group(1)) / 1e6))
