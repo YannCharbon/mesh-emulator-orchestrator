@@ -92,7 +92,7 @@ run() {   # run <job line>
     rc=$?
     [ "${KEEP:-0}" = 1 ] || rm -rf "${OUT:?}/$name" "$OUT/$name".run "$OUT/$name".*.run
     if [ $rc = 0 ]; then echo "PASS $name ($((SECONDS - t0)) s)"
-    else echo "FAIL $name ($((SECONDS - t0)) s): $(grep -m1 -E '^FAIL|run failed|Error' "$OUT/$name.txt" | cut -c1-160)"; fi
+    else echo "FAIL $name ($((SECONDS - t0)) s): $(grep -m1 -E '^FAIL|run failed|Error|^test_lfn_[a-z_]+: no ' "$OUT/$name.txt" | cut -c1-160)"; fi
 }
 export -f run; export OUT KEEP
 T0=$SECONDS
