@@ -14,7 +14,12 @@
 #   SOCK=<path>        conductor socket (default: a new /tmp/wssim-vt-*.sock)
 #   TUN=<dev>          the border router's TUN device (default tun0). It must
 #                      exist, belong to the user and be up (tunup.sh). Two runs
-#                      at the same time need two TUN devices.
+#                      at the same time need two TUN devices. TUN=none: no
+#                      device (the border router's tun_device = none: its IPv6
+#                      output goes nowhere, its link-local address is the one
+#                      of the tunvt devices); for runs whose traffic comes
+#                      from the programs themselves (test_udp_*), any number
+#                      at a time, no sudo
 #   SETARCH=1          run every program under `setarch -R` (no address
 #                      randomisation; for the determinism check)
 #   KEEP_DBUS=1        let the programs register on the user D-Bus. By default
