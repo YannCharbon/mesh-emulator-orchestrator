@@ -15,6 +15,7 @@
 #include "nanostack/source/common_protocols/icmpv6.h"
 
 #include "nanostack/ws_bbr_api.h"
+#include "nanostack/ws_management_api.h"
 #include "nanostack/socket_api.h"
 #include "mbed-client-libservice/ip6string.h"
 
@@ -248,6 +249,46 @@ int dbus_get_nodes(sd_bus *bus, const char *path, const char *interface,
     return 0;
 }
 
+/* FAN 1.1: the border router's LFN children and candidates (GS8 gap U14):
+ * EUI-64, then parent (this border router), listen_interval_ms,
+ * last_heard_s, state ("candidate", "child", "released"). An LFN under a
+ * router appears in Nodes (its address, the router as parent). */
+int dbus_get_lfn_children(sd_bus *bus, const char *path, const char *interface,
+                          const char *property, sd_bus_message *reply,
+                          void *userdata, sd_bus_error *ret_error)
+{
+    struct wsbr_ctxt *ctxt = userdata;
+    static ws_lfn_child_info_t table[256];
+    static const char *const states[] = { "candidate", "child", "released" };
+    int ret, len, i;
+
+    len = ws_management_lfn_children_get(ctxt->rcp_if_id, table, 256);
+    if (len < 0)
+        len = 0;
+    ret = sd_bus_message_open_container(reply, 'a', "(aya{sv})");
+    WARN_ON(ret < 0, "%s: %s", property, strerror(-ret));
+    for (i = 0; i < len; i++) {
+        sd_bus_message_open_container(reply, 'r', "aya{sv}");
+        sd_bus_message_append_array(reply, 'y', table[i].eui64, 8);
+        sd_bus_message_open_container(reply, 'a', "{sv}");
+        sd_bus_message_open_container(reply, 'e', "sv");
+        sd_bus_message_append(reply, "s", "parent");
+        sd_bus_message_open_container(reply, 'v', "ay");
+        sd_bus_message_append_array(reply, 'y', ctxt->hw_mac, 8);
+        sd_bus_message_close_container(reply);
+        sd_bus_message_close_container(reply);
+        sd_bus_message_append(reply, "{sv}", "listen_interval_ms", "u", table[i].listen_interval_ms);
+        sd_bus_message_append(reply, "{sv}", "last_heard_s", "u", table[i].last_heard_s);
+        sd_bus_message_append(reply, "{sv}", "state", "s", states[table[i].state < 3 ? table[i].state : 0]);
+        sd_bus_message_close_container(reply);
+        ret = sd_bus_message_close_container(reply);
+        WARN_ON(ret < 0, "%s: %s", property, strerror(-ret));
+    }
+    ret = sd_bus_message_close_container(reply);
+    WARN_ON(ret < 0, "%s: %s", property, strerror(-ret));
+    return 0;
+}
+
 int dbus_get_hw_address(sd_bus *bus, const char *path, const char *interface,
                         const char *property, sd_bus_message *reply,
                         void *userdata, sd_bus_error *ret_error)
@@ -342,6 +383,9 @@ static const sd_bus_vtable dbus_vtable[] = {
                         SD_BUS_VTABLE_PROPERTY_EMITS_CHANGE),
         SD_BUS_PROPERTY("Nodes", "a(aya{sv})", dbus_get_nodes,
                         offsetof(struct wsbr_ctxt, rcp_if_id),
+                        0),
+        SD_BUS_PROPERTY("LfnChildren", "a(aya{sv})", dbus_get_lfn_children,
+                        0,
                         0),
         SD_BUS_PROPERTY("HwAddress", "ay", dbus_get_hw_address,
                         offsetof(struct wsbr_ctxt, hw_mac),

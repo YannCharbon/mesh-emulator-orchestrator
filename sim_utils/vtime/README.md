@@ -23,7 +23,7 @@ Scripts for the step-1 gate of `docs/VIRTUAL_TIME.md` (§7). They need a virtual
 | `wakes_window.py` | Wakes per second by cause and average current in a time window, from two runs of the same seed that differ only in duration (the difference of their `power.json` totals): `wakes_window.py [--nodes 1-14] <short run> <long run> ...` (`docs/POWER_MODEL.md` §15) |
 | `test_power.py` | Test of the power ledger (`docs/POWER_MODEL.md`): one scripted node, totals checked against hand-computed ones, also with per-PHY-mode profile values (§6.2) and `--power-mode`, and profiles the parser must reject: `test_power.py build-vt/wssimserver` |
 
-Analysis: `sim_utils/migration/analyze.py` reads these runs as it reads the wall-clock ones (`brtree` lines of `br.log` instead of `dbus_nodes.txt`).
+Analysis: `sim_utils/migration/analyze.py` reads these runs as it reads the wall-clock ones (`brtree` lines of `br.log` instead of `dbus_nodes.txt`). A border router that parents LFNs also logs its LFN children every 30 s as `brlfn` lines (EUI-64, listen interval, seconds since last heard, state), the content of the D-Bus property `LfnChildren` of the wall-clock programs.
 
 ```bash
 B=build-vt; W=$(pwd)
