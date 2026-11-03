@@ -184,17 +184,6 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
     // ws_bbr_rpl_parameters_set() are done by the function below.
     ret = ws_management_network_size_set(ctxt->rcp_if_id, ctxt->ws_size);
     WARN_ON(ret);
-    // DHCPv6 address lifetime (the network size sets 2 to 24 h; wsbrd 2.x
-    // gives an infinite one by default)
-    if (ctxt->dhcp_lifetime_s) {
-        ws_bbr_cfg_t bbr;
-
-        ws_cfg_bbr_get(&bbr);
-        bbr.dhcp_address_lifetime = ctxt->dhcp_lifetime_s;
-        ret = ws_cfg_bbr_set(NULL, &bbr, 0);
-        WARN_ON(ret < 0, "dhcp_lifetime_s: %d", ret);
-        INFO("DHCPv6 address lifetime %"PRIu32" s", ctxt->dhcp_lifetime_s);
-    }
 
     ret = arm_nwk_set_tx_output_power(ctxt->rcp_if_id, ctxt->tx_power);
     WARN_ON(ret);
@@ -219,6 +208,17 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
         if (ctxt->test_lfn_lpa_unusable)
             WARN_ON(ws_test_lfn_lpa_unusable(ctxt->rcp_if_id, true));
         INFO("LFN parenting on");
+    }
+    // DHCPv6 address lifetime: the network size sets 2 to 24 h, LFN parenting
+    // infinite (as wsbrd 2.x); dhcp_lifetime_s overrides both
+    if (ctxt->dhcp_lifetime_s) {
+        ws_bbr_cfg_t bbr;
+
+        ws_cfg_bbr_get(&bbr);
+        bbr.dhcp_address_lifetime = ctxt->dhcp_lifetime_s;
+        ret = ws_cfg_bbr_set(NULL, &bbr, 0);
+        WARN_ON(ret < 0, "dhcp_lifetime_s: %d", ret);
+        INFO("DHCPv6 address lifetime %"PRIu32" s", ctxt->dhcp_lifetime_s);
     }
 
 
