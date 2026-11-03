@@ -68,7 +68,7 @@ esac
 
 PYTHONPATH=$HERE python3 - "$OUT" "$MODE" "$DUR" "$JOIN_MAX" "$STRICT" "$MIN_DELIVERY" "$FADE_AT" "$FADE_FOR" "$RECOVER" "$WEAK_AT" "$BELOW" "${RUNS[@]}" <<'PY'
 import re, sys
-from lfn_lib import Checks, lines, udp, exchange
+from lfn_lib import Checks, lines, udp, exchange, listen_interval_s
 out, mode = sys.argv[1], sys.argv[2]
 dur, join_max, strict, min_del, fade_at, fade_for, recover = (float(x) for x in sys.argv[3:10])
 weak_at, below = float(sys.argv[10]), sys.argv[11]
@@ -95,6 +95,7 @@ def stats(d):
             B['noack'] += 1
         elif 'was lost due to link quality' in m:
             B['linkloss'] += 1
+    L['iv'] = listen_interval_s(f'{d}/node1.log')
     return L, B, udp(f'{d}/br.log'), udp(f'{d}/node1.log')
 def deliver(br, lf, a, b):
     d = exchange(br, lf, None, a, b)
@@ -107,7 +108,7 @@ if mode == 'sweep':
         ck(oper is not None and oper <= join_max, f'{lvl} dBm: operational at {oper:.1f} s' if oper else f'{lvl} dBm: not operational')
         if oper is None:
             continue
-        (dq, dg, db), (uq, ug, ub) = deliver(br, lf, max(oper + 15, weak_at), dur - 15)
+        (dq, dg, db), (uq, ug, ub) = deliver(br, lf, max(oper + 15, weak_at), dur - 15 - L['iv'])
         print(f'info {lvl} dBm: frames lost on the link: {B["linkloss"]} at the border router, {L["linkloss"]} at the LFN; '
               f'MAC retries (no ACK): LFN {L["noack"]}, border router {B["noack"]}; parent searches {len(L["search"])}, '
               f'losses {len(L["lost"])}, EAPOL {len(L["auth"])}')
@@ -135,7 +136,7 @@ else:
        + (f' ({len([t for t in L["auth"] if t > fade_at])} EAPOL)' if again else '') if again else 'operational again')
     print(f'info MAC retries (no ACK): LFN {L["noack"]}, border router {B["noack"]}; frames lost on the link: '
           f'{B["linkloss"]} at the border router, {L["linkloss"]} at the LFN')
-    for name, a, b in (('before the fade', (oper or dur) + 15, fade_at), ('after the return', back + recover, dur - 15)):
+    for name, a, b in (('before the fade', (oper or dur) + 15, fade_at), ('after the return', back + recover, dur - 15 - L['iv'])):
         (dq, dg, db), (uq, ug, ub) = deliver(br, lf, a, b)
         ck(dq and uq and len(db) == len(dq) and len(ub) == len(uq),
            f'{name} ({a:.0f}-{b:.0f} s): BR -> LFN {len(db)}/{len(dq)} echoed, LFN -> BR {len(ub)}/{len(uq)} echoed')

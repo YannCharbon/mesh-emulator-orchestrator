@@ -269,3 +269,36 @@ def lfn_reception(path, t_from=0.0):
         else:
             res['outside'].append(s)
     return res
+
+
+# --- Group packets: the LFN path apart from the FFNs' MPL
+
+def mpl_seq_of_requests(br_log, group):
+    """{payload: MPL sequence number} of the border router's test requests to
+    group (the "MPL transmit N" that follows each "test-udp tx to <group>")."""
+    import ipaddress
+    group = str(ipaddress.ip_address(group))
+    out, pending = {}, None
+    for t, m in lines(br_log):
+        r = re.search(r'test-udp tx to (\S+): (Q \d+)', m)
+        if r:
+            pending = r.group(2) if str(ipaddress.ip_address(r.group(1))) == group else None
+            continue
+        r = re.search(r'MPL transmit (\d+)', m)
+        if r and pending:
+            out[pending] = int(r.group(1))
+            pending = None
+    return out
+
+
+def mpl_received(log):
+    """MPL sequence numbers a router received ("MPL received N")."""
+    return {int(r.group(1)) for t, m in lines(log) for r in [re.search(r'MPL received (\d+)', m)] if r}
+
+
+def listen_interval_s(log):
+    """The LFN's longest unicast listen interval in the run (s): from its
+    "LFN schedule:" and "LFN listen schedule:" lines; 0 if none."""
+    iv = [int(r.group(1)) for t, m in lines(log) if 'schedule:' in m
+          for r in [re.search(r'interval (\d+) ms', m)] if r]
+    return max(iv) / 1000 if iv else 0.0

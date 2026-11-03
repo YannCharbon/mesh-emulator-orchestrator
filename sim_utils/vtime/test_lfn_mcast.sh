@@ -61,8 +61,9 @@ RC=$?
 rm -f "$OUT.topo"
 [ $RC = 0 ] || { echo "test_lfn_mcast: run failed ($OUT.run)"; exit 1; }
 
-python3 - "$OUT" "$DUR" "$JOIN_MAX" "$GROUP" "$LEAVE_AT" "$LIFETIME_MIN" <<'EOF'
+PYTHONPATH=$HERE python3 - "$OUT" "$DUR" "$JOIN_MAX" "$GROUP" "$LEAVE_AT" "$LIFETIME_MIN" <<'EOF'
 import re, sys, ipaddress
+from lfn_lib import listen_interval_s, mpl_seq_of_requests, mpl_received
 out, dur, join_max, group, leave_at, life = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4], float(sys.argv[5]), float(sys.argv[6]) * 60
 group = str(ipaddress.ip_address(group))
 T0 = 1700000000.0
@@ -89,6 +90,10 @@ for n in copies:
     for t, m in lines(n):
         if 'multicast copy to LFN' in m:
             copies[n] += 1
+# A request counts against the LFN path under the router only if the router
+# received its MPL message (an MPL loss between FFNs is printed, not counted)
+seq = mpl_seq_of_requests(f'{out}/br.log', group)
+r_got = mpl_received(f'{out}/node1.log')
 print(f"info {len(sent)} group requests sent; MAC-unicast copies: border router {copies['br.log']}, router {copies['node1.log']}")
 for node, sub in ((2, True), (3, False), (4, True), (5, False)):
     oper, disc, lost, rx, earo, parent = None, 0, 0, [], [], None
@@ -117,15 +122,24 @@ for node, sub in ((2, True), (3, False), (4, True), (5, False)):
         got.setdefault(p, []).append(t)
     dup = sum(len(v) - 1 for v in got.values())
     if sub:
-        until = leave_at if node == 4 else dur - 15
+        # a request sent less than a listen interval (and 15 s) before the end,
+        # or before the LFN leaves, may not reach it in time
+        iv = listen_interval_s(f'{out}/node{node}.log')
+        until = (leave_at if node == 4 else dur) - 15 - iv
         want = [p for t, p in sent if oper and oper + 15 < t < until]
+        ffn = [p for p in want if node == 4 and seq.get(p) not in r_got]
+        want = [p for p in want if p not in ffn]
+        if ffn:
+            print(f"info LFN {node}: {len(ffn)} group requests its router never got by MPL (FFN loss, not counted): {', '.join(ffn)}")
         miss = [p for p in want if p not in got]
-        check(want and not miss and not dup, f"LFN {node} (subscribed): {len(want) - len(miss)} of {len(want)} group requests received, {dup} duplicates")
+        check(want and not miss and not dup, f"LFN {node} (subscribed): {len(want) - len(miss)} of {len(want)} group requests (sent until {until:.0f} s"
+              + (", that reached its router" if node == 4 else '') + f") received, {dup} duplicates" + (f"; missing {', '.join(miss[:6])}" if miss else ''))
         regs = [x for x in earo if x[1] == group and x[2] > 0]
         check(len(regs) >= 2 and regs[-1][0] - regs[0][0] >= life * 0.9,
               f"LFN {node}: {len(regs)} group registrations, from {regs[0][0]:.1f} to {regs[-1][0]:.1f} s (lifetime {life:.0f} s)" if regs else f"LFN {node}: group registered")
         if node == 4:
-            after = [p for p, ts in got.items() if any(t > leave_at + 5 for t in ts)]
+            # requests sent after the deregistration must not reach it
+            after = [p for t, p in sent if t > leave_at + 5 and p in got]
             unreg = [x for x in earo if x[1] == group and x[2] == 0]
             check(unreg and not after, f"LFN 4 left the group at {leave_at:.0f} s: EARO lifetime 0 at {unreg[0][0]:.1f} s, {len(after)} group requests received after it" if unreg else 'LFN 4 left the group')
     else:
