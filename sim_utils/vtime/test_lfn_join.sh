@@ -104,7 +104,7 @@ rm -f "$OUT.topo"
 
 PYTHONPATH=$HERE python3 - "$OUT" "$DUR" "$STEADY_FROM" "$JOIN_MAX" "$LGTK_ROTATE_AT" "$BR_PERIOD" "${SILENT_AT:-0}" "$LFN_NODE" "$MESH" "$GROUP" "$MIN_RX" <<'EOF'
 import json, re, sys, bisect, ipaddress
-from lfn_lib import lfn_reception
+from lfn_lib import lfn_reception, listen_interval_s, mpl_seq_of_requests, mpl_received
 out, dur, steady_from, join_max, rot = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])
 traffic = int(sys.argv[6]) > 0
 silent_at = float(sys.argv[7])
@@ -217,7 +217,9 @@ else:
     check(again and not [t for t in lfn['auth'] if loss and t > loss],
           f"rejoined without EAPOL, operational again at {again[0]:.1f} s" if again else 'rejoined')
 
-last = dur - 15      # requests later than this may still be on their way
+# requests later than this may still be on their way: 15 s, and one listen
+# interval for the downlinks, which wait for the LFN's window
+last = dur - 15 - listen_interval_s(f'{out}/node{lfn_node}.log')
 def pairs(tx, rx_peer, rx_back, mc=False, dst=None):
     # requests "Q n" sent by one side, received by the other, echoed back
     # requests sent once the LFN was operational (before, it has no address)
@@ -249,12 +251,20 @@ if traffic:
     rx_g = {}
     for t, s_, p in lfn['udp_rx']:
         rx_g.setdefault(p, []).append(t)
-    for name, a, b in (('before the parent went silent', (lfn['oper'] or dur) + 15, silent_at),
-                       ('after the change to the router', (ch[0] + 30) if ch else dur, last)):
+    # After the change, a request counts against the LFN path only if the
+    # router received its MPL message: an MPL loss between FFNs is printed
+    seq = mpl_seq_of_requests(f'{out}/br.log', group)
+    r_got = mpl_received(f'{out}/node1.log')
+    for name, a, b, via in (('before the parent went silent', (lfn['oper'] or dur) + 15, silent_at, False),
+                            ('after the change to the router', (ch[0] + 30) if ch else dur, last, True)):
         g = [(t, p) for t, d, p in br['udp_tx'] if p.startswith('Q') and str(ipaddress.ip_address(d)) == group and a < t < b]
+        lost_ffn = [p for t, p in g if via and seq.get(p) not in r_got]
+        g = [(t, p) for t, p in g if p not in lost_ffn]
         got_g = [p for t, p in g if p in rx_g]
         dup = sum(len(rx_g[p]) - 1 for t, p in g if p in rx_g)
-        check(g and len(got_g) == len(g) and not dup, f'BR -> {group} {name}: {len(g)} requests, {len(got_g)} received by the LFN, {dup} duplicates')
+        if lost_ffn:
+            print(f'info BR -> {group} {name}: {len(lost_ffn)} requests the router never got by MPL (FFN loss, not counted): {", ".join(lost_ffn)}')
+        check(g and len(got_g) == len(g) and not dup, f'BR -> {group} {name}: {len(g)} requests that reached the parent, {len(got_g)} received by the LFN, {dup} duplicates')
 rec = lfn_reception(f'{out}/node{lfn_node}.log')
 outside = rec['outside']
 check(len(rec['rx']) >= min_rx and not outside, f"{len(rec['rx'])} frames received by the LFN (at least {min_rx}): {len(outside)} outside its windows, "

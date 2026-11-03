@@ -61,7 +61,7 @@ rm -f "$OUT.topo"
 
 PYTHONPATH=$HERE python3 - "$OUT" "$MODE" "$DUR" "$EVENT_AT" "$CHANGE_MAX" "$JOIN_MAX" <<'PY'
 import re, sys
-from lfn_lib import Checks, lines, udp, mac, exchange, BR_ADDR, lfn_addr
+from lfn_lib import Checks, lines, udp, mac, exchange, BR_ADDR, lfn_addr, listen_interval_s
 out, mode = sys.argv[1], sys.argv[2]
 dur, ev, change_max, join_max = (float(x) for x in sys.argv[3:])
 ck = Checks(f'test_lfn_parent_gone ({mode})')
@@ -98,7 +98,7 @@ if mode == 'uplink':
     s = [w for t, w in L['search'] if t > ev]
     ck(s and s[0] == 'uplinks failed', f"first parent search after the cut: {s[0] if s else 'none'} (expected: uplinks failed)")
 br, lfn = udp(f'{out}/br.log'), udp(f'{out}/node3.log')
-end = dur - 15
+end = dur - 15 - listen_interval_s(f'{out}/node3.log')   # downlinks wait for a window
 for name, a, b in (('before the event', (oper or dur) + 15, ev), ('after the change', (chg or dur) + 30, end)):
     for way, tx, rx, peer in (('BR -> LFN', br, lfn, None), ('LFN -> BR', lfn, br, lfn_addr(3))):
         q, got, back = exchange(tx, rx, peer, a, b)
