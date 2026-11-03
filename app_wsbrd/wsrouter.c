@@ -193,6 +193,8 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
 #define WSROUTER_EVENT_RX_OFF 100
 #define WSROUTER_EVENT_LFN_SILENT 101
 #define WSROUTER_EVENT_LFN_SILENT_END 102
+#define WSROUTER_EVENT_RESET_DOWN 103
+#define WSROUTER_EVENT_RESET_UP 104
 
 static void wsbr_tasklet(struct arm_event_s *event)
 {
@@ -234,6 +236,20 @@ static void wsbr_tasklet(struct arm_event_s *event)
             if (ctxt->test_lfn_silent_at_s > 0)
                 eventOS_event_timer_request(0, WSROUTER_EVENT_LFN_SILENT, event->receiver,
                                             (uint32_t)ctxt->test_lfn_silent_at_s * 1000);
+            // Test: a reset that keeps the storage (interface down and up)
+            if (ctxt->test_reset_at_s > 0)
+                eventOS_event_timer_request(0, WSROUTER_EVENT_RESET_DOWN, event->receiver,
+                                            (uint32_t)ctxt->test_reset_at_s * 1000);
+            break;
+        case WSROUTER_EVENT_RESET_DOWN:
+            INFO("test reset: interface down for %d s (test_reset_*)", ctxt->test_reset_for_s);
+            WARN_ON(arm_nwk_interface_down(ctxt->rcp_if_id));
+            eventOS_event_timer_request(0, WSROUTER_EVENT_RESET_UP, event->receiver,
+                                        (uint32_t)(ctxt->test_reset_for_s > 0 ? ctxt->test_reset_for_s : 1) * 1000);
+            break;
+        case WSROUTER_EVENT_RESET_UP:
+            INFO("test reset: interface up");
+            WARN_ON(arm_nwk_interface_up(ctxt->rcp_if_id));
             break;
         case WSROUTER_EVENT_LFN_SILENT:
             INFO("LFN parent silent for %d s (test_lfn_silent_*)", ctxt->test_lfn_silent_for_s);
