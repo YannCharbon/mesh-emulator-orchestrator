@@ -382,7 +382,7 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
             K(lnd_slot_time_ms), K(lnd_slots), K(lpcs_retry_intervals), K(maintain_parent_time),
             K(lgtk_max_mismatch_s), K(registration_lifetime_min), K(drift_ppm), K(widening_max_us), K(bc_widening_max_us), K(drift_floor_ppb), K(bc_rx_window_us),
             K(bc_sync_only), K(restart_min_ms), K(restart_max_ms), K(search_sync_periods), K(search_uplink_fails),
-            K(parent_check_s), K(parent_check_weak_s), K(parent_check_lnd_slots), K(parent_check_sweeps), K(parent_switch_cost), K(parent_release_s), K(mc_reg_per_child), K(mc_reg_max), K(bc_interval_ms), K(bc_sync_period), K(lto),
+            K(parent_check_s), K(parent_check_weak_s), K(parent_check_lnd_slots), K(parent_check_sweeps), K(parent_switch_cost), K(parent_release_s), K(na_wait_s), K(dhcp_max_delay_s), K(dhcp_irt_s), K(dhcp_mrt_s), K(initial_key_max_s), K(initial_key_retry_min_s), K(initial_key_retry_max_limit_s), K(initial_key_retry_limit), K(mc_reg_per_child), K(mc_reg_max), K(bc_interval_ms), K(bc_sync_period), K(lto),
             K(tx_offset_us), K(tx_lead_us), K(tx_min_prep_us), K(tx_ttl_intervals),
             K(lgtk_lifetime_s), K(lgtk_new_install_required), K(lgtk_new_activation_time), K(lgtk_activation_guard_s),
 #undef K
