@@ -263,6 +263,8 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
 #define WSBR_LFN_SILENT_EVENT (APPLICATION_EVENT + 0x41)
 #define WSBR_LFN_SILENT_END_EVENT (APPLICATION_EVENT + 0x42)
 #define WSBR_LGTK_ROTATE_EVENT (APPLICATION_EVENT + 0x43)
+#define WSBR_REVOKE_EVENT (APPLICATION_EVENT + 0x44)
+#define WSBR_LGTK_FC_EVENT (APPLICATION_EVENT + 0x45)
 
 #ifdef NS_PORT_SIM
 // Batch mode (virtual time): nobody reads D-Bus, so the border router logs
@@ -384,10 +386,28 @@ static void wsbr_tasklet(struct arm_event_s *event)
             if (ctxt->test_lfn_silent_at_s > 0)
                 eventOS_event_timer_request(0, WSBR_LFN_SILENT_EVENT, event->receiver,
                                             (uint32_t)ctxt->test_lfn_silent_at_s * 1000);
+            if (ctxt->test_lgtk_fc_at_s > 0)
+                eventOS_event_timer_request(0, WSBR_LGTK_FC_EVENT, event->receiver,
+                                            (uint32_t)ctxt->test_lgtk_fc_at_s * 1000);
+            if (ctxt->test_revoke_at_s > 0)
+                eventOS_event_timer_request(0, WSBR_REVOKE_EVENT, event->receiver,
+                                            (uint32_t)ctxt->test_revoke_at_s * 1000);
             // An LGTK rotation (GS8 stage 3, LGTK)
             if (ctxt->lgtk_rotate_at_s > 0)
                 eventOS_event_timer_request(0, WSBR_LGTK_ROTATE_EVENT, event->receiver,
                                             (uint32_t)ctxt->lgtk_rotate_at_s * 1000);
+            break;
+        case WSBR_LGTK_FC_EVENT:
+            INFO("active LGTK frame counter set to %u (test_lgtk_fc_*)", ctxt->test_lgtk_fc);
+            WARN_ON(ws_test_lgtk_frame_counter_set(ctxt->rcp_if_id, ctxt->test_lgtk_fc));
+            break;
+        case WSBR_REVOKE_EVENT:
+            // Test: revoke a node's access (ws_bbr_node_keys_remove() then
+            // ws_bbr_node_access_revoke_start(): new GTK and LGTK, the active
+            // ones shortened, FAN 1.1 6.5.2.5)
+            INFO("node access revoked (test_revoke_*)");
+            WARN_ON(ws_bbr_node_keys_remove(ctxt->rcp_if_id, ctxt->test_revoke_eui64));
+            WARN_ON(ws_bbr_node_access_revoke_start(ctxt->rcp_if_id));
             break;
         case WSBR_LGTK_ROTATE_EVENT:
             INFO("LGTK rotation (lgtk_rotate_at_s)");

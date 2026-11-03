@@ -357,6 +357,15 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
         /* empty */
     } else if (sscanf(line, " test_lfn_lpa_unusable = %d %c", &ctxt->test_lfn_lpa_unusable, &garbage) == 1) {
         /* empty */
+    } else if (sscanf(line, " test_lgtk_fc_at_s = %d %c", &ctxt->test_lgtk_fc_at_s, &garbage) == 1) {
+        /* empty */
+    } else if (sscanf(line, " test_lgtk_fc = %u %c", &ctxt->test_lgtk_fc, &garbage) == 1) {
+        /* empty */
+    } else if (sscanf(line, " test_revoke_at_s = %d %c", &ctxt->test_revoke_at_s, &garbage) == 1) {
+        /* empty */
+    } else if (sscanf(line, " test_revoke_eui64 = %s %c", str_arg, &garbage) == 1) {
+        if (parse_byte_array(str_arg, ctxt->test_revoke_eui64, 8))
+            FATAL(1, "%s:%d: invalid test_revoke_eui64: %s", filename, line_no, str_arg);
     } else if (sscanf(line, " test_reset_at_s = %d %c", &ctxt->test_reset_at_s, &garbage) == 1) {
         /* empty */
     } else if (sscanf(line, " test_reset_for_s = %d %c", &ctxt->test_reset_for_s, &garbage) == 1) {
@@ -384,7 +393,7 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
             K(bc_sync_only), K(restart_min_ms), K(restart_max_ms), K(search_sync_periods), K(search_uplink_fails),
             K(parent_check_s), K(parent_check_weak_s), K(parent_check_lnd_slots), K(parent_check_sweeps), K(parent_switch_cost), K(parent_release_s), K(na_wait_s), K(dhcp_max_delay_s), K(dhcp_irt_s), K(dhcp_mrt_s), K(initial_key_max_s), K(initial_key_retry_min_s), K(initial_key_retry_max_limit_s), K(initial_key_retry_limit), K(mc_reg_per_child), K(mc_reg_max), K(bc_interval_ms), K(bc_sync_period), K(lto),
             K(tx_offset_us), K(tx_lead_us), K(tx_min_prep_us), K(tx_ttl_intervals),
-            K(lgtk_lifetime_s), K(lgtk_new_install_required), K(lgtk_new_activation_time), K(lgtk_activation_guard_s),
+            K(lgtk_lifetime_s), K(lgtk_new_install_required), K(lgtk_new_activation_time), K(lgtk_activation_guard_s), K(lgtk_revocation_reduction), K(lpmk_lifetime_s), K(lptk_lifetime_s),
 #undef K
         };
         unsigned long v;

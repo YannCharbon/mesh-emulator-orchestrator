@@ -92,6 +92,10 @@ struct wsbr_ctxt {
     bool mpl_legacy_k1;         // the old MPL override (Imin 10, k 1): MPL stops at the first hop
     int test_lfn_lpa_drop;      // > 0: the LFN parent drops its first LPAs, as if lost (ws_test_lfn_lpa_drop())
     int test_lfn_lpa_unusable;  // 1: the LFN parent's LPAs lack the BS-IE (ws_test_lfn_lpa_unusable())
+    int test_lgtk_fc_at_s;      // > 0: border router: its active LGTK's frame counter set to test_lgtk_fc then
+    unsigned test_lgtk_fc;
+    int test_revoke_at_s;       // > 0: border router: revoke test_revoke_eui64's access then
+    uint8_t test_revoke_eui64[8];
     int test_reset_at_s;        // > 0: wsnode: interface down then, up test_reset_for_s later (a reset with storage)
     int test_reset_for_s;
     int lgtk_rotate_at_s;       // > 0: an LGTK rotation then (ws_management_lfn_lgtk_rotate())
