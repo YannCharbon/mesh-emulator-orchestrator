@@ -17,14 +17,17 @@
 # EXPECT=stay: router 2 is only marginally better; the LFN must keep router 1
 # through at least 2 checks made after LATE.
 # Both: every request sent from 15 s after the LFN became operational to
-# DUR - 15 s arrived and was echoed, in both directions (no loss during the
-# move).
+# DUR - 15 s arrived once and was echoed, in both directions (no loss during
+# the move). EXPECT=move also requires at least MOVE_REQ requests each way
+# across the move (from 30 s before it to 60 s after the old parent's
+# release), all delivered: the requests are denser for it (BR_PERIOD 13 s,
+# LFN_PERIOD 17 s by default).
 #
 # usage: test_lfn_better.sh <bindir> <workdir(holds examples/)> <outdir> [profile]
 # Environment: DUR (1800), WSSIM_SEED (1), TUN (tunvt0), EXPECT (move),
 # OLD_RSSI (-87 for move, -70 for stay), NEW_RSSI (-60 for move, -67 for
 # stay), LATE (600), CHECK_S (300), MOVE_MAX (1.5 x CHECK_S + 60),
-# BR_PERIOD (37), LFN_PERIOD (53), SIM_OPTS (e.g. --drift-random=20),
+# BR_PERIOD (37; move: 13), LFN_PERIOD (53; move: 17), MOVE_REQ (3), SIM_OPTS (e.g. --drift-random=20),
 # LFN_EXTRA, ROUTER_EXTRA.
 # Exit status 0 if every check passes.
 set -u
@@ -34,7 +37,8 @@ DUR=${DUR:-1800}; TUN=${TUN:-tunvt0}; EXPECT=${EXPECT:-move}
 if [ "$EXPECT" = move ]; then OLD_RSSI=${OLD_RSSI:--87}; NEW_RSSI=${NEW_RSSI:--60}
 else OLD_RSSI=${OLD_RSSI:--70}; NEW_RSSI=${NEW_RSSI:--67}; fi
 LATE=${LATE:-600}; CHECK_S=${CHECK_S:-300}; MOVE_MAX=${MOVE_MAX:-$((CHECK_S * 3 / 2 + 60))}
-BR_PERIOD=${BR_PERIOD:-37}; LFN_PERIOD=${LFN_PERIOD:-53}
+if [ "$EXPECT" = move ]; then BR_PERIOD=${BR_PERIOD:-13}; LFN_PERIOD=${LFN_PERIOD:-17}
+else BR_PERIOD=${BR_PERIOD:-37}; LFN_PERIOD=${LFN_PERIOD:-53}; fi
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT" && OUT=$(realpath "$OUT")
 [ -z "$(ls -A "$OUT")" ] || { echo "test_lfn_better: $OUT is not empty" >&2; exit 1; }
@@ -51,9 +55,10 @@ RC=$?
 rm -f "$OUT.topo"
 [ $RC = 0 ] || { echo "test_lfn_better: run failed ($OUT.run)"; exit 1; }
 
-python3 - "$OUT" "$DUR" "$EXPECT" "$LATE" "$MOVE_MAX" <<'EOF'
+python3 - "$OUT" "$DUR" "$EXPECT" "$LATE" "$MOVE_MAX" "${MOVE_REQ:-3}" <<'EOF'
 import re, sys
 out, dur, expect, late, move_max = sys.argv[1], float(sys.argv[2]), sys.argv[3], float(sys.argv[4]), float(sys.argv[5])
+move_req = int(sys.argv[6])
 T0 = 1700000000.0
 fails = []
 def check(cond, what):
@@ -126,16 +131,23 @@ else:
     check(not lfn['moves'] and len(after) >= 2 and lfn['parents'][-1][1] == R1,
           f"kept router 1 through {len(after)} checks after router 2 appeared")
 last = dur - 15
-q = [p for t, a, p in br['tx'] if p.startswith('Q') and oper and oper + 15 < t < last]
-got = {p for t, a, p in lfn['urx']}
-back = {p.replace('R', 'Q', 1) for t, a, p in br['rx'] if p.startswith('R')}
-check(q and all(p in got for p in q) and all(p in back for p in q),
-      f"BR -> LFN: {len(q)} requests, {sum(p in got for p in q)} received, {sum(p in back for p in q)} echoes back")
-q = [p for t, a, p in lfn['utx'] if p.startswith('Q') and oper and oper + 15 < t < last]
-got = {p for t, a, p in br['rx']}
-back = {p.replace('R', 'Q', 1) for t, a, p in lfn['urx'] if p.startswith('R')}
-check(q and all(p in got for p in q) and all(p in back for p in q),
-      f"LFN -> BR: {len(q)} requests, {sum(p in got for p in q)} received, {sum(p in back for p in q)} echoes back")
+def ways(a, b):
+    """Requests both ways sent in (a, b): (name, requests, received, echoed, duplicates)"""
+    res = []
+    for name, tx, rx, back_rx in (('BR -> LFN', br['tx'], lfn['urx'], br['rx']), ('LFN -> BR', lfn['utx'], br['rx'], lfn['urx'])):
+        q = [p for t, x, p in tx if p.startswith('Q') and a < t < b]
+        got = [p for t, x, p in rx]
+        back = {p.replace('R', 'Q', 1) for t, x, p in back_rx if p.startswith('R')}
+        res.append((name, q, [p for p in q if p in got], [p for p in q if p in back], sum(got.count(p) > 1 for p in q)))
+    return res
+for name, q, got, back, dup in ways(oper + 15 if oper else dur, last):
+    check(q and len(got) == len(q) and len(back) == len(q) and not dup,
+          f"{name}: {len(q)} requests, {len(got)} received, {len(back)} echoes back, {dup} received twice")
+if expect == 'move' and mv:
+    a, b = mv[0][0] - 30, min((rel[0] if rel else mv[0][0]) + 60, last)
+    for name, q, got, back, dup in ways(a, b):
+        check((len(q) >= move_req or b - a < 90) and len(back) == len(q),
+              f"{name} across the move ({a:.0f}-{b:.0f} s): {len(q)} requests (at least {move_req}), {len(back)} echoed")
 print('test_lfn_better: ' + ('PASSED' if not fails else f'FAILED ({len(fails)})'))
 sys.exit(1 if fails else 0)
 EOF

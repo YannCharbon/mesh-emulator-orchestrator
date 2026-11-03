@@ -167,6 +167,7 @@ class Driver:
         self.quit = set()
         self.closed = set()            # closed by the conductor without "xq"
         self.on_wake = None            # hook(driver, node, t) -> "close" to drop the node
+        self.on_close = None           # hook(driver, node) when the conductor closes a node
         self.socks = {}
 
     def connect(self):
@@ -208,6 +209,8 @@ class Driver:
                 msg = s.recv(65536)
                 if not msg:
                     self.closed.add(nid)
+                    if self.on_close:
+                        self.on_close(self, nid)
                     continue
                 magic = msg[:2]
                 if magic == b"xw":

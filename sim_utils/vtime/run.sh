@@ -66,6 +66,8 @@
 #                      (they print before its first wake: see the README)
 #   CUT="<a>:<b>:<s> ..." from virtual second s, frames from node a no longer
 #                      reach node b (one direction; --vtime-cut)
+#   LINK="<a>:<b>:<s>:<rssi> ..." from virtual second s, the link a-b (both
+#                      directions) has this RSSI (dBm; --vtime-link)
 #   FRAMES=1           write every frame sent to <outdir>/frames.txt (time us,
 #                      sender, channel, PSDU in hex; --vtime-frames)
 #
@@ -194,6 +196,7 @@ for k in ${RESTART:-}; do
 	NINST[$i]=$(( ${NINST[$i]:-0} + 1 )); LATE+=("$i:node$i.r${NINST[$i]}")
 done
 for k in ${CUT:-}; do CTL+=(--vtime-cut="$k"); done
+for k in ${LINK:-}; do CTL+=(--vtime-link="$k"); done
 [ "${FRAMES:-0}" = 1 ] && CTL+=(--vtime-frames="$OUT/frames.txt")
 [ ${#CTL[@]} -gt 0 ] && echo "events=${CTL[*]}" >> "$OUT/run_info.txt"
 start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" --dump "$SOCK"

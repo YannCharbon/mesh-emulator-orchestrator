@@ -19,6 +19,7 @@
 
 struct test_traffic_cfg {
     bool echo;                                  // answer requests (test_udp_echo)
+    bool listen;                                // open the socket and log what arrives, without answering (test_udp_listen)
     int period_s;                               // 0: send nothing (test_udp_period_s)
     int start_s;                                // first request after this (test_udp_start_s)
     int gap_ms;                                 // between the requests to successive dst of one round (test_udp_gap_ms; 0: at once)

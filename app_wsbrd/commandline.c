@@ -359,6 +359,8 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
         /* empty */
     } else if (sscanf(line, " lgtk_rotate_at_s = %d %c", &ctxt->lgtk_rotate_at_s, &garbage) == 1) {
         /* empty */
+    } else if (sscanf(line, " test_udp_listen = %s %c", str_arg, &garbage) == 1) {
+        ctxt->test_traffic.listen = str_to_val(str_arg, valid_booleans);
     } else if (sscanf(line, " test_udp_echo = %s %c", str_arg, &garbage) == 1) {
 
         ctxt->test_traffic.echo = str_to_val(str_arg, valid_booleans);

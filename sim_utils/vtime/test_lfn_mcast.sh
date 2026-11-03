@@ -18,27 +18,43 @@
 #   - each subscribed LFN refreshed its group registration (more than one
 #     EARO for the group, the last ones after the first lifetime ended).
 #
+# PROF=balanced or eco: the LFNs and both parents take Silicon Labs' LFN
+# profile (lfn_profile.sh; listen intervals of 60 s and 300 s). The group
+# requests come every 1.5 listen intervals (BR_PERIOD 90 s and 450 s), so a
+# parent often holds two for an LFN, the second one for a whole listen
+# interval or more (the path of the "second packet dropped after 30 s" bug,
+# the stack's docs/LFN_STACK.md §11). A parent sends an LFN one frame per
+# window: more than one request per listen interval would overload it.
+#
 # usage: test_lfn_mcast.sh <bindir> <workdir(holds examples/)> <outdir> [profile]
-# Environment: DUR (1800), WSSIM_SEED (1), TUN (tunvt0), GROUP (ff05::1234),
-# BR_PERIOD (37), LIFETIME_MIN (5), LEAVE_AT (1200), JOIN_MAX (300),
-# SIM_OPTS (e.g. --drift-random=20), LFN_EXTRA, ROUTER_EXTRA.
+# Environment: PROF (none: the stack's defaults, the Test profile's
+# intervals), DUR (1800; balanced 7200, eco 21600), WSSIM_SEED (1), TUN
+# (tunvt0), GROUP (ff05::1234), BR_PERIOD (37; balanced 90, eco 450), LIFETIME_MIN (5; balanced 10,
+# eco 30), LEAVE_AT (1200; balanced 5400, eco 14400), JOIN_MAX (300;
+# balanced 900, eco 3600), SIM_OPTS (e.g. --drift-random=20), LFN_EXTRA,
+# ROUTER_EXTRA.
 # Exit status 0 if every check passes.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
 PROFILE=${4:-$WORK/examples/power/efr32fg25-soc.ini}
-DUR=${DUR:-1800}; TUN=${TUN:-tunvt0}; GROUP=${GROUP:-ff05::1234}
-BR_PERIOD=${BR_PERIOD:-37}; LIFETIME_MIN=${LIFETIME_MIN:-5}; LEAVE_AT=${LEAVE_AT:-1200}; JOIN_MAX=${JOIN_MAX:-300}
 HERE=$(cd "$(dirname "$0")" && pwd)
+LFN_PROF=; PARENT_PROF=; D=(1800 5 1200 300 37)
+if [ -n "${PROF:-}" ]; then
+    . "$HERE/lfn_profile.sh"
+    case $PROF in balanced) D=(7200 10 5400 900 90) ;; eco) D=(21600 30 14400 3600 450) ;; esac
+fi
+DUR=${DUR:-${D[0]}}; TUN=${TUN:-tunvt0}; GROUP=${GROUP:-ff05::1234}
+BR_PERIOD=${BR_PERIOD:-${D[4]}}; LIFETIME_MIN=${LIFETIME_MIN:-${D[1]}}; LEAVE_AT=${LEAVE_AT:-${D[2]}}; JOIN_MAX=${JOIN_MAX:-${D[3]}}
 mkdir -p "$OUT" && OUT=$(realpath "$OUT")
 [ -z "$(ls -A "$OUT")" ] || { echo "test_lfn_mcast: $OUT is not empty" >&2; exit 1; }
 printf '0,1:-50\n0,2:-50\n0,3:-50\n1,4:-50\n1,5:-50\n' > "$OUT.topo"
-LFN="-o device_type=lfn -o enable_lfn=false -o test_udp_echo=true -o lfn_registration_lifetime_min=$LIFETIME_MIN ${LFN_EXTRA:-}"
-export NODE_OPTS_1="-o device_type=ffn -o enable_lfn=true ${ROUTER_EXTRA:-}"
+LFN="-o device_type=lfn -o enable_lfn=false -o test_udp_echo=true $LFN_PROF -o lfn_registration_lifetime_min=$LIFETIME_MIN ${LFN_EXTRA:-}"
+export NODE_OPTS_1="-o device_type=ffn -o enable_lfn=true $PARENT_PROF ${ROUTER_EXTRA:-}"
 export NODE_OPTS_2="$LFN -o test_udp_group=$GROUP"
 export NODE_OPTS_3="$LFN"
 export NODE_OPTS_4="$LFN -o test_udp_group=$GROUP -o test_udp_group_leave_s=$LEAVE_AT"
 export NODE_OPTS_5="$LFN"
-BR_OPTS="-o test_udp_echo=true -o test_udp_dst=$GROUP -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60" \
+BR_OPTS="-o test_udp_echo=true -o test_udp_dst=$GROUP -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60 $PARENT_PROF" \
 CONF=lfn TOPO="$OUT.topo" TUN=$TUN POWER=$PROFILE \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT" "$DUR" > "$OUT.run" 2>&1
 RC=$?

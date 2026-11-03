@@ -304,6 +304,8 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "                            previous one is stopped (stopped then if still running); repeatable\n");
     fprintf(stream, "  --vtime-cut=SRC:DST:SECONDS virtual time: from that time, frames from SRC no longer reach\n");
     fprintf(stream, "                            DST (one direction); repeatable\n");
+    fprintf(stream, "  --vtime-link=A:B:SECONDS:RSSI virtual time: from that time, the link between A and B has\n");
+    fprintf(stream, "                            this RSSI (dBm), both directions (it must exist); repeatable\n");
     fprintf(stream, "  --vtime-frames=FILE       virtual time: write every frame sent (time us, sender, channel,\n");
     fprintf(stream, "                            PSDU in hex) to FILE\n");
     fprintf(stream, "  --power=PROFILE           virtual time: record power, every node with this profile\n");
@@ -332,18 +334,20 @@ enum {
     OPT_VTIME_START,
     OPT_VTIME_CUT,
     OPT_VTIME_FRAMES,
+    OPT_VTIME_LINK,
 };
 
 // Node events in virtual time (--vtime-kill, --vtime-start, --vtime-cut),
 // applied at their time before any wake at that time, in time order (option
 // order on a tie).
-enum { VT_CTL_KILL, VT_CTL_START, VT_CTL_CUT };
+enum { VT_CTL_KILL, VT_CTL_START, VT_CTL_CUT, VT_CTL_LINK };
 struct vt_ctl {
     uint64_t t;
     int kind;
     int node;                   // CUT: the receiver
     int src;                    // CUT: the sender
     int slot;                   // START: the connection of the instance, 0 until its hello
+    float rssi;                 // LINK: the new RSSI of the link, both directions
 };
 #define VT_CTL_MAX 256
 static struct vt_ctl vt_ctls[VT_CTL_MAX];
@@ -370,23 +374,28 @@ static int node_id(const char *opt, const char *str)
     return id;
 }
 
-// "ID:SECONDS" (kill, start) or "SRC:DST:SECONDS" (cut)
+// "ID:SECONDS" (kill, start), "SRC:DST:SECONDS" (cut) or "A:B:SECONDS:RSSI" (link)
 static void vt_ctl_add(int kind, const char *opt, char *arg)
 {
     struct vt_ctl *c = &vt_ctls[vt_ctls_n];
-    char *f[3];
-    int n = 0, want = kind == VT_CTL_CUT ? 3 : 2;
-    char *p;
+    char *f[4];
+    int n = 0, want = kind == VT_CTL_LINK ? 4 : kind == VT_CTL_CUT ? 3 : 2;
+    char *p, *end;
 
     FATAL_ON(vt_ctls_n >= VT_CTL_MAX, 1, "%s: at most %d node events", opt, VT_CTL_MAX);
-    for (p = strtok(arg, ":"); p && n < 3; p = strtok(NULL, ":"))
+    for (p = strtok(arg, ":"); p && n < 4; p = strtok(NULL, ":"))
         f[n++] = p;
-    FATAL_ON(n != want || p, 1, "%s: expected %s", opt, want == 3 ? "SRC:DST:SECONDS" : "ID:SECONDS");
+    FATAL_ON(n != want || p, 1, "%s: expected %s", opt,
+             want == 4 ? "A:B:SECONDS:RSSI" : want == 3 ? "SRC:DST:SECONDS" : "ID:SECONDS");
     memset(c, 0, sizeof(*c));
     c->kind = kind;
-    c->node = node_id(opt, f[want == 3 ? 1 : 0]);
-    c->src = want == 3 ? node_id(opt, f[0]) : -1;
-    c->t = seconds_to_us(opt, f[want - 1]);
+    c->node = node_id(opt, f[want >= 3 ? 1 : 0]);
+    c->src = want >= 3 ? node_id(opt, f[0]) : -1;
+    c->t = seconds_to_us(opt, f[want == 4 ? 2 : want - 1]);
+    if (want == 4) {
+        c->rssi = strtof(f[3], &end);
+        FATAL_ON(*end || c->rssi > 0 || c->rssi < -200, 1, "%s: bad RSSI: %s", opt, f[3]);
+    }
     if (kind == VT_CTL_START)
         vt_starts_n++;
     vt_ctls_n++;
@@ -473,6 +482,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "vtime-start", required_argument, 0, OPT_VTIME_START },
         { "vtime-cut", required_argument, 0, OPT_VTIME_CUT },
         { "vtime-frames", required_argument, 0, OPT_VTIME_FRAMES },
+        { "vtime-link", required_argument, 0, OPT_VTIME_LINK },
         { 0,       0,                 0,   0  }
     };
     uint64_t mask[MAX_NODES / 64];
@@ -552,6 +562,9 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             case OPT_VTIME_CUT:
                 vt_ctl_add(VT_CTL_CUT, "--vtime-cut", optarg);
                 break;
+            case OPT_VTIME_LINK:
+                vt_ctl_add(VT_CTL_LINK, "--vtime-link", optarg);
+                break;
             case OPT_VTIME_FRAMES:
                 vt_frames_path = optarg;
                 break;
@@ -569,10 +582,10 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     FATAL_ON(pwr_enabled() && !ctxt->vtime_nodes, 1, "--power needs --vtime");
     FATAL_ON((drift_specs_n || drift_random_ppb) && !ctxt->vtime_nodes, 1, "--drift needs --vtime");
     FATAL_ON((vt_ctls_n || vt_frames_path) && !ctxt->vtime_nodes, 1,
-             "--vtime-kill, --vtime-start, --vtime-cut and --vtime-frames need --vtime");
+             "--vtime-kill, --vtime-start, --vtime-cut, --vtime-link and --vtime-frames need --vtime");
     // The ledger follows each node's radio and MCU without gaps
     for (int i = 0; i < vt_ctls_n; i++)
-        FATAL_ON(pwr_enabled() && vt_ctls[i].kind != VT_CTL_CUT, 1,
+        FATAL_ON(pwr_enabled() && (vt_ctls[i].kind == VT_CTL_KILL || vt_ctls[i].kind == VT_CTL_START), 1,
                  "--power cannot be combined with --vtime-kill or --vtime-start");
     // Stable sort: ties keep the option order (qsort is not stable)
     for (int i = 1; i < vt_ctls_n; i++)
@@ -1153,6 +1166,15 @@ static int vt_ctl_run(struct ctxt *ctxt, struct vt_ctl *c, struct nsim_welcome *
     case VT_CTL_CUT:
         INFO("virtual time: frames from node %d no longer reach node %d from %s", c->src, c->node, vt_time_str(vt_now));
         bitmap_set(c->src, vt_cut[c->node], MAX_NODES / 64);
+        return 0;
+    case VT_CTL_LINK:
+        if (!bitmap_get(c->node, ctxt->node_graph[c->src], MAX_NODES / 64)) {
+            WARN("virtual time: no link %d-%d to change", c->src, c->node);
+            return -1;
+        }
+        INFO("virtual time: link %d-%d at %.1f dBm from %s", c->src, c->node, c->rssi, vt_time_str(vt_now));
+        sim_link(nodes_infos_flat_map, c->node, c->src)->rssi = c->rssi;
+        sim_link(nodes_infos_flat_map, c->src, c->node)->rssi = c->rssi;
         return 0;
     case VT_CTL_START:
         if (slot_of_node[c->node])

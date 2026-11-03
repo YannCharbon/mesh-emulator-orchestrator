@@ -176,19 +176,30 @@ def lfn_reception(path, t_from=0.0):
     the end of that frame (not one of its own ACKs) for the MAC's ACK wait,
     the longest "no_ack" after a frame's end in the log, else ACK_WAIT_S),
     overheard (frames starting within
-    ACK_ON_S of the end of a frame it received, while it sends its ACK),
+    ACK_ON_S of the end of a frame it received or of the ACK it sent, or
+    while its MAC tries to send a frame: from "Requested a cca/tx" to that
+    frame's "Transmitting" or "TX_done", the radio listening for the CCA),
     outside (the other frames that started outside every window), windows."""
     import bisect
     win, rx, tx = [], [], []
     pend_rx = pend_tx = None
     ack_tx = False
     no_ack = []
+    cca = []            # [start, end] of the MAC's TX attempts
+    cca_open = None
     for t, m in lines(path):
         if 'window open: slot' in m or 'discovery window open' in m:
             r = re.search(r'for (\d+) us', m)
             if r:
                 win.append((t, int(r.group(1)) / 1e6))
+        elif 'Requested a cca/tx' in m:
+            if cca_open is None:
+                cca_open = [t, None]
+                cca.append(cca_open)
         elif m.startswith('Transmitting ...'):
+            if cca_open is not None:
+                cca_open[1] = t
+                cca_open = None
             pend_tx = [t, None, ack_tx]
             ack_tx = False
             tx.append(pend_tx)
@@ -207,6 +218,9 @@ def lfn_reception(path, t_from=0.0):
             no_ack.append(t)
         elif 'TX_done' in m:
             ack_tx = False      # ...unless it was abandoned (CCA busy)
+            if cca_open is not None:
+                cca_open[1] = t
+                cca_open = None
     win.sort()
     wt = [w[0] for w in win]
     # frames whose airtime line is missing: no end
@@ -219,7 +233,9 @@ def lfn_reception(path, t_from=0.0):
             waits.append(t - txs[i])
     ack_wait = max(waits) if waits else ACK_WAIT_S
     rxe = sorted((s, e) for s, e in rx if e is not None)
-    rxends = sorted(e for s, e in rxe)
+    # the end of a frame received, or of the LFN's own ACK: its radio is still
+    # on for the ACK exchange
+    rxends = sorted([e for s, e in rxe] + [e for s, e, a in tx if e is not None and a])
 
     def in_window(t):
         i = bisect.bisect_right(wt, t + 1e-6) - 1
@@ -229,9 +245,15 @@ def lfn_reception(path, t_from=0.0):
         i = bisect.bisect_right(txs, t + 1e-6) - 1
         return i >= 0 and -1e-6 <= t - txs[i] <= ack_wait + 1e-6
 
+    ccas = sorted((a, b) for a, b in cca if b is not None)
+    ccs = [a for a, b in ccas]
+
     def overheard(t):
         i = bisect.bisect_right(rxends, t) - 1
-        return i >= 0 and t - rxends[i] <= ACK_ON_S
+        if i >= 0 and t - rxends[i] <= ACK_ON_S:
+            return True
+        i = bisect.bisect_right(ccs, t + 1e-6) - 1
+        return i >= 0 and ccas[i][0] - 1e-6 <= t <= ccas[i][1] + 1e-6
 
     res = {'rx': [], 'acks': [], 'overheard': [], 'outside': [], 'windows': len(win), 'ack_wait': ack_wait}
     for s, e in rx:

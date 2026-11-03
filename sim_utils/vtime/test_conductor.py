@@ -341,6 +341,71 @@ def test_disconnect():
     check("node 2 disconnected" in srv.output(), "disconnection not logged")
 
 
+def test_kill_cut_link():
+    """--vtime-cut: node 2 no longer hears node 1 from 3 ms; --vtime-kill:
+    node 2 stopped at 6 ms (its connection closed, no more wakes);
+    --vtime-link: accepted on an existing link, refused on a missing one."""
+    nodes = {n: Forever(n) for n in (1, 2, 3)}
+    srv = Server(["--vtime=3", "--vtime-end=0.01", "--vtime-cut=1:2:0.003", "--vtime-kill=2:0.006",
+                  "--vtime-link=1:3:0.002:-80"] + graph_args([(1, 2), (1, 3)]))
+    d = Driver(ARGS.sock, nodes)
+    d.connect()
+    log = d.run()
+    check(srv.wait() == 0, "server exit status")
+    rx2 = [(t, src) for t, nid, frames, out in log if nid == 2 for src, p in frames]
+    check(any(t < 3000 for t, s in rx2) and not any(t >= 3000 for t, s in rx2), f"node 2 frames: {rx2}")
+    rx3 = [t for t, nid, frames, out in log if nid == 3 for src, p in frames]
+    check(any(t >= 3000 for t in rx3), "node 3 lost its frames")
+    check(2 in d.closed and not any(nid == 2 and t >= 6000 for t, nid, f, o in log), "node 2 not stopped at 6 ms")
+    check(d.quit == {1, 3}, f"xq: {d.quit}")
+    out = srv.output()
+    check("node 2 stopped at 0.006000 s" in out and "link 1-3 at -80.0 dBm" in out, "events not logged")
+    srv = Server(["--vtime=2", "--vtime-end=0.01", "--vtime-link=1:2:0.002:-80"] + graph_args([(1, 3)]))
+    d = Driver(ARGS.sock, {n: Forever(n) for n in (1, 2)})
+    d.connect()
+    d.run()
+    check(srv.wait() != 0 and "no link 1-2" in srv.output(), "a missing link accepted")
+
+
+class Late(Forever):
+    """A started instance: timers armed in its first run (at its time 0) fire
+    at its first wake, as the simulation port does."""
+
+    def run(self, t, frames, first=False):
+        for k, d in self.timers.items():
+            self.timers[k] = max(d, t)
+        return super().run(t, frames, first)
+
+
+def test_start():
+    """--vtime-start: a second instance of node 2 connects at the start and is
+    welcomed at 5 ms, after the first one is stopped then; its first "xi"
+    deadline (relative to its own start at 0) is moved to 5 ms silently."""
+    nodes = {n: Forever(n) for n in (1, 2)}
+    srv = Server(["--vtime=2", "--vtime-end=0.01", "--vtime-start=2:0.005"] + graph_args([(1, 2)]))
+    d = Driver(ARGS.sock, nodes)
+    d.connect()
+    s2 = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    s2.connect(ARGS.sock)
+    s2.send(HELLO.pack(b"xh", 2, HELLO_VTIME, 0))
+    welcomed = []
+
+    def swap(drv, nid):
+        if nid == 2 and not welcomed:
+            welcomed.append(True)
+            drv.socks[2] = s2
+            drv.nodes[2] = Late(2)
+            drv.closed.discard(2)
+    d.on_close = swap
+    log = d.run()
+    check(srv.wait() == 0, "server exit status")
+    w2 = [t for t, nid, f, o in log if nid == 2]
+    check(welcomed and 0 in w2 and 5000 in w2 and max(w2) >= 9000, f"node 2 wakes: {w2}")
+    check(d.quit == {1, 2}, f"xq: {d.quit}")
+    out = srv.output()
+    check("node 2 started at 0.005000 s" in out and "is before now" not in out, "start not logged, or a warning")
+
+
 def raw_hello(nid, flags):
     s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     s.connect(ARGS.sock)
@@ -462,6 +527,8 @@ def main():
         ("vtime_refuses_wallclock_hello", test_vtime_refuses_wallclock_hello),
         ("wallclock", test_wallclock),
         ("drift", test_drift),
+        ("kill_cut_link", test_kill_cut_link),
+        ("start", test_start),
     ]
     for name, fn in tests:
         if ARGS.k not in name:

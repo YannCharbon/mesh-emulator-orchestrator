@@ -4,8 +4,10 @@
 # LFN 2 under the router (hears only it), LFN 3 under the border router (hears
 # only it). DHCPv6 lease infinite (dhcp_lifetime_s, as wsbrd 2.x), so the LFNs
 # never renew it; their address registration (36 h) outlasts the run. The LFNs
-# send no test traffic and do not echo: after their join they transmit only
-# ACKs. The border router sends one UDP request to each LFN at each of
+# send no test traffic and do not echo (test_udp_listen: the socket is open,
+# nothing is answered), and make no better-parent check: after their join
+# they transmit only ACKs. (test_lfn_silent.sh: the same with an echo after
+# each request, every PERIOD s, and the parent's re-anchors counted.) The border router sends one UDP request to each LFN at each of
 # SILENCES (test_udp_at_s): the first 1 h after the later LFN join, then 3 h,
 # then 10 h later.
 #
@@ -32,7 +34,7 @@ printf '0,1:-50\n1,2:-50\n0,3:-50\n' > "$OUT.topo"
 AT=; t=$JOIN_REF
 for s in $SILENCES; do t=$((t + s)); AT+=" -o test_udp_at_s=$t"; done
 DUR=$((t + 300))
-LFN="-o device_type=lfn -o enable_lfn=false ${LFN_EXTRA:-}"
+LFN="-o device_type=lfn -o enable_lfn=false -o test_udp_listen=true -o lfn_parent_check_s=0 -o lfn_parent_check_weak_s=0 ${LFN_EXTRA:-}"
 export NODE_OPTS_1="-o device_type=ffn -o enable_lfn=true ${PARENT_EXTRA:-}"
 export NODE_OPTS_2="$LFN" NODE_OPTS_3="$LFN"
 BR_OPTS="-o dhcp_lifetime_s=4294967295 -o test_udp_dst=fd12:3456::302:304:506:2 -o test_udp_dst=fd12:3456::302:304:506:3 $AT ${PARENT_EXTRA:-}" \

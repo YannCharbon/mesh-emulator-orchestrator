@@ -135,7 +135,7 @@ static void tt_tasklet_cb(arm_event_t *ev)
 
 void test_traffic_start(const struct test_traffic_cfg *cfg)
 {
-    if (!cfg->echo && !cfg->group_count && !((cfg->period_s > 0 || cfg->at_count) && cfg->dst_count)) {
+    if (!cfg->echo && !cfg->listen && !cfg->group_count && !((cfg->period_s > 0 || cfg->at_count) && cfg->dst_count)) {
         return;
     }
     tt = *cfg;
