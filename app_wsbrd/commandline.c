@@ -344,6 +344,8 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
         /* empty */
     } else if (sscanf(line, " test_lfn_lpa_drop = %d %c", &ctxt->test_lfn_lpa_drop, &garbage) == 1) {
         /* empty */
+    } else if (sscanf(line, " test_lfn_lpa_unusable = %d %c", &ctxt->test_lfn_lpa_unusable, &garbage) == 1) {
+        /* empty */
     } else if (sscanf(line, " test_reset_at_s = %d %c", &ctxt->test_reset_at_s, &garbage) == 1) {
         /* empty */
     } else if (sscanf(line, " test_reset_for_s = %d %c", &ctxt->test_reset_for_s, &garbage) == 1) {

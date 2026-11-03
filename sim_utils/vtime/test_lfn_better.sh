@@ -27,7 +27,9 @@
 # on average; a check, two LPAS sweeps, hears a router in range in 94 % of
 # the checks),
 # BR_PERIOD (37), LFN_PERIOD (53), SIM_OPTS (e.g. --drift-random=20),
-# LFN_EXTRA, ROUTER_EXTRA.
+# LFN_EXTRA, ROUTER_EXTRA, ROUTER2_EXTRA (router 2 only; e.g.
+# "-o test_lfn_lpa_unusable=1" with EXPECT=stay: its LPAs lack the BS-IE, and
+# the LFN must keep router 1 although router 2 is better).
 # Exit status 0 if every check passes.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
@@ -44,7 +46,7 @@ printf '0,1:-50\n0,2:-50\n1,3:%s\n2,3:%s\n' "$OLD_RSSI" "$NEW_RSSI" > "$OUT.topo
 LFN_ADDR=fd12:3456::302:304:506:3
 BR_ADDR=fd12:3456::1615:16ff:fe17:1819
 export NODE_OPTS_1="-o device_type=ffn -o enable_lfn=true ${ROUTER_EXTRA:-}"
-export NODE_OPTS_2="-o device_type=ffn -o enable_lfn=true -o test_lfn_silent_at_s=1 -o test_lfn_silent_for_s=$((LATE - 1)) ${ROUTER_EXTRA:-}"
+export NODE_OPTS_2="-o device_type=ffn -o enable_lfn=true -o test_lfn_silent_at_s=1 -o test_lfn_silent_for_s=$((LATE - 1)) ${ROUTER_EXTRA:-} ${ROUTER2_EXTRA:-}"
 export NODE_OPTS_3="-o device_type=lfn -o enable_lfn=false -o test_udp_echo=true -o test_udp_dst=$BR_ADDR -o test_udp_period_s=$LFN_PERIOD -o test_udp_start_s=70 -o lfn_parent_check_s=$CHECK_S -o lfn_parent_check_weak_s=$CHECK_S ${LFN_EXTRA:-}"
 BR_OPTS="-o test_udp_echo=true -o test_udp_dst=$LFN_ADDR -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60" \
 CONF=lfn TOPO="$OUT.topo" TUN=$TUN POWER=$PROFILE \
