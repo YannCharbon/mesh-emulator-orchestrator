@@ -4,12 +4,12 @@
 # exit status 1 if any run failed.
 #
 # usage: lfn_suite.sh [quick|full] <bindir> <workdir(holds examples/)> <outdir>
-#   quick  one run of each test (seed 1; the profile runs 12 h): 35 runs,
+#   quick  one run of each test (seed 1; the profile runs 12 h): 37 runs,
 #          about 1 minute of wall time with 12 jobs on a 24-core PC
 #   full   the documented counts, at most 6 runs per check (the root
 #          CLAUDE.md sizing rule): 3 seeds per check, 6 for the checks that
 #          vary most (join with traffic, better parent, restart), 2 for the
-#          profile runs (48 h Balanced, 72 h Eco): 106 runs, about 5 minutes
+#          profile runs (48 h Balanced, 72 h Eco): 112 runs, about 5 minutes
 #          with 12 jobs (the 72 h Eco runs take 4)
 # Environment: JOBS (12: runs at once), ONLY (a regular expression: only
 # the runs whose name matches), KEEP (1: keep the run directories; by
@@ -50,6 +50,8 @@ for s in $(seeds 3); do
     echo "mcast_balanced_s$s|WSSIM_SEED=$s PROF=balanced|$V/test_lfn_mcast.sh $BIN $WORK <out>"
     echo "mcast_eco_s$s|WSSIM_SEED=$s PROF=eco|$V/test_lfn_mcast.sh $BIN $WORK <out>"
     echo "better_stay_s$s|WSSIM_SEED=$s EXPECT=stay|$V/test_lfn_better.sh $BIN $WORK <out>"
+    echo "better_stay_unusable_s$s|WSSIM_SEED=$s EXPECT=stay ROUTER2_EXTRA=-o@test_lfn_lpa_unusable=1|$V/test_lfn_better.sh $BIN $WORK <out>"
+    echo "mc_full_s$s|WSSIM_SEED=$s|$V/test_lfn_mc_full.sh $BIN $WORK <out>"
     echo "silence_s$s|WSSIM_SEED=$s|$V/test_lfn_silence.sh $BIN $WORK <out>"
     echo "silent_s$s|WSSIM_SEED=$s|$V/test_lfn_silent.sh $BIN $WORK <out>"
     for m in traffic idle uplink; do echo "parent_gone_${m}_s$s|WSSIM_SEED=$s MODE=$m|$V/test_lfn_parent_gone.sh $BIN $WORK <out>"; done

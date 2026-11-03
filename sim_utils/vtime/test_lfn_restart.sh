@@ -10,7 +10,8 @@
 # Checks:
 #   - the LFN joined, the router and the LFN came back after their restart
 #     (operational again);
-#   - no frame was dropped as a replay (MLME_COUNTER_ERROR in any log);
+#   - no frame was dropped as a replay (MLME_COUNTER_ERROR in any log, other
+#     than for the MAC retry of a frame already received: from frames.txt);
 #   - no frame counter reused under the same key: for each sender and key
 #     index, a new instance's counters are above all those of its previous
 #     instance, and no counter carries two different frames (other sequence
@@ -68,17 +69,35 @@ auth = [t for t, m in lines(f'{out}/node2.log') if 'LFN authentication start' in
 ck.info(f"after the router's restart the LFN " + ('authenticated again' if auth else 'kept its keys (no EAPOL)'))
 auth = [t for t, m in inst_lines(f'{out}/node2.r1.log', l_at) if 'LFN authentication start' in m]
 ck.info(f"after its own restart the LFN " + ('authenticated again (EAPOL)' if auth else 'joined with its stored keys (no EAPOL)'))
-# Replay drops
-drops = collections.Counter()
+# Replay drops. A drop is matched with the frame the node was receiving (the
+# last frame sent to it, or broadcast, before the drop); the retry of a frame
+# it already received (same sender, key, counter and sequence number: its ACK
+# was lost) is a duplicate, rightly dropped, not a replay.
+allf = [(t, src, f) for t, src, ch, f in frames(f'{out}/frames.txt')]
+def node_of(name):
+    return 0 if name == 'br' else int(name[4:].split('.')[0])
+drops, dups = collections.Counter(), collections.Counter()
 for path in sorted(glob.glob(f'{out}/*.log')):
     name = os.path.basename(path)[:-4]
     if name == 'simserver':
         continue
+    me = node_of(name)
+    mymac = f'01020304050600{me:02x}'
     start = r_at if name == 'node1.r1' else l_at if name == 'node2.r1' else 0
     for t, m in inst_lines(path, start):
-        if 'MLME_COUNTER_ERROR' in m:
+        if 'MLME_COUNTER_ERROR' not in m:
+            continue
+        cand = [x for x in allf if x[0] <= t and x[1] != me and x[2]['dst'] in (mymac, None, 'ffff')]
+        last = cand[-1] if cand else None
+        if last and any(x[0] < last[0] and x[1] == last[1] and x[2]['counter'] == last[2]['counter'] and
+                        x[2]['seq'] == last[2]['seq'] and x[2]['key_index'] == last[2]['key_index'] for x in cand[:-1]):
+            dups[name] += 1
+        else:
             drops[name] += 1
-ck(not drops, 'frames dropped as replays (MLME_COUNTER_ERROR): ' + (', '.join(f'{n} {c}' for n, c in sorted(drops.items())) or 'none'))
+if dups:
+    ck.info('retries of frames already received, dropped as duplicates: ' + ', '.join(f'{n} {c}' for n, c in sorted(dups.items())))
+ck(not drops, 'frames dropped as replays (MLME_COUNTER_ERROR, not a retry of a frame received): '
+   + (', '.join(f'{n} {c}' for n, c in sorted(drops.items())) or 'none'))
 # Frame counters per sender and key index, per instance
 restarts = {1: r_at, 2: l_at}
 use = collections.defaultdict(lambda: collections.defaultdict(set))   # (src, key, inst) -> counter -> {(seq, dst)}
