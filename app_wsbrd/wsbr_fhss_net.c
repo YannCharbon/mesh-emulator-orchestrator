@@ -278,6 +278,12 @@ int ns_fhss_ws_lfn_timing_set(const fhss_api_t *fhss_api, uint32_t offset_ms, ui
     return -1;
 }
 
+int ns_fhss_ws_lfn_neighbor_refresh(const fhss_api_t *fhss_api, const uint8_t eui64[8])
+{
+    (void)fhss_api; (void)eui64;
+    return -1;
+}
+
 int ns_fhss_ws_lfn_neighbor_lto(const fhss_api_t *fhss_api, const uint8_t eui64[8], uint32_t offset_ms, uint32_t interval_ms, uint32_t tx_timestamp_us)
 {
     (void)fhss_api; (void)eui64; (void)offset_ms; (void)interval_ms; (void)tx_timestamp_us;
