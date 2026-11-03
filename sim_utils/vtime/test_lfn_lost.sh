@@ -27,14 +27,21 @@
 #   is given up after 4 tries (LOST >= 4); in both cases the border router's
 #   route to the LFN never goes back to router 1 (no "External target ...
 #   now from" router 1 after the move; router 1's later DAOs are stale), and
-#   every request from 30 s after the move to the end is echoed.
+#   every request from 30 s after the move to the end is echoed. REG_MIN (min):
+#   a short registration lifetime for the LFN and the routers, so that
+#   router 1, which never got the release (LOST >= 4), publishes the LFN's
+#   address again with its old TID: the border router must then log
+#   "Ignoring stale path" for it (checked when REG_MIN is set; the link stays
+#   dead 120 s from the first try, so that no late MAC retry of the last one
+#   reaches router 1; 30 min: router 1 refreshes its DAO before the
+#   registration ends).
 #
 # PROF (test, balanced or eco; default: the stack's defaults, the Test
 # profile's values) gives the LFN and its parents a Silicon Labs profile
 # (lfn_profile.sh), with its NA wait (5 min, 60 min, 120 min).
 #
 # usage: test_lfn_lost.sh <bindir> <workdir(holds examples/)> <outdir>
-# Environment: MODE (na), PROF, WSSIM_SEED (1), TUN (none), LOST (2),
+# Environment: MODE (na), PROF, WSSIM_SEED (1), TUN (none), LOST (2), REG_MIN,
 # MOVE_AT (600), SETTLE (600), BR_PERIOD (37; balanced 90, eco 450),
 # LFN_PERIOD (53; balanced 135, eco 675), SIM_OPTS (--drift-random=20), KEEP.
 # Exit status 0 if every check passes.
@@ -58,7 +65,9 @@ BR_ADDR=fd12:3456::1615:16ff:fe17:1819
 case $MODE in
 na|na2) LFN=1; DUR=$((1200 + 3 * NAW + SETTLE)); printf '0,1:-50\n' > "$OUT/topo" ;;
 release) LFN=3; DUR=$((MOVE_AT + (LOST >= 4 ? 2400 : 1500))); printf '0,1:-50\n0,2:-50\n1,3:-50\n2,3:-60\n' > "$OUT/topo"
-    export NODE_OPTS_1="-o device_type=ffn -o enable_lfn=true $PARENT_PROF"
+    REG=; [ -n "${REG_MIN:-}" ] && REG="-o lfn_registration_lifetime_min=$REG_MIN" && DUR=$((MOVE_AT + 120 * REG_MIN + 600))
+    LFN_PROF="$LFN_PROF $REG"
+    export NODE_OPTS_1="-o device_type=ffn -o enable_lfn=true $PARENT_PROF $REG"
     export NODE_OPTS_2="$NODE_OPTS_1 -o test_lfn_silent_at_s=1 -o test_lfn_silent_for_s=399" ;;
 *) echo "test_lfn_lost: MODE na, na2 or release" >&2; exit 2 ;;
 esac
@@ -113,7 +122,10 @@ release)
     run "$OUT/pilot1" LINK="$L1"
     TR=$(sed 's/\x1b\[[0-9;]*m//g' "$OUT/pilot1/node3.log" | awk '/old parent .* released \(try 1\)/ {print $1 - 1700000000; exit}')
     [ -n "$TR" ] || { echo "test_lfn_lost: no release in the pilot"; finish 1; }
-    BACK=$(echo "$TR + 10 * $LOST - 0.5" | bc)
+    # back 0.5 s before the next try, or (all 4 lost) after the 4th try's check
+    BACK=$(echo "$TR + 10 * $LOST - 0.5" | bc); (( LOST >= 4 )) && BACK=$(echo "$TR + 41" | bc)
+    # stale-DAO variant: no MAC retry of the last try may reach router 1 either
+    [ -n "${REG_MIN:-}" ] && BACK=$(echo "$TR + 120" | bc)
     if (( $(echo "$TR - 1 < $MOVE_AT + 90" | bc) )); then
         # the first try comes before the link's return: one dead window
         EV=(LINK="1:3:$MOVE_AT:-140 1:3:$BACK:-50")
@@ -124,11 +136,11 @@ esac
 run "$OUT/run" "${EV[@]}"
 echo "info events: ${EV[*]}"
 
-PYTHONPATH=$HERE python3 - "$OUT/run" "$MODE" "$DUR" "$LFN" "$NAW" "$SETTLE" "$MOVE_AT" "$LOST" <<'PY'
+PYTHONPATH=$HERE python3 - "$OUT/run" "$MODE" "$DUR" "$LFN" "$NAW" "$SETTLE" "$MOVE_AT" "$LOST" "${REG_MIN:-0}" <<'PY'
 import re, sys
 from lfn_lib import Checks, lines, udp, exchange, listen_interval_s, mac
 out, mode = sys.argv[1], sys.argv[2]
-dur = float(sys.argv[3]); lfn = int(sys.argv[4]); naw, settle, move_at = (float(x) for x in sys.argv[5:8]); lost = int(sys.argv[8])
+dur = float(sys.argv[3]); lfn = int(sys.argv[4]); naw, settle, move_at = (float(x) for x in sys.argv[5:8]); lost = int(sys.argv[8]); reg_min = int(sys.argv[9])
 ck = Checks(f'test_lfn_lost ({mode})')
 iv = listen_interval_s(f'{out}/node{lfn}.log')
 L = {k: [] for k in ('aro', 'again', 'search', 'oper', 'auth', 'lost', 'rel', 'relok', 'relfail', 'parents')}
@@ -198,6 +210,8 @@ else:
     back = [(t, m) for t, m in lines(f'{out}/br.log') if f'External target {addr}' in m and 'now from' in m and m.rstrip().endswith('506:1') and mv and t > mv[0]]
     stale = sum(1 for t, m in lines(f'{out}/br.log') if 'Ignoring stale path' in m and addr in m)
     daos = sum(1 for t, m in lines(f'{out}/br.log') if mv and t > mv[0] + 60 and m.endswith('DAO from fd12:3456::302:304:506:1'))
+    if reg_min:
+        ck(stale > 0, f"router 1's DAOs for the LFN's address, with its old TID, ignored as stale: {stale}")
     ck(not back and (lost < 4 or daos > 0), f"the border router's route to the LFN stayed on router 2 ({daos} DAOs from router 1 "
        f"after the move, {stale} stale paths to the LFN ignored)" + (f": back to router 1 at {back[0][0]:.1f} s" if back else '')
        + ('' if lost < 4 or daos else ': no DAO from router 1 to test it with'))

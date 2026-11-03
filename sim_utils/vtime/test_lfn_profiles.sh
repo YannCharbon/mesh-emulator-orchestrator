@@ -29,6 +29,8 @@
 # s: default 4294967295, infinite, as wsbrd 2.x; 0: the network size's, 2 h
 # for a small network, which the LFNs renew every 30 min), SIM_OPTS (default --drift-random=20), LFN_EXTRA, PARENT_EXTRA
 # (more "-o key=value" options for the LFNs, for both parents), BR_EXTRA,
+# LFN_POWER (a power profile for the two LFNs only, e.g.
+# examples/power/efr32fg25-lfn.ini; the parents keep [power profile]),
 # KEEP_LOGS (1: keep the full logs; by default only the lines the checks
 # read are kept, the rest is deleted after the checks).
 # Exit status 0 if every check passes.
@@ -60,7 +62,7 @@ rm -f "$FIFO"; mkfifo "$FIFO"
 awk -v t0="$STEADY_FROM" '$1 ~ /^#/ || (($3 == 2 || $3 == 3) && $2 > t0 * 1e6)' < "$FIFO" > "$OUT.power_lfn.txt" &
 AWK=$!
 BR_OPTS="$TRAFFIC_BR -o dhcp_lifetime_s=$DHCP_LIFETIME $PARENT_PROF ${PARENT_EXTRA:-} ${BR_EXTRA:-}" \
-CONF=lfn TOPO="$OUT.topo" TUN=$TUN POWER=$POWER_PROFILE POWER_OPTS="--power-log=$FIFO" SIM_OPTS="$SIM_OPTS" \
+CONF=lfn TOPO="$OUT.topo" TUN=$TUN POWER=$POWER_PROFILE POWER_OPTS="--power-log=$FIFO ${LFN_POWER:+--power-node=2,3:$(realpath "$LFN_POWER")}" SIM_OPTS="$SIM_OPTS" \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT" "$DUR" > "$OUT.run" 2>&1
 RC=$?
 wait $AWK

@@ -52,6 +52,8 @@ for s in $(seeds 3); do
     echo "better_stay_s$s|WSSIM_SEED=$s EXPECT=stay|$V/test_lfn_better.sh $BIN $WORK <out>"
     echo "better_stay_unusable_s$s|WSSIM_SEED=$s EXPECT=stay ROUTER2_EXTRA=-o@test_lfn_lpa_unusable=1|$V/test_lfn_better.sh $BIN $WORK <out>"
     echo "mc_full_s$s|WSSIM_SEED=$s|$V/test_lfn_mc_full.sh $BIN $WORK <out>"
+    echo "revoke_s$s|WSSIM_SEED=$s|$V/test_lfn_revoke.sh $BIN $WORK <out>"
+    echo "lost_release_stale_s$s|WSSIM_SEED=$s MODE=release LOST=4 REG_MIN=30|$V/test_lfn_lost.sh $BIN $WORK <out>"
     echo "silence_s$s|WSSIM_SEED=$s|$V/test_lfn_silence.sh $BIN $WORK <out>"
     echo "silent_s$s|WSSIM_SEED=$s|$V/test_lfn_silent.sh $BIN $WORK <out>"
     for m in traffic idle uplink; do echo "parent_gone_${m}_s$s|WSSIM_SEED=$s MODE=$m|$V/test_lfn_parent_gone.sh $BIN $WORK <out>"; done
@@ -79,6 +81,11 @@ for s in $(seeds 2); do
         echo "profiles_${p}_s$s|WSSIM_SEED=$s DUR=$d STEADY_FROM=$((d / 4))|$V/test_lfn_profiles.sh $BIN $WORK <out> $p"
     done
 done
+# A router's key request answered by a full EAP-TLS: the timing is set for
+# seed 3 (the test's default), so one run of each case
+for c in race txfail; do echo "keyreq_${c}_s3|WSSIM_SEED=3 CASE=$c|$V/test_lfn_keyreq.sh $BIN $WORK <out>"; done
+# A 4 h listen interval over 72 h (Eco, 10 h sync period; LFN_STACK.md §12), full mode only
+[ $MODE = full ] && echo "profiles_eco_4h_s1|WSSIM_SEED=1 BR_PERIOD=18500 LFN_PERIOD=27000 DUR=259200 STEADY_FROM=86400 LFN_EXTRA=-o@lfn_listen_interval_ms=14400000@-o@lfn_listen_interval_max_ms=16777215|$V/test_lfn_profiles.sh $BIN $WORK <out> eco"
 echo "radio_off|WSSIM_SEED=1|$V/test_radio_off.sh $BIN $WORK <out>"
 echo "conductor||python3 $V/test_conductor.py $BIN/wssimserver --sock /tmp/lfn_suite_$$.sock"
 echo "power||python3 $V/test_power.py $BIN/wssimserver"

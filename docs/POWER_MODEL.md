@@ -264,16 +264,18 @@ Recording does not change what the nodes do: the messages go to the conductor, w
 
 ## 11. What part 1 leaves for later
 
-| Item | Needs | Then |
+Status on 2026-11-04.
+
+| Item | Needs | Status |
 | --- | --- | --- |
-| Radio off, deep sleep in real runs | GS8 stage 1 (done: the driver's off state, the MAC's RX-off-when-idle, idle-tick skipping in the event loop); stage 2: timed RX windows | Done: a node with RX off when idle sleeps deep (§3.1, §5.3); empty ticks are gone; timed RX windows in the MAC and FHSS, checked with two MAC-only nodes (§13). Left: an LFN running the protocol (stage 3) |
-| First real deep-sleep figures | GS8 stages 2–4: an LFN | Check against the AEM on the kits |
-| MCU + RCP and module profiles | EM3 step 2 (split programs in virtual time) | The link machine; Spinel messages charged to both chips |
-| Drift | EM3 step 5 | Separate wakes of the timer series; LFN window widening |
-| Measured profile | HW5 (done, §12) | Left: the radio and MCU transitions, EM2, TX at other levels, RX while receiving: HW8 and more measurements |
-| PHY airtime as on the hardware | §12.4 (done, §12.5) | Done: the border router within 3 % of HW5's TX time, frame rate and current; the router's current within 3 %, its TX time 15–18 % above (more PA/PC sweeps, §12.5) |
-| Exact airtimes | EM4 | RX and TX durations at the medium |
-| Active time in virtual time | — (option) | Slow MCUs delay the protocol as on a board |
+| Radio off, deep sleep in real runs | GS8 stages 1–5 | Done: radio off when idle, idle-tick skipping, timed RX windows (§13); LFNs run the protocol under the border router and under routers, with LGTKs, broadcast schedule and sync (§14–§18) |
+| First real deep-sleep figures | An LFN on the kits | Done (§12.8): EM2 floor 7.0 µA measured on our LFN; LFN currents on the kits against the emulator |
+| Drift | EM3 step 5 | Done: separate timer series per node, LFN window widening from the measured rate (§17; the stack's `docs/LFN_STACK.md` §11) |
+| Measured profile | HW5 (FFN, §12), our LFN on the kits (§12.8) | FFN figures from HW5 in `efr32fg25-soc.ini`; LFN figures (RX plateau, TX, EM2 floor, wake and teardown, timer wakes) in `efr32fg25-lfn.ini`. Left: EM0 and EM1 on their own, TX at levels other than +10 dBm, the radio's idle and off currents and its transitions other than the LFN's wake and teardown, RX while receiving apart from listening |
+| PHY airtime as on the hardware | §12.4 | Done (§12.5) |
+| MCU + RCP and module profiles | EM3 step 2 (split programs in virtual time) | Left: the link machine; Spinel messages charged to both chips |
+| Exact airtimes | EM4 | Left: RX and TX durations at the medium |
+| Active time in virtual time | — (option) | Left: slow MCUs delaying the protocol as on a board |
 
 ## 12. Calibration against HW5 (2026-10-28)
 
@@ -447,6 +449,47 @@ The board's setup in the emulator's default configuration (EU mode 3, class 2, 3
 **Mode 1a, again** (`CONF=eu1a`, the same window and seeds, `cca_us` now 160 µs): border router 11.32 mA [11.26–11.40], TX 10.6 %, 6.91 frames/s; router 10.03 mA [9.12–10.71], TX 6.2 %, 3.87 frames/s. The same as §12.5 to 0.01 mA: `cca_ma` equals `listen_ma` in this profile, so a longer CCA only moves time between two states at the same current (the runs with the former 128 µs profile give the same figures to three decimals). Against the board's same-day mode 1a figures (§12.6: router 9.61 mA [8.11–10.93], border router 11.18 mA [10.20–12.26]): router +4.3 %, border router +1.3 %, both inside the board's range; the router's TX share (6.2 % against 5.28 %) is the excess of PA/PC sweeps discussed in §12.5.
 
 Reproduce: `TOPO=<0,1:-14.0 file> POWER=examples/power/efr32fg25-soc.ini BR_OPTS="-o tx_power=10" NODE_OPTS="-o tx_power=10" sim_utils/vtime/campaign.sh build-vt $(pwd) runs/m3_170 170 $(seq 1 10)`, the same with 470, then the difference of the two `power.json` per seed. Non-regression of the change (seeds 1–10, `SETARCH=1`): `dag_simple` 300 s with recording off, node, BR and `log_wsbr` logs byte-identical to the build before it (unmasked); with the former profile (no `@` lines) and recording on, logs identical and every figure of `power.json` identical (only the new fields added); `test_radio_off.sh` and `test_power.py` (now also 7 per-mode cases and 4 profiles it must reject) pass.
+
+### 12.8 Our LFN on the kits: EM2 floor, LFN profile, currents (2026-11-03)
+
+Measured on our LFN firmware (`nanostack-efr32fg25-freertos` README, "LFN EM2 floor and wake figures" and "LFN current against listen interval"; stack `edd1a1e`, EU mode 3 unless said, +10 dBm). The FFN calibration above (HW5) is unchanged.
+
+**EM2 floor: 7.0 µA.** Between its wakes our LFN draws **6.99–7.09 µA** on kit 440290182 (BRD4271A on BRD4002A, AEM at 100 kHz), equal to that kit's bare EM2 (6.92–6.94 µA, a test image that stops before the stack starts): RAIL's sleep configuration and the stack add nothing measurable. This is the SoC with full RAM retention and RAIL's timer on the low-frequency clock, plus the radio board; the datasheet's EM2 is 4.6 µA. Kit 440235509 (BRD4001A) reads **12.3 µA**: an excess specific to that kit (Silicon Labs' LFN reads 11.9 µA there too; that kit's bare EM2 is 5.8 µA), not used. Both FG25 profiles now take `mcu.deep_sleep_ma = 0.0070`.
+
+**`examples/power/efr32fg25-lfn.ini`**, for LFN nodes only (`wssimserver --power-node=<LFN IDs>:examples/power/efr32fg25-lfn.ini`; `test_lfn_profiles.sh` `LFN_POWER`): `efr32fg25-soc.ini` with these measured LFN values [M-LFN]:
+
+| Key | `efr32fg25-soc.ini` (FFN, HW5) | `efr32fg25-lfn.ini` (our LFN) | Measured |
+| --- | --- | --- | --- |
+| `radio.listen_ma`, `receive_ma`, `cca_ma` | 6.0 | 4.13 | RX plateau of a listening window 6.16–6.38 mA chip total (mean 6.27) − EM1 2.145; an FFN's is 8.1 mA (MCU in EM1 at 97.5 MHz) |
+| `radio.tx_ma` at +10 dBm | 35.75 (`@3`: 35.29) | 33.26 | TX plateau 35.4 mA chip total (2 frames; 608 µC per frame with its CCA, set-up and the RX for the ACK) − 2.145; other levels scaled by 0.9425 [I] |
+| `mcu.deep_sleep_ma` | 0.0070 | 0.0070 | above |
+| `mcu.deep_wake_us`, `deep_wake_ma` | datasheet | 260 µs, 0.73 mA | set-up of a listening wake, first sample above 0.2 mA to the RX plateau: 0.26 ms, 0.19 µC above the floor (kit 440290182; 0.4 ms, 0.5 µC on 440235509) |
+| `radio_transitions` `listen_off` | — | 90 µs, 0.78 mA | teardown, RX plateau to the last sample above 0.2 mA: 0.09 ms, 0.07 µC (0.2 ms, 0.3 µC on 440235509) |
+| `mcu.wake_charge_uc` | 0.56 | 0 | a timer wake without the radio costs 0.09–0.10 µC in all (peak 0.36–0.6 mA), less than the set-up already charged; HW5's 0.56 µC per FFN wake does not apply |
+
+A whole listening wake (window, set-up, teardown) measured 9.0 ms and 44–46 µC (median).
+
+**LFN currents in the emulator, per Silicon Labs profile** (the stack's `docs/LFN_STACK.md` §11; `test_lfn_profiles.sh`, border router – router – LFN and an LFN under the border router, 3 seeds each, ±20 ppm clocks, sparse traffic; windows widened from the measured rate with the 5 ppm floor and the automatic bound):
+
+| Profile and power profile | Test (12 h, from 3 h) | Balanced (24 h, from 3 h) | Eco (48 h, from 24 h) |
+| --- | --- | --- | --- |
+| `efr32fg25-soc.ini`, EM2 4.6 µA (before the measured floor) | | 9.1–10.0 µA | 10.8–11.4 µA |
+| `efr32fg25-soc.ini`, EM2 7.0 µA | 22.0–22.8 µA | 11.4–11.8 µA | 13.8–14.4 µA |
+| LFNs on `efr32fg25-lfn.ini` | **18.5–19.3 µA** | **10.6–10.9 µA** | **12.4–13.0 µA** |
+
+The measured floor adds 2.4 µA everywhere. With Eco, the automatic widening bound costs about 1 µA once the rate is measured, more during the first 20 h (until two sync frames 10 h apart have given the rate, the windows widen at 50 ppm, up to 1.8 s each side). Eco with a 4 h listen interval (72 h, 3 seeds, before the measured floor): 6.0–6.3 µA from 24 h.
+
+**LFN currents on the kits** (AEM):
+
+| Case | Kit current | Emulator |
+| --- | --- | --- |
+| One LFN under the border router, listen interval 5 s, idle (GS8 stage 6, kit 440235509, 18 windows of 60 s) | 24.9–26.9 µA | 24.0–24.7 µA (§17, EM2 4.6 µA) |
+| The same LFN under a router | 23.8–24.8 µA | — |
+| Listen interval 60 s, 1–6 min after the join (dumps of 60 s) | 13.7–14.8 µA (440290182), 19.2–20.0 µA (440235509: its floor) | — |
+| Idle against the listen interval, EU mode 1a, under the border router (means) | 1 s: 69.1, 2 s: 42.8, 5 s: 26.3, 10 s: 20.8, 30 s: 17.6, 60 s: 16.7 µA | — |
+| Silicon Labs' LFN, Test profile, same kit | 49 µA | — |
+
+Above a listen interval of about 10 s, the LFN broadcast slots (every 10 s), the sync frame (every 50 s) and the floor dominate, which is why the profiles with long broadcast intervals (Balanced, Eco) reach 10–13 µA.
 
 ## 13. LFN timed receive windows (GS8 stage 2, 2026-10-28)
 
