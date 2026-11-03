@@ -23,7 +23,9 @@
 # usage: test_lfn_better.sh <bindir> <workdir(holds examples/)> <outdir> [profile]
 # Environment: DUR (1800), WSSIM_SEED (1), TUN (tunvt0), EXPECT (move),
 # OLD_RSSI (-87 for move, -70 for stay), NEW_RSSI (-60 for move, -67 for
-# stay), LATE (600), CHECK_S (300), MOVE_MAX (1.5 x CHECK_S + 60),
+# stay), LATE (600), CHECK_S (300), MOVE_MAX (3 x CHECK_S + 60: three checks
+# on average; a check, two LPAS sweeps, hears a router in range in 94 % of
+# the checks),
 # BR_PERIOD (37), LFN_PERIOD (53), SIM_OPTS (e.g. --drift-random=20),
 # LFN_EXTRA, ROUTER_EXTRA.
 # Exit status 0 if every check passes.
@@ -33,7 +35,7 @@ PROFILE=${4:-$WORK/examples/power/efr32fg25-soc.ini}
 DUR=${DUR:-1800}; TUN=${TUN:-tunvt0}; EXPECT=${EXPECT:-move}
 if [ "$EXPECT" = move ]; then OLD_RSSI=${OLD_RSSI:--87}; NEW_RSSI=${NEW_RSSI:--60}
 else OLD_RSSI=${OLD_RSSI:--70}; NEW_RSSI=${NEW_RSSI:--67}; fi
-LATE=${LATE:-600}; CHECK_S=${CHECK_S:-300}; MOVE_MAX=${MOVE_MAX:-$((CHECK_S * 3 / 2 + 60))}
+LATE=${LATE:-600}; CHECK_S=${CHECK_S:-300}; MOVE_MAX=${MOVE_MAX:-$((CHECK_S * 3 + 60))}
 BR_PERIOD=${BR_PERIOD:-37}; LFN_PERIOD=${LFN_PERIOD:-53}
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT" && OUT=$(realpath "$OUT")
