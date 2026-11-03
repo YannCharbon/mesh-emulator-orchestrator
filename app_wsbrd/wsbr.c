@@ -290,6 +290,21 @@ static void wsbr_node_table_log(struct wsbr_ctxt *ctxt)
                table[i].parent[4], table[i].parent[5], table[i].parent[6], table[i].parent[7]);
     printf("brtree t=%llu.%06llu nodes=%d\n",
            (unsigned long long)(now_us / 1000000), (unsigned long long)(now_us % 1000000), len);
+    // FAN 1.1: the border router's own LFN children (as D-Bus LfnChildren)
+    {
+        static ws_lfn_child_info_t lfn[256];
+        static const char *const states[] = { "candidate", "child", "released" };
+        int n = ws_management_lfn_children_get(ctxt->rcp_if_id, lfn, ARRAY_SIZE(lfn));
+
+        for (i = 0; i < n; i++)
+            printf("brlfn t=%llu.%06llu node=%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x "
+                   "interval_ms=%u last_heard_s=%u state=%s\n",
+                   (unsigned long long)(now_us / 1000000), (unsigned long long)(now_us % 1000000),
+                   lfn[i].eui64[0], lfn[i].eui64[1], lfn[i].eui64[2], lfn[i].eui64[3],
+                   lfn[i].eui64[4], lfn[i].eui64[5], lfn[i].eui64[6], lfn[i].eui64[7],
+                   (unsigned)lfn[i].listen_interval_ms, (unsigned)lfn[i].last_heard_s,
+                   states[lfn[i].state < 3 ? lfn[i].state : 0]);
+    }
     fflush(stdout);
 }
 

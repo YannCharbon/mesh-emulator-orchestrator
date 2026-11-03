@@ -33,7 +33,7 @@ Scripts for the step-1 gate of `docs/VIRTUAL_TIME.md` (§7). They need a virtual
 
 FAN 1.0 non-regression: `sim_utils/migration/nonreg_dag_simple.sh build-vt $(pwd) <reference>` runs `dag_simple`, 10 seeds × 300 s, and compares each seed's logs byte for byte with the permanent reference runs (`sim_utils/reference-runs.md`; about 6 s of wall time); exit status 1 on any difference.
 
-Analysis: `sim_utils/migration/analyze.py` reads these runs as it reads the wall-clock ones (`brtree` lines of `br.log` instead of `dbus_nodes.txt`).
+Analysis: `sim_utils/migration/analyze.py` reads these runs as it reads the wall-clock ones (`brtree` lines of `br.log` instead of `dbus_nodes.txt`). A border router that parents LFNs also logs its LFN children every 30 s as `brlfn` lines (EUI-64, listen interval, seconds since last heard, state), the content of the D-Bus property `LfnChildren` of the wall-clock programs.
 
 ```bash
 B=build-vt; W=$(pwd)
