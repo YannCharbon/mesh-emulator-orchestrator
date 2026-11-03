@@ -77,7 +77,7 @@ rm -f "$OUT.topo"
 
 PYTHONPATH=$HERE python3 - "$OUT" "$SCALE" "$FIRST" "$LAST" "$DUR" "$JOIN_MAX" "$TRAFFIC_FROM" "$GROUP" "$MIN_RX" "$DELAY_MAX" "$ROUTERS" <<'PY'
 import ipaddress, re, statistics, sys
-from lfn_lib import Checks, lines, udp, exchange, lfn_reception, eui_node, lfn_addr
+from lfn_lib import Checks, lines, udp, exchange, lfn_reception, eui_node, lfn_addr, listen_interval_s, mpl_seq_of_requests, mpl_received
 out, scale = sys.argv[1], sys.argv[2]
 first, last = int(sys.argv[3]), int(sys.argv[4])
 dur, join_max, t_from = float(sys.argv[5]), float(sys.argv[6]), float(sys.argv[7])
@@ -91,7 +91,12 @@ for l in open(f'{out}/topology.txt'):
     edges.add(frozenset((int(a), int(b))))
 br = udp(f'{out}/br.log')
 gsent = [(t, p) for t, d, p in br['tx'] if str(ipaddress.ip_address(d)) == group]
-end = dur - 30
+end0 = dur - 30
+# A group request counts against an LFN only if its parent got the request's
+# MPL message (or is the border router): MPL losses between FFNs are printed
+seq = mpl_seq_of_requests(f'{out}/br.log', group)
+mpl_got = {r: mpl_received(f'{out}/node{r}.log') for r in routers}
+ffn_lost = {}
 bad = {k: [] for k in ('join', 'down', 'up', 'group', 'win')}
 opers, delays, nrx, parents = [], [], [], {}
 for n in range(first, last + 1):
@@ -112,6 +117,7 @@ for n in range(first, last + 1):
         continue
     opers.append(oper)
     lf = udp(f'{out}/node{n}.log')
+    end = end0 - listen_interval_s(f'{out}/node{n}.log')   # downlinks wait for a window
     a = max(oper + 15, t_from)
     q, got, back = exchange(br, lf, None, a, end, dst=lfn_addr(n))
     if not q or len(got) < len(q) or len(back) < len(q):
@@ -122,6 +128,11 @@ for n in range(first, last + 1):
     if not q or len(got) < len(q) or len(back) < len(q):
         bad['up'].append(f'{n} ({len(q)} requests, {len(got)} received, {len(back)} echoed)')
     gw = [p for t, p in gsent if a < t < end]
+    if par in mpl_got:
+        lost = [p for p in gw if seq.get(p) not in mpl_got[par]]
+        if lost:
+            ffn_lost[n] = (par, lost)
+        gw = [p for p in gw if p not in lost]
     gr = [p for t, s, p in lf['rx'] if p in set(gw)]
     if not gw or set(gr) != set(gw) or len(gr) != len(set(gr)):
         bad['group'].append(f'{n} ({len(set(gr))} of {len(gw)}, {len(gr) - len(set(gr))} duplicates)')
@@ -136,7 +147,10 @@ ck(not bad['join'], f'{N - len(bad["join"])} of {N} LFNs joined by {join_max:.0f
    + (f' (operational {min(opers):.0f}-{max(opers):.0f} s)' if opers else '') + show(bad['join']))
 ck(not bad['down'], f'BR -> LFN unicast complete for {N - len(bad["down"])} of {N} LFNs' + show(bad['down']))
 ck(not bad['up'], f'LFN -> BR unicast complete for {N - len(bad["up"])} of {N} LFNs' + show(bad['up']))
-ck(not bad['group'], f'{group}: every request received once by {N - len(bad["group"])} of {N} LFNs ({len(gsent)} sent)' + show(bad['group']))
+if ffn_lost:
+    ck.info(f'{group}: requests a parent router never got by MPL (FFN loss, not counted against the LFNs): '
+            + '; '.join(f'LFN {n} under {p}: {len(l)}' for n, (p, l) in sorted(ffn_lost.items())))
+ck(not bad['group'], f'{group}: every request that reached the parent received once by {N - len(bad["group"])} of {N} LFNs ({len(gsent)} sent)' + show(bad['group']))
 ck(not bad['win'], f'frames inside the windows for {N - len(bad["win"])} of {N} LFNs ({min(nrx) if nrx else 0}-{max(nrx) if nrx else 0} frames each, at least {min_rx})' + show(bad['win']))
 load = {}
 for n, p in parents.items():

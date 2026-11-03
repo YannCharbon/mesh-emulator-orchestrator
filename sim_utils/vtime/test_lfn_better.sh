@@ -134,7 +134,9 @@ if expect == 'move':
 else:
     check(not lfn['moves'] and len(after) >= 2 and lfn['parents'][-1][1] == R1,
           f"kept router 1 through {len(after)} checks after router 2 appeared")
-last = dur - 15
+# downlinks wait for the LFN's window: one listen interval more
+iv = max([int(r.group(1)) for t, m in lines('node3.log') for r in [re.search(r'schedule: .*interval (\d+) ms', m)] if r] or [0]) / 1000
+last = dur - 15 - iv
 def ways(a, b):
     """Requests both ways sent in (a, b): (name, requests, received, echoed, duplicates)"""
     res = []

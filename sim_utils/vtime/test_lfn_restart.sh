@@ -47,7 +47,7 @@ rm -f "$OUT.topo"
 
 PYTHONPATH=$HERE python3 - "$OUT" "$DUR" "$ROUTER_AT" "$LFN_AT" "$RECOVER_S" "$JOIN_MAX" <<'PY'
 import collections, glob, os, re, sys
-from lfn_lib import Checks, lines, frames, udp
+from lfn_lib import Checks, lines, frames, udp, listen_interval_s
 out = sys.argv[1]
 dur, r_at, l_at, recover, join_max = (float(x) for x in sys.argv[2:])
 ck = Checks('test_lfn_restart')
@@ -138,7 +138,7 @@ def traffic(a, b):
         res.append((q, got, back))
     return res
 periods = (('before the restarts', (oper or dur) + 15, r_at), ('after the router restart', r_at + recover, l_at),
-           ('after the LFN restart', l_at + recover, dur - 15))
+           ('after the LFN restart', l_at + recover, dur - 15 - listen_interval_s(f'{out}/node2.r1.log')))
 for name, a, b in periods:
     if b - a < 60:
         continue

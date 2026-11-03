@@ -60,7 +60,7 @@ rm -f "$OUT.topo"
 
 PYTHONPATH=$HERE python3 - "$OUT" "$DUR" "$STEADY_FROM" "$JOIN_MAX" "$LFNS" "${MIN_RX:-20}" <<'EOF'
 import json, re, sys, bisect
-from lfn_lib import lfn_reception
+from lfn_lib import lfn_reception, listen_interval_s
 out, dur, steady_from, join_max = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
 lfns = [int(x) for x in sys.argv[5].split()]
 min_rx = int(sys.argv[6])
@@ -116,7 +116,7 @@ for n in lfns:
     check(oper is not None and oper <= join_max and pn is not None and frozenset((n, pn)) in edges and d['disc'] == 1 and not d['lost'],
           f"LFN {n}: operational at {oper if oper is None else round(oper, 1)} s, parent {pn} (routing cost {d['cost']}), "
           f"{d['disc']} discovery, {d['lost']} parent losses")
-    last = dur - 15
+    last = dur - 15 - listen_interval_s(f'{out}/node{n}.log')   # downlinks wait for a window
     if oper is not None:
         q = [p for t, a, p in br['tx'] if a == addr and p.startswith('Q') and oper + 15 < t < last]
         got = {p for t, a, p in d['urx']}
