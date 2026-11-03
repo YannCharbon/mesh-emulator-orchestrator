@@ -12,12 +12,14 @@
 #include "mbed-client-libservice/mbed-client-libservice/ip6string.h"
 #include "test_traffic.h"
 
-enum { EV_INIT = 0, EV_SEND = 1, EV_LEAVE = 2 };
+enum { EV_INIT = 0, EV_SEND = 1, EV_LEAVE = 2, EV_AT = 3, EV_NEXT = 4 };
 
 static struct test_traffic_cfg tt;
 static int8_t tt_sock = -1;
 static int8_t tt_tasklet = -1;
 static uint32_t tt_seq;
+static int tt_at_next;                          // the next test_udp_at_s
+static int tt_round_next;                       // with test_udp_gap_ms: the next dst of the round
 
 static void tt_socket_cb(void *arg)
 {
@@ -44,18 +46,30 @@ static void tt_socket_cb(void *arg)
     }
 }
 
-static void tt_send(void)
+static void tt_send_one(int i)
 {
     ns_address_t dst = { .type = ADDRESS_IPV6, .identifier = TEST_UDP_PORT };
     char buf[40], a[40];
-    int i, len;
+    int len;
 
-    for (i = 0; i < tt.dst_count; i++) {
-        memcpy(dst.address, tt.dst[i], 16);
-        len = snprintf(buf, sizeof(buf), "Q %u", (unsigned)tt_seq++);
-        ip6tos(dst.address, a);
-        INFO("test-udp tx to %s: %s (%d)", a, buf, socket_sendto(tt_sock, &dst, buf, len));
+    memcpy(dst.address, tt.dst[i], 16);
+    len = snprintf(buf, sizeof(buf), "Q %u", (unsigned)tt_seq++);
+    ip6tos(dst.address, a);
+    INFO("test-udp tx to %s: %s (%d)", a, buf, socket_sendto(tt_sock, &dst, buf, len));
+}
+
+/* One request to each dst: at once, or test_udp_gap_ms apart */
+static void tt_send(void)
+{
+    if (tt.gap_ms > 0) {
+        tt_send_one(0);
+        tt_round_next = 1;
+        if (tt.dst_count > 1)
+            eventOS_event_timer_request(EV_NEXT, EV_NEXT, tt_tasklet, (uint32_t)tt.gap_ms);
+        return;
     }
+    for (int i = 0; i < tt.dst_count; i++)
+        tt_send_one(i);
 }
 
 /* Join or leave the groups of test_udp_group (an LFN registers them with its
@@ -90,6 +104,23 @@ static void tt_tasklet_cb(arm_event_t *ev)
         if (tt.period_s > 0 && tt.dst_count) {
             eventOS_event_timer_request(EV_SEND, EV_SEND, tt_tasklet, (uint32_t)(tt.start_s > 0 ? tt.start_s : tt.period_s) * 1000);
         }
+        if (tt.at_count && tt.dst_count) {
+            eventOS_event_timer_request(EV_AT, EV_AT, tt_tasklet, (uint32_t)tt.at_s[0] * 1000);
+        }
+        return;
+    }
+    if (ev->event_type == EV_AT) {
+        tt_send();
+        if (++tt_at_next < tt.at_count) {
+            eventOS_event_timer_request(EV_AT, EV_AT, tt_tasklet,
+                                        (uint32_t)(tt.at_s[tt_at_next] - tt.at_s[tt_at_next - 1]) * 1000);
+        }
+        return;
+    }
+    if (ev->event_type == EV_NEXT) {
+        tt_send_one(tt_round_next++);
+        if (tt_round_next < tt.dst_count)
+            eventOS_event_timer_request(EV_NEXT, EV_NEXT, tt_tasklet, (uint32_t)tt.gap_ms);
         return;
     }
     if (ev->event_type == EV_LEAVE) {
@@ -104,7 +135,7 @@ static void tt_tasklet_cb(arm_event_t *ev)
 
 void test_traffic_start(const struct test_traffic_cfg *cfg)
 {
-    if (!cfg->echo && !cfg->group_count && !(cfg->period_s > 0 && cfg->dst_count)) {
+    if (!cfg->echo && !cfg->group_count && !((cfg->period_s > 0 || cfg->at_count) && cfg->dst_count)) {
         return;
     }
     tt = *cfg;

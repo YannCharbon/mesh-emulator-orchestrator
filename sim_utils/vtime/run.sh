@@ -54,6 +54,20 @@
 #   POWER_OPTS         more wssimserver options (e.g. --power-node=3:<profile>)
 #   SIM_OPTS           more wssimserver options, with or without POWER (e.g.
 #                      --drift-random=20, --drift=3:-15: clock drift, EM3 step 5)
+#   KILL="<i>:<s> ..."  stop node i outright at virtual second s (wssimserver
+#                      --vtime-kill: no more wakes or frames, its connection
+#                      closed; the program then exits with "conductor closed
+#                      the connection", which is expected)
+#   RESTART="<i>:<s> ..." a new instance of node i (same options, same key
+#                      storage) starts at virtual second s (--vtime-start);
+#                      the running one, if any, is stopped then. Its log is
+#                      node<i>.r<k>.log (k = 1, 2, ...); the lines of its first
+#                      run carry the time of its start minus the run's
+#                      (they print before its first wake: see the README)
+#   CUT="<a>:<b>:<s> ..." from virtual second s, frames from node a no longer
+#                      reach node b (one direction; --vtime-cut)
+#   FRAMES=1           write every frame sent to <outdir>/frames.txt (time us,
+#                      sender, channel, PSDU in hex; --vtime-frames)
 #
 # Output in <outdir>: simserver.log, br.log, node<i>.log (each line starts with
 # NSIM_EPOCH_S + virtual time, written by the simulation port), t0
@@ -62,7 +76,9 @@
 # (a link to <workdir>/examples).
 #
 # The run ends when wssimserver exits. The script never uses pkill: on error
-# it kills only the processes it started.
+# it kills only the processes it started. It fails (exit status 1) if any
+# program exits with a non-zero status (an AddressSanitizer or leak report
+# included), except the instances that KILL or RESTART stopped.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3; DUR=$4
 BR_CONF=$WORK/examples/wsbrd${CONF:+-$CONF}.conf
@@ -164,7 +180,23 @@ if [ -n "${POWER:-}" ]; then
 	PWR+=(${POWER_OPTS:-})
 	echo "power=$POWER log=${POWER_LOG:-0} cell=${POWER_CELL:-}" >> "$OUT/run_info.txt"
 fi
-start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} --dump "$SOCK"
+CTL=()
+declare -A STOPPED  # node -> number of its instances that KILL/RESTART stop
+for k in ${KILL:-}; do
+	CTL+=(--vtime-kill="$k"); STOPPED[${k%%:*}]=$(( ${STOPPED[${k%%:*}]:-0} + 1 ))
+done
+LATE=()             # "node:log" of each instance started later
+declare -A NINST
+for k in ${RESTART:-}; do
+	i=${k%%:*}
+	(( i >= 1 && i <= NODES )) || { echo "run.sh: RESTART: no node $i" >&2; exit 1; }
+	CTL+=(--vtime-start="$k"); STOPPED[$i]=$(( ${STOPPED[$i]:-0} + 1 ))
+	NINST[$i]=$(( ${NINST[$i]:-0} + 1 )); LATE+=("$i:node$i.r${NINST[$i]}")
+done
+for k in ${CUT:-}; do CTL+=(--vtime-cut="$k"); done
+[ "${FRAMES:-0}" = 1 ] && CTL+=(--vtime-frames="$OUT/frames.txt")
+[ ${#CTL[@]} -gt 0 ] && echo "events=${CTL[*]}" >> "$OUT/run_info.txt"
+start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" --dump "$SOCK"
 SIM_PID=$!
 for (( i = 0; i < 200; i++ )); do
 	[ -S "$SOCK" ] && break
@@ -175,9 +207,23 @@ done
 
 start br env ${BR_ENV:-} "$BIN/wsbrd-inproc" --eui64="$(mac 0)" -F "$BR_CONF" -u "$SOCK" -t "$TUN" \
 	-o storage_prefix=storage/br_ ${BR_OPTS:-}
+start_node() {   # start_node <i> <log name>
+	start "$2" env $(v="NODE_ENV_$1"; echo "${!v:-}") "$BIN/wsnode-inproc" --eui64="$(mac $1)" -F "$NODE_CONF" -u "$SOCK" \
+		-o storage_prefix="storage/n${1}_" ${NODE_OPTS:-} $(v="NODE_OPTS_$1"; echo "${!v:-}")
+}
 for (( i = 1; i <= NODES; i++ )); do
-	start node$i env $(v="NODE_ENV_$i"; echo "${!v:-}") "$BIN/wsnode-inproc" --eui64="$(mac $i)" -F "$NODE_CONF" -u "$SOCK" \
-		-o storage_prefix="storage/n${i}_" ${NODE_OPTS:-} $(v="NODE_OPTS_$i"; echo "${!v:-}")
+	start_node $i node$i
+done
+# Later instances connect once the first instance of their node has: the
+# conductor takes a node's first hello as its first instance.
+for l in "${LATE[@]}"; do
+	i=${l%%:*}
+	for (( w = 0; w < 600; w++ )); do
+		grep -q "node $i connected" "$OUT/simserver.log" 2>/dev/null && break
+		kill -0 $SIM_PID 2>/dev/null || abort "wssimserver exited at start (simserver.log)"
+		sleep 0.05
+	done
+	start_node "$i" "${l#*:}"
 done
 
 if [ "${WALL_TIMEOUT:-0}" -gt 0 ]; then
@@ -202,6 +248,18 @@ if [ "${RSS:-0}" = 1 ]; then
 	SAMPLER=$!
 fi
 
+# An instance that KILL or RESTART stopped exits with "conductor closed the
+# connection" (status 2): expected, as many times as they stop that node.
+declare -A STOPPED_SEEN ACCEPTED
+stopped_ok() {   # stopped_ok <log name>
+	local n=${1#node}; n=${n%%.*}
+	[ -n "${ACCEPTED[$1]:-}" ] && return 0
+	[ "$1" != br ] && [ "$1" != simserver ] || return 1
+	(( ${STOPPED_SEEN[$n]:-0} < ${STOPPED[$n]:-0} )) || return 1
+	grep -q "conductor closed the connection" "$OUT/$1.log" || return 1
+	STOPPED_SEEN[$n]=$(( ${STOPPED_SEEN[$n]:-0} + 1 )); ACCEPTED[$1]=1
+	echo "$1 stopped by the conductor" >> "$OUT/run_info.txt"
+}
 # Wait for the processes as they end. wssimserver ends the run; a node that
 # fails before that stops the run.
 SIM_RC=
@@ -215,6 +273,9 @@ while (( ${#ACTIVE[@]} > 0 )); do
 	if [ "$DONE" = "$SIM_PID" ]; then
 		SIM_RC=$RC
 		break
+	fi
+	if [ "$RC" != 0 ] && stopped_ok "${NAME[$DONE]}"; then
+		continue
 	fi
 	if [ "$RC" != 0 ]; then
 		kill -TERM $SIM_PID 2>/dev/null      # "xq" to the others
@@ -248,5 +309,16 @@ if [ -e "$OUT/wall_timeout" ]; then
 	echo "run stopped by WALL_TIMEOUT=$WALL_TIMEOUT s before its end: $OUT" >&2
 	exit 1
 fi
+# Any program that ended with a non-zero status fails the run: an
+# AddressSanitizer or leak report at exit, a crash after the end
+BAD=
+while read -r n rc; do
+	stopped_ok "$n" || BAD+="$n:$rc "
+done < <(awk '$1 != "simserver" && $2 != 0' "$OUT/exit_codes.txt")
 echo "run finished: $OUT (wssimserver status ${SIM_RC:-?})"
+if [ -n "$BAD" ]; then
+	echo "run.sh: non-zero exit status: $BAD(exit_codes.txt)" >&2
+	echo "failed: non-zero exit status: $BAD" >> "$OUT/run_info.txt"
+	exit 1
+fi
 [ "${SIM_RC:-1}" = 0 ]

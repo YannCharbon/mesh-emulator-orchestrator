@@ -334,6 +334,15 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
             FATAL(1, "%s:%d: invalid address: %s", filename, line_no, str_arg);
     } else if (sscanf(line, " test_udp_group_leave_s = %d %c", &ctxt->test_traffic.group_leave_s, &garbage) == 1) {
         /* empty */
+    } else if (sscanf(line, " test_udp_at_s = %d %c", &int_arg, &garbage) == 1) {
+        struct test_traffic_cfg *tc = &ctxt->test_traffic;
+        if (tc->at_count >= TEST_UDP_AT_MAX)
+            FATAL(1, "%s:%d: at most %d test_udp_at_s", filename, line_no, TEST_UDP_AT_MAX);
+        if (int_arg <= 0 || int_arg > 4294967 || (tc->at_count && int_arg <= tc->at_s[tc->at_count - 1]))
+            FATAL(1, "%s:%d: test_udp_at_s: positive and ascending seconds: %d", filename, line_no, int_arg);
+        tc->at_s[tc->at_count++] = int_arg;
+    } else if (sscanf(line, " test_udp_gap_ms = %d %c", &ctxt->test_traffic.gap_ms, &garbage) == 1) {
+        /* empty */
     } else if (sscanf(line, " test_udp_period_s = %d %c", &ctxt->test_traffic.period_s, &garbage) == 1) {
         /* empty */
     } else if (sscanf(line, " test_udp_start_s = %d %c", &ctxt->test_traffic.start_s, &garbage) == 1) {
