@@ -306,6 +306,8 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "                            DST (one direction); repeatable\n");
     fprintf(stream, "  --vtime-link=A:B:SECONDS:RSSI virtual time: from that time, the link between A and B has\n");
     fprintf(stream, "                            this RSSI (dBm), both directions (it must exist); repeatable\n");
+    fprintf(stream, "  --vtime-drop=SRC:DST:SEQ:FROM:TO virtual time: frames from SRC with this MAC sequence\n");
+    fprintf(stream, "                            number are not delivered to DST between FROM and TO s; repeatable\n");
     fprintf(stream, "  --vtime-frames=FILE       virtual time: write every frame sent (time us, sender, channel,\n");
     fprintf(stream, "                            PSDU in hex) to FILE\n");
     fprintf(stream, "  --power=PROFILE           virtual time: record power, every node with this profile\n");
@@ -335,7 +337,20 @@ enum {
     OPT_VTIME_CUT,
     OPT_VTIME_FRAMES,
     OPT_VTIME_LINK,
+    OPT_VTIME_DROP,
 };
+
+// --vtime-drop=SRC:DST:SEQ:FROM:TO: frames from SRC with this MAC sequence
+// number are not delivered to DST between FROM and TO s (a lost frame and its
+// MAC retries)
+struct vt_drop {
+    int src, dst, seq;
+    uint64_t from, to;
+};
+#define VT_DROP_MAX 64
+static struct vt_drop vt_drops[VT_DROP_MAX];
+static int vt_drops_n;
+static uint64_t vt_dropped;
 
 // Node events in virtual time (--vtime-kill, --vtime-start, --vtime-cut),
 // applied at their time before any wake at that time, in time order (option
@@ -483,6 +498,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "vtime-cut", required_argument, 0, OPT_VTIME_CUT },
         { "vtime-frames", required_argument, 0, OPT_VTIME_FRAMES },
         { "vtime-link", required_argument, 0, OPT_VTIME_LINK },
+        { "vtime-drop", required_argument, 0, OPT_VTIME_DROP },
         { 0,       0,                 0,   0  }
     };
     uint64_t mask[MAX_NODES / 64];
@@ -562,6 +578,22 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             case OPT_VTIME_CUT:
                 vt_ctl_add(VT_CTL_CUT, "--vtime-cut", optarg);
                 break;
+            case OPT_VTIME_DROP: {
+                char *f[5], *q;
+                int n = 0;
+                FATAL_ON(vt_drops_n >= VT_DROP_MAX, 1, "--vtime-drop: at most %d", VT_DROP_MAX);
+                for (q = strtok(optarg, ":"); q && n < 5; q = strtok(NULL, ":"))
+                    f[n++] = q;
+                FATAL_ON(n != 5 || q, 1, "--vtime-drop: expected SRC:DST:SEQ:FROM:TO");
+                vt_drops[vt_drops_n].src = node_id("--vtime-drop", f[0]);
+                vt_drops[vt_drops_n].dst = node_id("--vtime-drop", f[1]);
+                vt_drops[vt_drops_n].seq = strtol(f[2], &end, 0);
+                FATAL_ON(*end || vt_drops[vt_drops_n].seq < 0 || vt_drops[vt_drops_n].seq > 255, 1, "--vtime-drop: bad sequence number %s", f[2]);
+                vt_drops[vt_drops_n].from = seconds_to_us("--vtime-drop", f[3]);
+                vt_drops[vt_drops_n].to = seconds_to_us("--vtime-drop", f[4]);
+                vt_drops_n++;
+                break;
+            }
             case OPT_VTIME_LINK:
                 vt_ctl_add(VT_CTL_LINK, "--vtime-link", optarg);
                 break;
@@ -581,7 +613,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     FATAL_ON(ctxt->has_vtime_end && !ctxt->vtime_nodes, 1, "--vtime-end needs --vtime");
     FATAL_ON(pwr_enabled() && !ctxt->vtime_nodes, 1, "--power needs --vtime");
     FATAL_ON((drift_specs_n || drift_random_ppb) && !ctxt->vtime_nodes, 1, "--drift needs --vtime");
-    FATAL_ON((vt_ctls_n || vt_frames_path) && !ctxt->vtime_nodes, 1,
+    FATAL_ON((vt_ctls_n || vt_frames_path || vt_drops_n) && !ctxt->vtime_nodes, 1,
              "--vtime-kill, --vtime-start, --vtime-cut, --vtime-link and --vtime-frames need --vtime");
     // The ledger follows each node's radio and MCU without gaps
     for (int i = 0; i < vt_ctls_n; i++)
@@ -962,6 +994,25 @@ static void vt_set_deadline(int node, uint64_t next)
     vt_push(next, node, NULL);
 }
 
+static bool vt_drop(int src, int dst, const struct sim_frame_hdr *hdr)
+{
+    const uint8_t *psdu = (const uint8_t *)(hdr + 1);
+    int i;
+
+    // the sequence number follows the frame control, unless suppressed
+    if (!vt_drops_n || hdr->len < 3 || (psdu[1] & 0x01))
+        return false;
+    for (i = 0; i < vt_drops_n; i++)
+        if (vt_drops[i].src == src && vt_drops[i].dst == dst && vt_drops[i].seq == psdu[2] &&
+            vt_now >= vt_drops[i].from && vt_now <= vt_drops[i].to) {
+            INFO("virtual time: frame from node %d (sequence number %d) not delivered to node %d at %llu us",
+                 src, psdu[2], dst, (unsigned long long)vt_now);
+            vt_dropped++;
+            return true;
+        }
+    return false;
+}
+
 // Queue a frame from src for its neighbours at the current time.
 static void vt_queue_frame(struct ctxt *ctxt, int src, void *msg, int len)
 {
@@ -987,7 +1038,7 @@ static void vt_queue_frame(struct ctxt *ctxt, int src, void *msg, int len)
     memcpy(frame->data, msg, len);
     for (i = 0; i < vt_num_nodes; i++)
         if (bitmap_get(vt_nodes[i], ctxt->node_graph[src], MAX_NODES / 64) && slot_of_node[vt_nodes[i]] &&
-            !bitmap_get(src, vt_cut[vt_nodes[i]], MAX_NODES / 64))
+            !bitmap_get(src, vt_cut[vt_nodes[i]], MAX_NODES / 64) && !vt_drop(src, vt_nodes[i], hdr))
             vt_push(vt_now, vt_nodes[i], frame);
     vt_unref(frame);
 }
