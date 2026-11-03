@@ -363,6 +363,8 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
         /* empty */
     } else if (sscanf(line, " test_revoke_at_s = %d %c", &ctxt->test_revoke_at_s, &garbage) == 1) {
         /* empty */
+    } else if (sscanf(line, " test_keys_remove_at_s = %d %c", &ctxt->test_keys_remove_at_s, &garbage) == 1) {
+        /* empty */
     } else if (sscanf(line, " test_revoke_eui64 = %s %c", str_arg, &garbage) == 1) {
         if (parse_byte_array(str_arg, ctxt->test_revoke_eui64, 8))
             FATAL(1, "%s:%d: invalid test_revoke_eui64: %s", filename, line_no, str_arg);

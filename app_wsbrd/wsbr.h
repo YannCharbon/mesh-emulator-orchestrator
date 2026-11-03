@@ -96,6 +96,7 @@ struct wsbr_ctxt {
     unsigned test_lgtk_fc;
     int test_revoke_at_s;       // > 0: border router: revoke test_revoke_eui64's access then
     uint8_t test_revoke_eui64[8];
+    int test_keys_remove_at_s;  // > 0: border router: test_revoke_eui64's PMK and PTK removed then (no new keys), as a border router restarted without its supplicants' keys
     int test_reset_at_s;        // > 0: wsnode: interface down then, up test_reset_for_s later (a reset with storage)
     int test_reset_for_s;
     int lgtk_rotate_at_s;       // > 0: an LGTK rotation then (ws_management_lfn_lgtk_rotate())

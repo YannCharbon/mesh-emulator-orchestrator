@@ -265,6 +265,7 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
 #define WSBR_LGTK_ROTATE_EVENT (APPLICATION_EVENT + 0x43)
 #define WSBR_REVOKE_EVENT (APPLICATION_EVENT + 0x44)
 #define WSBR_LGTK_FC_EVENT (APPLICATION_EVENT + 0x45)
+#define WSBR_KEYS_REMOVE_EVENT (APPLICATION_EVENT + 0x46)
 
 #ifdef NS_PORT_SIM
 // Batch mode (virtual time): nobody reads D-Bus, so the border router logs
@@ -392,6 +393,9 @@ static void wsbr_tasklet(struct arm_event_s *event)
             if (ctxt->test_revoke_at_s > 0)
                 eventOS_event_timer_request(0, WSBR_REVOKE_EVENT, event->receiver,
                                             (uint32_t)ctxt->test_revoke_at_s * 1000);
+            if (ctxt->test_keys_remove_at_s > 0)
+                eventOS_event_timer_request(0, WSBR_KEYS_REMOVE_EVENT, event->receiver,
+                                            (uint32_t)ctxt->test_keys_remove_at_s * 1000);
             // An LGTK rotation (GS8 stage 3, LGTK)
             if (ctxt->lgtk_rotate_at_s > 0)
                 eventOS_event_timer_request(0, WSBR_LGTK_ROTATE_EVENT, event->receiver,
@@ -408,6 +412,13 @@ static void wsbr_tasklet(struct arm_event_s *event)
             INFO("node access revoked (test_revoke_*)");
             WARN_ON(ws_bbr_node_keys_remove(ctxt->rcp_if_id, ctxt->test_revoke_eui64));
             WARN_ON(ws_bbr_node_access_revoke_start(ctxt->rcp_if_id));
+            break;
+        case WSBR_KEYS_REMOVE_EVENT:
+            // Test: the node's PMK and PTK forgotten (a border router
+            // restarted without its supplicants' keys): its next key
+            // request gets a full EAP-TLS
+            INFO("node keys removed (test_keys_remove_at_s)");
+            WARN_ON(ws_bbr_node_keys_remove(ctxt->rcp_if_id, ctxt->test_revoke_eui64));
             break;
         case WSBR_LGTK_ROTATE_EVENT:
             INFO("LGTK rotation (lgtk_rotate_at_s)");
