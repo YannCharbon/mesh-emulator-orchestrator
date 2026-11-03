@@ -68,6 +68,9 @@
 #                      reach node b (one direction; --vtime-cut)
 #   LINK="<a>:<b>:<s>:<rssi> ..." from virtual second s, the link a-b (both
 #                      directions) has this RSSI (dBm; --vtime-link)
+#   DROP="<a>:<b>:<seq>:<s1>:<s2> ..." frames from a with MAC sequence number
+#                      seq are not delivered to b between s1 and s2 (a lost
+#                      frame and its MAC retries; --vtime-drop)
 #   FRAMES=1           write every frame sent to <outdir>/frames.txt (time us,
 #                      sender, channel, PSDU in hex; --vtime-frames)
 #
@@ -197,6 +200,7 @@ for k in ${RESTART:-}; do
 done
 for k in ${CUT:-}; do CTL+=(--vtime-cut="$k"); done
 for k in ${LINK:-}; do CTL+=(--vtime-link="$k"); done
+for k in ${DROP:-}; do CTL+=(--vtime-drop="$k"); done
 [ "${FRAMES:-0}" = 1 ] && CTL+=(--vtime-frames="$OUT/frames.txt")
 [ ${#CTL[@]} -gt 0 ] && echo "events=${CTL[*]}" >> "$OUT/run_info.txt"
 start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" --dump "$SOCK"

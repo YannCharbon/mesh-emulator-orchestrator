@@ -4,12 +4,12 @@
 # exit status 1 if any run failed.
 #
 # usage: lfn_suite.sh [quick|full] <bindir> <workdir(holds examples/)> <outdir>
-#   quick  one run of each test (seed 1; the profile runs 12 h): 37 runs,
+#   quick  one run of each test (seed 1; the profile runs 12 h): 45 runs,
 #          about 1 minute of wall time with 12 jobs on a 24-core PC
 #   full   the documented counts, at most 6 runs per check (the root
 #          CLAUDE.md sizing rule): 3 seeds per check, 6 for the checks that
 #          vary most (join with traffic, better parent, restart), 2 for the
-#          profile runs (48 h Balanced, 72 h Eco): 112 runs, about 5 minutes
+#          profile runs (48 h Balanced, 72 h Eco): 136 runs, about 6 minutes
 #          with 12 jobs (the 72 h Eco runs take 4)
 # Environment: JOBS (12: runs at once), ONLY (a regular expression: only
 # the runs whose name matches), KEEP (1: keep the run directories; by
@@ -61,6 +61,12 @@ for s in $(seeds 3); do
     echo "weak_fade_s$s|WSSIM_SEED=$s MODE=fade|$V/test_lfn_weak.sh $BIN $WORK <out>"
     for r in router lfn; do echo "reset_${r}_s$s|WSSIM_SEED=$s RESET=$r|$V/test_lfn_reset.sh $BIN $WORK <out>"; done
     echo "mac_s$s|WSSIM_SEED=$s|$V/test_lfn_mac.sh $BIN $WORK <out>"
+    for m in na na2; do
+        echo "lost_${m}_s$s|WSSIM_SEED=$s MODE=$m|$V/test_lfn_lost.sh $BIN $WORK <out>"
+        for p in balanced eco; do echo "lost_${m}_${p}_s$s|WSSIM_SEED=$s MODE=$m PROF=$p|$V/test_lfn_lost.sh $BIN $WORK <out>"; done
+    done
+    echo "lost_release_s$s|WSSIM_SEED=$s MODE=release LOST=2|$V/test_lfn_lost.sh $BIN $WORK <out>"
+    echo "lost_release_all_s$s|WSSIM_SEED=$s MODE=release LOST=4|$V/test_lfn_lost.sh $BIN $WORK <out>"
 done
 for s in $(seeds 6); do
     echo "better_move_s$s|WSSIM_SEED=$s EXPECT=move|$V/test_lfn_better.sh $BIN $WORK <out>"
@@ -86,7 +92,7 @@ run() {   # run <job line>
     rc=$?
     [ "${KEEP:-0}" = 1 ] || rm -rf "${OUT:?}/$name" "$OUT/$name".run "$OUT/$name".*.run
     if [ $rc = 0 ]; then echo "PASS $name ($((SECONDS - t0)) s)"
-    else echo "FAIL $name ($((SECONDS - t0)) s): $(grep -m1 -E '^FAIL|run failed|Error' "$OUT/$name.txt" | cut -c1-160)"; fi
+    else echo "FAIL $name ($((SECONDS - t0)) s): $(grep -m1 -E '^FAIL|run failed|Error|^test_lfn_[a-z_]+: no ' "$OUT/$name.txt" | cut -c1-160)"; fi
 }
 export -f run; export OUT KEEP
 T0=$SECONDS
