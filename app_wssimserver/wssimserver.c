@@ -297,6 +297,17 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "                            repeatable, the last one naming a node wins\n");
     fprintf(stream, "  --drift-random=PPM        virtual time: each node draws its clock error in [-PPM, +PPM]\n");
     fprintf(stream, "                            from WSSIM_SEED (a --drift naming the node takes precedence)\n");
+    fprintf(stream, "  --vtime-kill=ID:SECONDS   virtual time: stop node ID at that time, outright: the conductor\n");
+    fprintf(stream, "                            closes its connection and delivers nothing more to it; repeatable\n");
+    fprintf(stream, "  --vtime-start=ID:SECONDS  virtual time: one more instance of node ID connects at the start\n");
+    fprintf(stream, "                            (after the first one) and is welcomed at that time, once the\n");
+    fprintf(stream, "                            previous one is stopped (stopped then if still running); repeatable\n");
+    fprintf(stream, "  --vtime-cut=SRC:DST:SECONDS virtual time: from that time, frames from SRC no longer reach\n");
+    fprintf(stream, "                            DST (one direction); repeatable\n");
+    fprintf(stream, "  --vtime-link=A:B:SECONDS:RSSI virtual time: from that time, the link between A and B has\n");
+    fprintf(stream, "                            this RSSI (dBm), both directions (it must exist); repeatable\n");
+    fprintf(stream, "  --vtime-frames=FILE       virtual time: write every frame sent (time us, sender, channel,\n");
+    fprintf(stream, "                            PSDU in hex) to FILE\n");
     fprintf(stream, "  --power=PROFILE           virtual time: record power, every node with this profile\n");
     fprintf(stream, "                            (docs/POWER_MODEL.md)\n");
     fprintf(stream, "  --power-node=IDS:PROFILE  another profile for these nodes (3, 2-5, 1,4); repeatable\n");
@@ -319,7 +330,77 @@ enum {
     OPT_POWER_CELL,
     OPT_DRIFT,
     OPT_DRIFT_RANDOM,
+    OPT_VTIME_KILL,
+    OPT_VTIME_START,
+    OPT_VTIME_CUT,
+    OPT_VTIME_FRAMES,
+    OPT_VTIME_LINK,
 };
+
+// Node events in virtual time (--vtime-kill, --vtime-start, --vtime-cut),
+// applied at their time before any wake at that time, in time order (option
+// order on a tie).
+enum { VT_CTL_KILL, VT_CTL_START, VT_CTL_CUT, VT_CTL_LINK };
+struct vt_ctl {
+    uint64_t t;
+    int kind;
+    int node;                   // CUT: the receiver
+    int src;                    // CUT: the sender
+    int slot;                   // START: the connection of the instance, 0 until its hello
+    float rssi;                 // LINK: the new RSSI of the link, both directions
+};
+#define VT_CTL_MAX 256
+static struct vt_ctl vt_ctls[VT_CTL_MAX];
+static int vt_ctls_n, vt_ctls_next;
+static int vt_starts_n;
+static const char *vt_frames_path;
+static FILE *vt_frames_file;
+
+static uint64_t seconds_to_us(const char *opt, const char *str)
+{
+    char *end;
+    double d = strtod(str, &end);
+
+    FATAL_ON(*end || !(d >= 0) || d > 1e12, 1, "%s: bad number of seconds: %s", opt, str);
+    return (uint64_t)(d * 1e6 + 0.5);
+}
+
+static int node_id(const char *opt, const char *str)
+{
+    char *end;
+    long id = strtol(str, &end, 0);
+
+    FATAL_ON(*end || id < 0 || id >= MAX_NODES, 1, "%s: bad node ID: %s", opt, str);
+    return id;
+}
+
+// "ID:SECONDS" (kill, start), "SRC:DST:SECONDS" (cut) or "A:B:SECONDS:RSSI" (link)
+static void vt_ctl_add(int kind, const char *opt, char *arg)
+{
+    struct vt_ctl *c = &vt_ctls[vt_ctls_n];
+    char *f[4];
+    int n = 0, want = kind == VT_CTL_LINK ? 4 : kind == VT_CTL_CUT ? 3 : 2;
+    char *p, *end;
+
+    FATAL_ON(vt_ctls_n >= VT_CTL_MAX, 1, "%s: at most %d node events", opt, VT_CTL_MAX);
+    for (p = strtok(arg, ":"); p && n < 4; p = strtok(NULL, ":"))
+        f[n++] = p;
+    FATAL_ON(n != want || p, 1, "%s: expected %s", opt,
+             want == 4 ? "A:B:SECONDS:RSSI" : want == 3 ? "SRC:DST:SECONDS" : "ID:SECONDS");
+    memset(c, 0, sizeof(*c));
+    c->kind = kind;
+    c->node = node_id(opt, f[want >= 3 ? 1 : 0]);
+    c->src = want >= 3 ? node_id(opt, f[0]) : -1;
+    c->t = seconds_to_us(opt, f[want == 4 ? 2 : want - 1]);
+    if (want == 4) {
+        c->rssi = strtof(f[3], &end);
+        FATAL_ON(*end || c->rssi > 0 || c->rssi < -200, 1, "%s: bad RSSI: %s", opt, f[3]);
+    }
+    if (kind == VT_CTL_START)
+        vt_starts_n++;
+    vt_ctls_n++;
+}
+
 
 // Clock drift per node (EM3 step 5), sent in the welcome: --drift=[IDS:]PPM,
 // the last one that names the node wins; else --drift-random.
@@ -397,6 +478,11 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "power-cell", required_argument, 0, OPT_POWER_CELL },
         { "drift", required_argument, 0, OPT_DRIFT },
         { "drift-random", required_argument, 0, OPT_DRIFT_RANDOM },
+        { "vtime-kill", required_argument, 0, OPT_VTIME_KILL },
+        { "vtime-start", required_argument, 0, OPT_VTIME_START },
+        { "vtime-cut", required_argument, 0, OPT_VTIME_CUT },
+        { "vtime-frames", required_argument, 0, OPT_VTIME_FRAMES },
+        { "vtime-link", required_argument, 0, OPT_VTIME_LINK },
         { 0,       0,                 0,   0  }
     };
     uint64_t mask[MAX_NODES / 64];
@@ -467,6 +553,21 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
                 drift_random_ppb = ppm_to_ppb("--drift-random", optarg);
                 FATAL_ON(drift_random_ppb < 0, 1, "--drift-random: expected a positive bound");
                 break;
+            case OPT_VTIME_KILL:
+                vt_ctl_add(VT_CTL_KILL, "--vtime-kill", optarg);
+                break;
+            case OPT_VTIME_START:
+                vt_ctl_add(VT_CTL_START, "--vtime-start", optarg);
+                break;
+            case OPT_VTIME_CUT:
+                vt_ctl_add(VT_CTL_CUT, "--vtime-cut", optarg);
+                break;
+            case OPT_VTIME_LINK:
+                vt_ctl_add(VT_CTL_LINK, "--vtime-link", optarg);
+                break;
+            case OPT_VTIME_FRAMES:
+                vt_frames_path = optarg;
+                break;
             case 'h':
                 print_help(stdout, 0);
                 break;
@@ -480,6 +581,19 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     FATAL_ON(ctxt->has_vtime_end && !ctxt->vtime_nodes, 1, "--vtime-end needs --vtime");
     FATAL_ON(pwr_enabled() && !ctxt->vtime_nodes, 1, "--power needs --vtime");
     FATAL_ON((drift_specs_n || drift_random_ppb) && !ctxt->vtime_nodes, 1, "--drift needs --vtime");
+    FATAL_ON((vt_ctls_n || vt_frames_path) && !ctxt->vtime_nodes, 1,
+             "--vtime-kill, --vtime-start, --vtime-cut, --vtime-link and --vtime-frames need --vtime");
+    // The ledger follows each node's radio and MCU without gaps
+    for (int i = 0; i < vt_ctls_n; i++)
+        FATAL_ON(pwr_enabled() && (vt_ctls[i].kind == VT_CTL_KILL || vt_ctls[i].kind == VT_CTL_START), 1,
+                 "--power cannot be combined with --vtime-kill or --vtime-start");
+    // Stable sort: ties keep the option order (qsort is not stable)
+    for (int i = 1; i < vt_ctls_n; i++)
+        for (int j = i; j > 0 && vt_ctls[j].t < vt_ctls[j - 1].t; j--) {
+            struct vt_ctl tmp = vt_ctls[j];
+            vt_ctls[j] = vt_ctls[j - 1];
+            vt_ctls[j - 1] = tmp;
+        }
     FATAL_ON(ctxt->dump && !ctxt->num_groups, 1, "No graph to dump");
     if (optind >= argc)
         FATAL(1, "Expected argument: socket path");
@@ -527,7 +641,11 @@ static void conn_close(int slot)
 {
     if (conns[slot].node >= 0) {
         INFO("node %d disconnected", conns[slot].node);
-        slot_of_node[conns[slot].node] = 0;
+        if (slot_of_node[conns[slot].node] == slot)
+            slot_of_node[conns[slot].node] = 0;
+        for (int i = 0; i < vt_ctls_n; i++)
+            if (vt_ctls[i].kind == VT_CTL_START && vt_ctls[i].slot == slot)
+                vt_ctls[i].slot = -1;   // the instance is gone: its start fails
         num_connected--;
     } else {
         DEBUG("Disconnect fd %d", fds[slot].fd);
@@ -536,6 +654,19 @@ static void conn_close(int slot)
     fds[slot].fd = -1;
     fds[slot].events = 0;
     conns[slot].node = -1;
+}
+
+// The first --vtime-start of node that has no connection yet takes slot.
+static bool vt_start_take(int node, int slot)
+{
+    int i;
+
+    for (i = 0; i < vt_ctls_n; i++)
+        if (vt_ctls[i].kind == VT_CTL_START && vt_ctls[i].node == node && !vt_ctls[i].slot) {
+            vt_ctls[i].slot = slot;
+            return true;
+        }
+    return false;
 }
 
 // A hello must say whether its node runs on virtual time, and that must match
@@ -552,6 +683,13 @@ static void conn_hello(int slot, const void *buf, int len, int vtime_nodes)
     } else if (hello->node_id >= MAX_NODES) {
         WARN("fd %d: node ID %d out of range (max %d)", fds[slot].fd, hello->node_id, MAX_NODES - 1);
         conn_close(slot);
+    } else if (slot_of_node[hello->node_id] && vtime && vt_start_take(hello->node_id, slot)) {
+        // Another instance of a connected node, for --vtime-start: welcomed
+        // at its start time
+        conns[slot].node = hello->node_id;
+        num_connected++;
+        fds[slot].events = 0;
+        INFO("node %d connected (instance for a later start)", hello->node_id);
     } else if (slot_of_node[hello->node_id]) {
         WARN("fd %d: node %d is already connected", fds[slot].fd, hello->node_id);
         conn_close(slot);
@@ -560,7 +698,7 @@ static void conn_hello(int slot, const void *buf, int len, int vtime_nodes)
              hello->node_id, (hello->flags & SIM_HELLO_VTIME) ? "virtual" : "wall-clock",
              vtime ? "virtual" : "wall-clock");
         conn_close(slot);
-    } else if (vtime && num_connected >= vtime_nodes) {
+    } else if (vtime && num_connected >= vtime_nodes + vt_starts_n) {
         WARN("fd %d: node %d: the %d nodes of --vtime are already connected: refused",
              fds[slot].fd, hello->node_id, vtime_nodes);
         conn_close(slot);
@@ -642,7 +780,7 @@ static void serve(struct ctxt *ctxt)
     int i, ret, len;
 
     while (!stop) {
-        if (vtime && num_connected == ctxt->vtime_nodes)
+        if (vtime && num_connected == ctxt->vtime_nodes + vt_starts_n)
             return;
         ret = poll(fds, fd_limit, -1);
         if (ret < 0) {
@@ -716,6 +854,9 @@ static int vt_nodes[MAX_NODES];                 // connected node IDs, ascending
 static int vt_num_nodes;
 static uint64_t vt_now;                         // time of the last wake
 static uint64_t vt_wakes, vt_frames_in, vt_frames_out;
+static uint64_t vt_cut[MAX_NODES][MAX_NODES / 64]; // vt_cut[dst]: senders it no longer hears
+static bool vt_late_first[MAX_NODES];           // a started instance's first "xi" may be in the past
+static uint8_t *vt_cca_shm;                     // the CCA shared memory (3 bytes per node)
 
 static bool vt_before(const struct vt_event *a, const struct vt_event *b)
 {
@@ -809,7 +950,11 @@ static void vt_set_deadline(int node, uint64_t next)
     vt_deadline_seq[node] = 0;
     if (next == NSIM_NEVER)
         return;
-    if (next < vt_now) {
+    if (next < vt_now && vt_late_first[node]) {
+        // A started instance ran its first run on a clock from 0: its
+        // timers due before its start fire now (a node that was frozen)
+        next = vt_now;
+    } else if (next < vt_now) {
         WARN("node %d: deadline %llu us is before now (%llu us), moved to now",
              node, (unsigned long long)next, (unsigned long long)vt_now);
         next = vt_now;
@@ -828,13 +973,21 @@ static void vt_queue_frame(struct ctxt *ctxt, int src, void *msg, int len)
         return;
     hdr->src = src;
     vt_frames_in++;
+    if (vt_frames_file) {
+        const uint8_t *psdu = (const uint8_t *)msg + sizeof(*hdr);
+        fprintf(vt_frames_file, "%llu %d %d ", (unsigned long long)vt_now, src, hdr->chan);
+        for (i = 0; i < hdr->len; i++)
+            fprintf(vt_frames_file, "%02x", psdu[i]);
+        fputc('\n', vt_frames_file);
+    }
     frame = malloc(sizeof(*frame) + len);
     FATAL_ON(!frame, 1, "malloc: %m");
     frame->refs = 1;            // held until the loop below ends
     frame->len = len;
     memcpy(frame->data, msg, len);
     for (i = 0; i < vt_num_nodes; i++)
-        if (bitmap_get(vt_nodes[i], ctxt->node_graph[src], MAX_NODES / 64))
+        if (bitmap_get(vt_nodes[i], ctxt->node_graph[src], MAX_NODES / 64) && slot_of_node[vt_nodes[i]] &&
+            !bitmap_get(src, vt_cut[vt_nodes[i]], MAX_NODES / 64))
             vt_push(vt_now, vt_nodes[i], frame);
     vt_unref(frame);
 }
@@ -866,6 +1019,7 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
             if (pwr_enabled())
                 pwr_idle(node, vt_now, idle->next_us);
             vt_set_deadline(node, idle->next_us);
+            vt_late_first[node] = false;
             return 0;
         }
         if (len >= 2 && !memcmp(buf, "xx", 2))
@@ -948,6 +1102,12 @@ static void vt_quit_all(void)
     for (i = 0; i < vt_num_nodes; i++)
         if (slot_of_node[vt_nodes[i]])
             send(vt_fd(vt_nodes[i]), &quit, sizeof(quit), MSG_NOSIGNAL);
+    // Instances for a later start that never started: "xq" instead of a welcome
+    for (i = vt_ctls_next; i < vt_ctls_n; i++)
+        if (vt_ctls[i].kind == VT_CTL_START && vt_ctls[i].slot > 0 && fds[vt_ctls[i].slot].fd >= 0) {
+            send(fds[vt_ctls[i].slot].fd, &quit, sizeof(quit), MSG_NOSIGNAL);
+            conn_close(vt_ctls[i].slot);
+        }
     for (i = 0; i < vt_num_nodes; i++) {
         if (!slot_of_node[vt_nodes[i]])
             continue;
@@ -970,6 +1130,69 @@ static void vt_quit_all(void)
 static double timespec_diff(const struct timespec *a, const struct timespec *b)
 {
     return (b->tv_sec - a->tv_sec) + (b->tv_nsec - a->tv_nsec) / 1e9;
+}
+
+static const char *vt_time_str(uint64_t t)
+{
+    static char str[32];
+
+    snprintf(str, sizeof(str), "%llu.%06llu s", (unsigned long long)(t / 1000000), (unsigned long long)(t % 1000000));
+    return str;
+}
+
+// Stop a node outright: no more wakes or frames for it, its connection
+// closed (the program exits on its own: "conductor closed the connection").
+static void vt_kill(int node)
+{
+    if (!slot_of_node[node]) {
+        WARN("virtual time: node %d is not running at %s: nothing to stop", node, vt_time_str(vt_now));
+        return;
+    }
+    INFO("virtual time: node %d stopped at %s", node, vt_time_str(vt_now));
+    conn_close(slot_of_node[node]);
+    vt_deadline_seq[node] = 0;  // its deadline is stale; its frames are skipped
+    // Its radio, as its neighbours' CCA sees it: off, not in the state it had
+    if (vt_cca_shm)
+        vt_cca_shm[node * 3] = 7;   // DRVSTATE_OFF (app_wshwsim/sl_rf_driver.c)
+}
+
+static int vt_ctl_run(struct ctxt *ctxt, struct vt_ctl *c, struct nsim_welcome *welcome)
+{
+    vt_now = c->t;
+    switch (c->kind) {
+    case VT_CTL_KILL:
+        vt_kill(c->node);
+        return 0;
+    case VT_CTL_CUT:
+        INFO("virtual time: frames from node %d no longer reach node %d from %s", c->src, c->node, vt_time_str(vt_now));
+        bitmap_set(c->src, vt_cut[c->node], MAX_NODES / 64);
+        return 0;
+    case VT_CTL_LINK:
+        if (!bitmap_get(c->node, ctxt->node_graph[c->src], MAX_NODES / 64)) {
+            WARN("virtual time: no link %d-%d to change", c->src, c->node);
+            return -1;
+        }
+        INFO("virtual time: link %d-%d at %.1f dBm from %s", c->src, c->node, c->rssi, vt_time_str(vt_now));
+        sim_link(nodes_infos_flat_map, c->node, c->src)->rssi = c->rssi;
+        sim_link(nodes_infos_flat_map, c->src, c->node)->rssi = c->rssi;
+        return 0;
+    case VT_CTL_START:
+        if (slot_of_node[c->node])
+            vt_kill(c->node);
+        if (c->slot <= 0 || fds[c->slot].fd < 0) {
+            WARN("virtual time: no instance of node %d to start at %s: run aborted", c->node, vt_time_str(vt_now));
+            return -1;
+        }
+        INFO("virtual time: node %d started at %s (new instance)", c->node, vt_time_str(vt_now));
+        slot_of_node[c->node] = c->slot;
+        c->slot = 0;
+        vt_late_first[c->node] = true;
+        welcome->drift_ppb = drift_of(c->node, welcome->seed);
+        if (vt_send(c->node, welcome, sizeof(*welcome)) || vt_read_until_idle(ctxt, c->node))
+            return -1;
+        return 0;
+    }
+    return 0;
 }
 
 static int vt_run(struct ctxt *ctxt)
@@ -1010,6 +1233,10 @@ static int vt_run(struct ctxt *ctxt)
         pwr_start(vt_num_nodes, vt_nodes);
     }
 
+    if (vt_frames_path) {
+        vt_frames_file = fopen(vt_frames_path, "w");
+        FATAL_ON(!vt_frames_file, 1, "%s: %m", vt_frames_path);
+    }
     clock_gettime(CLOCK_MONOTONIC, &start);
     // Welcome the nodes one at a time, in ID order, and read each one's first
     // run at time 0 until its "xi": no two nodes ever run at once.
@@ -1033,6 +1260,22 @@ static int vt_run(struct ctxt *ctxt)
             break;
         }
         vt_drop_stale();
+        // Events of a node that is stopped (frames, its old deadline)
+        while (vt_heap_len && !slot_of_node[vt_heap[0].node]) {
+            struct vt_event ev = vt_pop();
+            if (ev.frame)
+                vt_unref(ev.frame);
+            vt_drop_stale();
+        }
+        if (vt_ctls_next < vt_ctls_n && (!vt_heap_len || vt_ctls[vt_ctls_next].t <= vt_heap[0].t) &&
+            !(ctxt->has_vtime_end && vt_ctls[vt_ctls_next].t > ctxt->vtime_end_us)) {
+            if (vt_ctl_run(ctxt, &vt_ctls[vt_ctls_next++], &welcome)) {
+                reason = stop ? "interrupted" : "a node failed";
+                status = stop ? 0 : 1;
+                break;
+            }
+            continue;
+        }
         if (!vt_heap_len) {
             reason = "no more events";
             break;
@@ -1066,6 +1309,8 @@ out:
     vt_quit_all();
     wall = timespec_diff(&start, &end);
     INFO("virtual time: end (%s)", reason);
+    if (vt_frames_file)
+        fclose(vt_frames_file);
     INFO("virtual time: reached %llu.%06llu s, %llu wakes, %llu frames sent, %llu frames delivered",
          (unsigned long long)(vt_now / 1000000), (unsigned long long)(vt_now % 1000000),
          (unsigned long long)vt_wakes, (unsigned long long)vt_frames_in,
@@ -1121,6 +1366,7 @@ int main(int argc, char **argv)
     ptr = shm_create(shm_name, SIM_SHM_CCA_SIZE, &shm_fd);
     infos_ptr = shm_create(shm_infos_name, SIM_SHM_INFOS_SIZE, &shm_infos_fd);
     nodes_infos_flat_map = (struct node_infos *)infos_ptr;
+    vt_cca_shm = ptr;
     apply_groups(&ctxt);
 
     fd_limit = min(increase_limit_fd(), ARRAY_SIZE(fds));

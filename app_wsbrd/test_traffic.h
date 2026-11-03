@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0
  *
  * Test traffic for virtual-time runs (GS8 stage 3): UDP requests to
- * configured addresses every test_udp_period_s, and an echo of every request
+ * configured addresses every test_udp_period_s (or once at each
+ * test_udp_at_s), and an echo of every request
  * received on port TEST_UDP_PORT. Log lines "test-udp ..." are read by
  * sim_utils/vtime/test_lfn_join.sh. Off unless configured.
  */
@@ -12,18 +13,23 @@
 #include <stdint.h>
 
 #define TEST_UDP_PORT 7
-#define TEST_UDP_DST_MAX 8
+#define TEST_UDP_DST_MAX 64
 #define TEST_UDP_GROUP_MAX 4
+#define TEST_UDP_AT_MAX 16
 
 struct test_traffic_cfg {
     bool echo;                                  // answer requests (test_udp_echo)
+    bool listen;                                // open the socket and log what arrives, without answering (test_udp_listen)
     int period_s;                               // 0: send nothing (test_udp_period_s)
     int start_s;                                // first request after this (test_udp_start_s)
+    int gap_ms;                                 // between the requests to successive dst of one round (test_udp_gap_ms; 0: at once)
     int dst_count;
     uint8_t dst[TEST_UDP_DST_MAX][16];          // test_udp_dst (repeatable)
     int group_count;
     uint8_t group[TEST_UDP_GROUP_MAX][16];      // multicast groups joined (test_udp_group, repeatable)
     int group_leave_s;                          // > 0: leave them after this (test_udp_group_leave_s)
+    int at_count;
+    int at_s[TEST_UDP_AT_MAX];                  // one request to each dst at these times, ascending (test_udp_at_s, repeatable)
 };
 
 void test_traffic_start(const struct test_traffic_cfg *cfg);

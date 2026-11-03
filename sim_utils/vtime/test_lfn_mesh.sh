@@ -14,14 +14,17 @@
 #     (requests from 15 s after the LFN became operational: the route to it
 #     reaches the border router with its parent's DAO, RPL's DAO delay later; to DUR - 15 s);
 #   - every frame each LFN received started inside one of its windows
-#     (unicast, LFN broadcast, discovery), ACKs to its own frames aside.
+#     (unicast, LFN broadcast, discovery), ACKs to its own frames aside
+#     (lfn_lib.lfn_reception()), and each LFN received at least MIN_RX
+#     frames.
 # It prints each LFN's parent, its routing cost when chosen, its join time
 # and its average current from STEADY_FROM s (EM2 ledger, the profile given).
 #
 # usage: test_lfn_mesh.sh <bindir> <workdir(holds examples/)> <outdir> [profile]
 # Environment: DUR (1800), WSSIM_SEED (1), TUN (tunvt0), BR_PERIOD (60),
 # LFN_PERIOD (90), STEADY_FROM (600), JOIN_MAX (600), SIM_OPTS (more
-# wssimserver options, e.g. --drift-random=20), LFN_EXTRA, ROUTER_EXTRA.
+# wssimserver options, e.g. --drift-random=20), LFN_EXTRA, ROUTER_EXTRA,
+# MIN_RX (20).
 # Exit status 0 if every check passes.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
@@ -55,10 +58,12 @@ RC=$?
 rm -f "$OUT.topo"
 [ $RC = 0 ] || { echo "test_lfn_mesh: run failed ($OUT.run)"; exit 1; }
 
-python3 - "$OUT" "$DUR" "$STEADY_FROM" "$JOIN_MAX" "$LFNS" <<'EOF'
+PYTHONPATH=$HERE python3 - "$OUT" "$DUR" "$STEADY_FROM" "$JOIN_MAX" "$LFNS" "${MIN_RX:-20}" <<'EOF'
 import json, re, sys, bisect
+from lfn_lib import lfn_reception
 out, dur, steady_from, join_max = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
 lfns = [int(x) for x in sys.argv[5].split()]
+min_rx = int(sys.argv[6])
 T0 = 1700000000.0
 fails = []
 def check(cond, what):
@@ -102,12 +107,6 @@ for n in lfns:
             d['parent'], d['cost'] = r.group(1), int(r.group(2))
         elif 'window open' in m and 'for ' in m:
             d['win'].append((t, int(re.search(r'for (\d+) us', m).group(1)) / 1e6))
-        elif m.startswith('Transmitting ...'):
-            # its end at the slowest PHY (50 kbit/s): the ACK follows the end
-            d['tx'].append((t, t + int(re.search(r'len=(\d+)', m).group(1)) * 8 / 50000))
-        elif m.startswith('Receiving ...') and int(re.search(r'pkt_len=(\d+)', m).group(1)) >= 30:
-            d['rx'].append(t)
-            d.setdefault('rxe', []).append((t, t + int(re.search(r'pkt_len=(\d+)', m).group(1)) * 8 / 50000))
         r = re.search(r'test-udp (tx to|rx from) (\S+): (\S+ \d+)', m)
         if r:
             d['utx' if r.group(1) == 'tx to' else 'urx'].append((t, r.group(2), r.group(3)))
@@ -129,23 +128,10 @@ for n in lfns:
         back = {p.replace('R', 'Q', 1) for t, a, p in d['urx'] if p.startswith('R')}
         check(q and all(p in got for p in q) and all(p in back for p in q),
               f"LFN {n}: LFN -> BR {len(q)} requests, {sum(p in got for p in q)} received, {sum(p in back for p in q)} echoes back")
-    win = sorted(d['win'])
-    wt = [w[0] for w in win]
-    def in_window(t):
-        i = bisect.bisect_right(wt, t + 1e-6) - 1
-        return i >= 0 and win[i][0] - 1e-6 <= t <= win[i][0] + win[i][1] + 1e-6
-    txl = sorted(d['tx'])
-    txs = [x[0] for x in txl]
-    def after_own_tx(t):
-        i = bisect.bisect_right(txs, t) - 1
-        return i >= 0 and t - txl[i][1] < 0.06
-    # A frame that starts while the LFN is still on for the ACK of a frame it
-    # has just received (within 10 ms of that frame's end) is overheard there
-    rxe = sorted(d.get('rxe', []))
-    def during_ack(t):
-        return any(s < t and t - e < 0.01 for s, e in rxe if s > t - 1)
-    outside = [t for t in d['rx'] if not in_window(t) and not after_own_tx(t) and not during_ack(t)]
-    check(not outside, f"LFN {n}: {len(d['rx'])} frames received, {len(outside)} outside its windows")
+    rec = lfn_reception(f'{out}/node{n}.log')
+    outside = rec['outside']
+    check(len(rec['rx']) >= min_rx and not outside, f"LFN {n}: {len(rec['rx'])} frames received (at least {min_rx}), {len(outside)} outside its windows"
+          + (f" (first at {outside[0]:.6f} s)" if outside else ''))
     node = next(x for x in rep['nodes'] if x['node'] == n)
     pwr[n] = node
 # Average current from steady_from, per LFN, from the power log

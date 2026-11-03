@@ -15,8 +15,11 @@
 #     copy from the border router;
 #   - every frame the LFN received started inside one of its listen windows
 #     (unicast or LFN broadcast, with their logged length: widening for
-#     drift included, GS8 stage 4);
-#   - the LFN kept its parent (no parent loss, no second discovery);
+#     drift included, GS8 stage 4), the ACKs of its own frames aside (those
+#     starting within 5 ms of the end of a frame it sent, from the airtimes
+#     the emulated PHY used), and at least MIN_RX frames were received;
+#   - the LFN kept its parent (no parent loss, no second discovery, and no
+#     parent search unless its parent goes silent: SILENT_AT);
 #   - LGTK (docs/LFN_STACK.md §8): the LFN joined with an LGTK (4-way
 #     handshake with its NR KDE, LPCS under key index 5-7); for every LGTK
 #     the border router installs after the join (LGTK_ROTATE_AT, or short
@@ -44,7 +47,12 @@
 # the router; 3: it hears the border router at -70 dBm and must choose it,
 # routing cost 0), SILENT_AT and
 # SILENT_FOR (s: the parent stops answering the LFN then, for that long; the
-# test then checks the parent-loss rule and the rejoin instead).
+# test then checks the parent-loss rule and the rejoin instead; with MESH=3,
+# the change to the router, and the LFN subscribes to GROUP (ff05::1234,
+# test_udp_group), to which the border router also sends: every group request
+# from 15 s after the join to SILENT_AT and from 30 s after the change to the
+# end must reach the LFN once, through MPL and the router's copy after the
+# change), MIN_RX (10).
 # Exit status 0 if every check passes.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
@@ -70,13 +78,18 @@ fi
 # EUI-64); the border router's is the one its TUN gives it
 LFN_ADDR=fd12:3456::302:304:506:$LFN_NODE
 BR_ADDR=fd12:3456::1615:16ff:fe17:1819
-TRAFFIC_BR="-o test_udp_echo=true -o test_udp_dst=$LFN_ADDR $( [ "$MESH" != 0 ] && [ "$MESH" != 3 ] || echo "-o test_udp_dst=ff02::1") -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60"
+GROUP=${GROUP:-ff05::1234}; MIN_RX=${MIN_RX:-10}
+GROUP_BR=; GROUP_LFN=
+if [ "$MESH" = 3 ] && [ -n "${SILENT_AT:-}" ]; then
+    GROUP_BR="-o test_udp_dst=$GROUP"; GROUP_LFN="-o test_udp_group=$GROUP"
+fi
+TRAFFIC_BR="-o test_udp_echo=true -o test_udp_dst=$LFN_ADDR $( [ "$MESH" != 0 ] && [ "$MESH" != 3 ] || echo "-o test_udp_dst=ff02::1") $GROUP_BR -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60"
 TRAFFIC_LFN="-o test_udp_echo=true -o test_udp_dst=$BR_ADDR -o test_udp_period_s=$LFN_PERIOD -o test_udp_start_s=70"
 (( BR_PERIOD > 0 )) || TRAFFIC_BR=
 (( LFN_PERIOD > 0 )) || TRAFFIC_LFN=
 SILENT=
 [ -n "${SILENT_AT:-}" ] && SILENT="-o test_lfn_silent_at_s=$SILENT_AT -o test_lfn_silent_for_s=${SILENT_FOR:-500}"
-LFN_OPTS="$TRAFFIC_LFN ${LFN_EXTRA:-}"
+LFN_OPTS="$TRAFFIC_LFN $GROUP_LFN ${LFN_EXTRA:-}"
 if [ "$MESH" != 0 ]; then
     export NODE_OPTS_1="-o device_type=ffn -o enable_lfn=true ${ROUTER_EXTRA:-}" NODE_OPTS_2="$LFN_OPTS"
     LFN_OPTS=
@@ -89,13 +102,16 @@ RC=$?
 rm -f "$OUT.topo"
 [ $RC = 0 ] || { echo "test_lfn_join: run failed ($OUT.run)"; exit 1; }
 
-python3 - "$OUT" "$DUR" "$STEADY_FROM" "$JOIN_MAX" "$LGTK_ROTATE_AT" "$BR_PERIOD" "${SILENT_AT:-0}" "$LFN_NODE" "$MESH" <<'EOF'
-import json, re, sys, bisect
+PYTHONPATH=$HERE python3 - "$OUT" "$DUR" "$STEADY_FROM" "$JOIN_MAX" "$LGTK_ROTATE_AT" "$BR_PERIOD" "${SILENT_AT:-0}" "$LFN_NODE" "$MESH" "$GROUP" "$MIN_RX" <<'EOF'
+import json, re, sys, bisect, ipaddress
+from lfn_lib import lfn_reception
 out, dur, steady_from, join_max, rot = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])
 traffic = int(sys.argv[6]) > 0
 silent_at = float(sys.argv[7])
 lfn_node = int(sys.argv[8])
 mesh = int(sys.argv[9])
+group = str(ipaddress.ip_address(sys.argv[10]))
+min_rx = int(sys.argv[11])
 T0 = 1700000000.0
 fails = []
 def check(cond, what):
@@ -124,6 +140,8 @@ for t, m in lines(f'node{lfn_node}.log'):
         lfn['auth'].append(t)
     elif re.search(r'parent .* lost', m):
         lfn['lost'].append(t)
+    elif 'LFN: parent search (' in m:
+        lfn.setdefault('search', []).append(t)
     elif 'LFN: parent changed' in m:
         lfn.setdefault('changed', []).append((t, m))
     elif 'window open: slot' in m or 'discovery window open' in m:
@@ -132,13 +150,6 @@ for t, m in lines(f'node{lfn_node}.log'):
         lfn['win'].append((t, int(re.search(r'for (\d+) us', m).group(1)) / 1e6))
     elif 'LFN listen schedule:' in m:
         lfn['window_us'] = int(re.search(r'window (\d+) us', m).group(1))
-    elif m.startswith('Transmitting ...'):
-        # its end at the slowest PHY (50 kbit/s): the ACK follows the end
-        lfn.setdefault('tx', []).append((t, t + int(re.search(r'len=(\d+)', m).group(1)) * 8 / 50000))
-    elif m.startswith('Receiving ...'):
-        if int(re.search(r'pkt_len=(\d+)', m).group(1)) >= 30:
-            lfn['rx'].append(t)
-            lfn.setdefault('rxe', []).append((t, t + int(re.search(r'pkt_len=(\d+)', m).group(1)) * 8 / 50000))
     elif 'test-udp rx from' in m:
         src, p = re.search(r'from (\S+): (.*)', m).groups()
         lfn['udp_rx'].append((t, src, p))
@@ -182,8 +193,12 @@ for t, m in lines('br.log'):
 
 check(lfn['oper'] is not None and lfn['oper'] <= join_max,
       f"LFN operational at {lfn['oper']:.1f} s" if lfn['oper'] else 'LFN operational')
+searches = lfn.get('search', [])
+if silent_at > 0:
+    print(f"info {len(searches)} parent searches, the first {searches[0] - silent_at:.1f} s after the parent went silent" if searches else 'info no parent search')
 if silent_at <= 0:
-    check(len(lfn['disc']) == 1 and not lfn['lost'], f"LFN kept its parent ({len(lfn['disc'])} discovery, {len(lfn['lost'])} parent losses)")
+    check(len(lfn['disc']) == 1 and not lfn['lost'] and not searches,
+          f"LFN kept its parent ({len(lfn['disc'])} discovery, {len(lfn['lost'])} parent losses, {len(searches)} parent searches)")
 elif mesh == 3:
     # The border router (the LFN's parent) went silent while a router is in
     # range: the LFN changes parent without losing it, after
@@ -203,17 +218,19 @@ else:
           f"rejoined without EAPOL, operational again at {again[0]:.1f} s" if again else 'rejoined')
 
 last = dur - 15      # requests later than this may still be on their way
-def pairs(tx, rx_peer, rx_back, mc=False):
+def pairs(tx, rx_peer, rx_back, mc=False, dst=None):
     # requests "Q n" sent by one side, received by the other, echoed back
     # requests sent once the LFN was operational (before, it has no address)
     # (and 15 s after it: through a router, the route to the LFN reaches the
     # border router with the router's DAO, RPL's DAO delay later: up to several s)
-    q = [(t, p) for t, d, p in tx if p.startswith('Q') and (lfn['oper'] or dur) + 15 < t < last and (d.startswith('ff02') == mc)]
+    q = [(t, p) for t, d, p in tx if p.startswith('Q') and (lfn['oper'] or dur) + 15 < t < last and (d.startswith('ff02') == mc)
+         and (dst is None or str(ipaddress.ip_address(d)) == dst)]
     got = {p for t, s, p in rx_peer}
     back = {p.replace('R', 'Q', 1) for t, s, p in rx_back if p.startswith('R')}
     return q, [x for x in q if x[1] in got], [x for x in q if x[1] in back]
 if traffic:
-  q, got, back = pairs(br['udp_tx'], lfn['udp_rx'], br['udp_rx'])
+  lfn_addr = f'fd12:3456::302:304:506:{lfn_node:x}'
+  q, got, back = pairs(br['udp_tx'], lfn['udp_rx'], br['udp_rx'], dst=lfn_addr)
   check(q and len(got) == len(q) and len(back) == len(q), f'BR -> LFN unicast: {len(q)} requests, {len(got)} received, {len(back)} echoes back')
   q, got, back = pairs(lfn['udp_tx'], br['udp_rx'], lfn['udp_rx'])
   check(q and len(got) == len(q) and len(back) == len(q), f'LFN -> BR unicast: {len(q)} requests, {len(got)} received, {len(back)} echoes back')
@@ -225,26 +242,23 @@ if traffic:
     q, got = [x for x in q if x[0] < silent_at], [x for x in got if x[0] < silent_at]
   if mesh in (0, 3):
    check(q and len(got) == len(q) and br['copies'] >= len(q), f'BR -> ff02::1: {len(q)} requests, {len(got)} received by the LFN, {br["copies"]} MAC-unicast copies')
-win = sorted(lfn['win'])
-win_t = [w[0] for w in win]
-def in_window(t):
-    i = bisect.bisect_right(win_t, t + 1e-6) - 1
-    return i >= 0 and win[i][0] - 1e-6 <= t <= win[i][0] + win[i][1] + 1e-6
-# An ACK to the LFN's own frame comes right after it (within 60 ms of its end)
-txl = sorted(lfn.get('tx', []))
-txs = [x[0] for x in txl]
-def after_own_tx(t):
-    i = bisect.bisect_right(txs, t) - 1
-    return i >= 0 and t - txl[i][1] < 0.06
-acks = [t for t in lfn['rx'] if not in_window(t) and after_own_tx(t)]
-# A frame that starts while the LFN is still on for the ACK of a frame it has
-# just received (within 10 ms of that frame's end) is overheard there
-rxe = sorted(lfn.get('rxe', []))
-def during_ack(t):
-    return any(s < t and t - e < 0.01 for s, e in rxe if s > t - 1)
-outside = [t for t in lfn['rx'] if not in_window(t) and not after_own_tx(t) and not during_ack(t)]
-check(lfn['rx'] and not outside, f"{len(lfn['rx'])} frames received by the LFN: {len(outside)} outside its windows, "
-      f"{len(acks)} ACKs to its own frames" + (f" (first outside at {outside[0]:.6f} s)" if outside else ''))
+  if mesh == 3 and silent_at > 0:
+    # The group after the change to the router: MPL to the router, which
+    # copies it to the LFN (the LFN registered the group with it)
+    ch = [t for t, m in lfn.get('changed', []) if t > silent_at]
+    rx_g = {}
+    for t, s_, p in lfn['udp_rx']:
+        rx_g.setdefault(p, []).append(t)
+    for name, a, b in (('before the parent went silent', (lfn['oper'] or dur) + 15, silent_at),
+                       ('after the change to the router', (ch[0] + 30) if ch else dur, last)):
+        g = [(t, p) for t, d, p in br['udp_tx'] if p.startswith('Q') and str(ipaddress.ip_address(d)) == group and a < t < b]
+        got_g = [p for t, p in g if p in rx_g]
+        dup = sum(len(rx_g[p]) - 1 for t, p in g if p in rx_g)
+        check(g and len(got_g) == len(g) and not dup, f'BR -> {group} {name}: {len(g)} requests, {len(got_g)} received by the LFN, {dup} duplicates')
+rec = lfn_reception(f'{out}/node{lfn_node}.log')
+outside = rec['outside']
+check(len(rec['rx']) >= min_rx and not outside, f"{len(rec['rx'])} frames received by the LFN (at least {min_rx}): {len(outside)} outside its windows, "
+      f"{len(rec['acks'])} ACKs to its own frames, {len(rec['overheard'])} while sending an ACK" + (f" (first outside at {outside[0]:.6f} s)" if outside else ''))
 # --- GS8 stage 5: the router parents the LFN
 if mesh:
     rt = {'lgtk': [], 'lpas': 0, 'bc': 0}
