@@ -89,6 +89,8 @@ struct wsbr_ctxt {
     int test_lfn_silent_at_s;   // > 0: the LFN parent goes silent then (ws_test_lfn_parent_silence())
     int test_lfn_silent_for_s;  // for this long
     uint32_t dhcp_lifetime_s;   // > 0: the DHCPv6 address lifetime given (0xffffffff: infinite); 0: the network size's
+    int test_lfn_lpa_drop;      // > 0: the LFN parent drops its first LPAs, as if lost (ws_test_lfn_lpa_drop())
+    int test_lfn_lpa_unusable;  // 1: the LFN parent's LPAs lack the BS-IE (ws_test_lfn_lpa_unusable())
     int test_reset_at_s;        // > 0: wsnode: interface down then, up test_reset_for_s later (a reset with storage)
     int test_reset_for_s;
     int lgtk_rotate_at_s;       // > 0: an LGTK rotation then (ws_management_lfn_lgtk_rotate())

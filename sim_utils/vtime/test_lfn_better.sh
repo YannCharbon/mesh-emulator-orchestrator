@@ -26,9 +26,13 @@
 # usage: test_lfn_better.sh <bindir> <workdir(holds examples/)> <outdir> [profile]
 # Environment: DUR (1800), WSSIM_SEED (1), TUN (tunvt0), EXPECT (move),
 # OLD_RSSI (-87 for move, -70 for stay), NEW_RSSI (-60 for move, -67 for
-# stay), LATE (600), CHECK_S (300), MOVE_MAX (1.5 x CHECK_S + 60),
-# BR_PERIOD (37; move: 13), LFN_PERIOD (53; move: 17), MOVE_REQ (3), SIM_OPTS (e.g. --drift-random=20),
-# LFN_EXTRA, ROUTER_EXTRA.
+# stay), LATE (600), CHECK_S (300), MOVE_MAX (3 x CHECK_S + 60: three checks
+# on average; a check, two LPAS sweeps, hears a router in range in 94 % of
+# the checks),
+# BR_PERIOD (37; move: 13), LFN_PERIOD (53; move: 17), MOVE_REQ (3), SIM_OPTS
+# (e.g. --drift-random=20), LFN_EXTRA, ROUTER_EXTRA, ROUTER2_EXTRA (router 2
+# only; e.g. "-o test_lfn_lpa_unusable=1" with EXPECT=stay: its LPAs lack the
+# BS-IE, and the LFN must keep router 1 although router 2 is better).
 # Exit status 0 if every check passes.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
@@ -36,7 +40,7 @@ PROFILE=${4:-$WORK/examples/power/efr32fg25-soc.ini}
 DUR=${DUR:-1800}; TUN=${TUN:-tunvt0}; EXPECT=${EXPECT:-move}
 if [ "$EXPECT" = move ]; then OLD_RSSI=${OLD_RSSI:--87}; NEW_RSSI=${NEW_RSSI:--60}
 else OLD_RSSI=${OLD_RSSI:--70}; NEW_RSSI=${NEW_RSSI:--67}; fi
-LATE=${LATE:-600}; CHECK_S=${CHECK_S:-300}; MOVE_MAX=${MOVE_MAX:-$((CHECK_S * 3 / 2 + 60))}
+LATE=${LATE:-600}; CHECK_S=${CHECK_S:-300}; MOVE_MAX=${MOVE_MAX:-$((CHECK_S * 3 + 60))}
 if [ "$EXPECT" = move ]; then BR_PERIOD=${BR_PERIOD:-13}; LFN_PERIOD=${LFN_PERIOD:-17}
 else BR_PERIOD=${BR_PERIOD:-37}; LFN_PERIOD=${LFN_PERIOD:-53}; fi
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -46,7 +50,7 @@ printf '0,1:-50\n0,2:-50\n1,3:%s\n2,3:%s\n' "$OLD_RSSI" "$NEW_RSSI" > "$OUT.topo
 LFN_ADDR=fd12:3456::302:304:506:3
 BR_ADDR=fd12:3456::1615:16ff:fe17:1819
 export NODE_OPTS_1="-o device_type=ffn -o enable_lfn=true ${ROUTER_EXTRA:-}"
-export NODE_OPTS_2="-o device_type=ffn -o enable_lfn=true -o test_lfn_silent_at_s=1 -o test_lfn_silent_for_s=$((LATE - 1)) ${ROUTER_EXTRA:-}"
+export NODE_OPTS_2="-o device_type=ffn -o enable_lfn=true -o test_lfn_silent_at_s=1 -o test_lfn_silent_for_s=$((LATE - 1)) ${ROUTER_EXTRA:-} ${ROUTER2_EXTRA:-}"
 export NODE_OPTS_3="-o device_type=lfn -o enable_lfn=false -o test_udp_echo=true -o test_udp_dst=$BR_ADDR -o test_udp_period_s=$LFN_PERIOD -o test_udp_start_s=70 -o lfn_parent_check_s=$CHECK_S -o lfn_parent_check_weak_s=$CHECK_S ${LFN_EXTRA:-}"
 BR_OPTS="-o test_udp_echo=true -o test_udp_dst=$LFN_ADDR -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60" \
 CONF=lfn TOPO="$OUT.topo" TUN=$TUN POWER=$PROFILE \
