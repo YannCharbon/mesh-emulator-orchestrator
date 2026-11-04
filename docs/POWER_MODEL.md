@@ -484,10 +484,10 @@ The measured floor adds 2.4 µA everywhere. With Eco, the automatic widening bou
 | Case | Kit current | Emulator |
 | --- | --- | --- |
 | One LFN under the border router, listen interval 5 s, idle (GS8 stage 6, kit 440235509, 18 windows of 60 s) | 24.9–26.9 µA | 24.0–24.7 µA (§17, EM2 4.6 µA) |
-| The same LFN under a router | 23.8–24.8 µA | — |
+| The same LFN under a router (16 windows of 60 s in 8 boots) | 23.7–25.4 µA | — |
 | Listen interval 60 s, 1–6 min after the join (dumps of 60 s) | 13.7–14.8 µA (440290182), 19.2–20.0 µA (440235509: its floor) | — |
 | Idle against the listen interval, EU mode 1a, under the border router (means) | 1 s: 69.1, 2 s: 42.8, 5 s: 26.3, 10 s: 20.8, 30 s: 17.6, 60 s: 16.7 µA | — |
-| Silicon Labs' LFN, Test profile, same kit | 49 µA | — |
+| Silicon Labs' LFN, Test profile, same kit, under Silicon Labs' embedded border router | 49.0 µA | — |
 
 Above a listen interval of about 10 s, the LFN broadcast slots (every 10 s), the sync frame (every 50 s) and the floor dominate, which is why the profiles with long broadcast intervals (Balanced, Eco) reach 10–13 µA.
 
@@ -538,7 +538,7 @@ The stack now has a FAN 1.1 LFN and a border router that parents it (the stack's
 - **The stack's 50 ms protocol timer dominates.** 72 000 of the 74 966 wakes in 3600 s (20 per second) are `protocol_timer_interrupt` (`nwk_interface/protocol_timer.c`), which re-arms itself whether or not a protocol needs it. Their per-wake charge, wake-up transitions and most of the MCU active time make about 24 µA of the 41.6 µA. The idle-tick skipping of the event loop (DI5) does not cover it. Without it the idle LFN would be near 17 µA, of which 6 µA is listening. Removed by DI6 (§15).
 - With traffic, TX at +10 dBm is the largest part (28.7 µA of 78.7 µA, seed 1).
 - For comparison, Silicon Labs' LFN on the same board idled at 49.0 µA with its Test profile (5 s unicast, 10 s broadcast slots, LTS every 50 s; HW5 results §3.5). Ours has no broadcast-slot wakes (stage 4) and no window widening (no drift in the emulator).
-- **Join**: operational 37–67 s after start (LPAS sweeps every 10 s until one is answered, EAPOL ~13 s at a 1.25 s interval, three waits of up to one 5 s interval); Silicon Labs' LFN: 35–48 s with `wsbrd` (HW5 results §5.2).
+- **Join**: operational 37–67 s after start (LPAS sweeps every 10 s until one is answered, EAPOL ~13 s at a 1.25 s interval, three waits of up to one 5 s interval); Silicon Labs' LFN under `wsbrd`: 34.6–91.0 s, median 47.5 s, 10 joins (35.0 s [34.6–37.5] when its first sweep is answered; HW5 results §5.2).
 - **Parent loss** (`SILENT_AT=300 SILENT_FOR=500`, 3 seeds): declared 375.2–375.7 s after the last frame from the parent, rejoin without EAPOL, operational again 21–22 s after the parent answers (Silicon Labs: 375 s, 21.6–21.9 s).
 
 Reproduce: `sim_utils/vtime/test_lfn_join.sh build-vt $(pwd) runs/lfn_join` (`BR_PERIOD=0 LFN_PERIOD=0 DUR=3600` for the idle case; `WSSIM_SEED`, `TUN`, `TX_POWER`, `STEADY_FROM`, `SILENT_AT`, `SILENT_FOR`).
