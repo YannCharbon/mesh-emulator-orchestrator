@@ -213,6 +213,14 @@ static uint8_t rf_preamble_len = 8;
 static uint8_t rf_sfd_len = 2;
 static uint8_t rf_phr_len = 2;
 static uint8_t rf_fcs_len = 4;
+/* WSSIM_PHY_RX_TS_JITTER_US=<µs>: each received frame's timestamp is off by
+ * a uniform draw in [-J, +J] µs, default 0 (exact). The kits' timing is not
+ * exact: a router's scheduled TX starts on a 32 kHz tick (30.5 µs) and
+ * spread by +-30 µs, once by 80 µs, in the 2026-11-04 overnight run; an LFN
+ * measures its parent's clock rate from these times. Own generator (seed,
+ * node), so the loss draws stay those of a run without it. */
+static uint32_t rf_rx_ts_jitter_us;
+static uint64_t rf_jitter_state;
 
 /* Functions */
 static void _rf_set_off(void);
@@ -303,6 +311,7 @@ static void rf_phy_settings_init(void)
     rf_sfd_len = rf_phy_env("WSSIM_PHY_SFD", 2, 0, 8);
     rf_phr_len = rf_phy_env("WSSIM_PHY_PHR", 2, 0, 8);
     rf_fcs_len = rf_phy_env("WSSIM_PHY_FCS", 4, 2, 4);
+    rf_rx_ts_jitter_us = rf_phy_env("WSSIM_PHY_RX_TS_JITTER_US", 0, 0, 100000);
     FATAL_ON(rf_fcs_len == 3, 2, "WSSIM_PHY_FCS=3: expected 2 or 4");
     FATAL_ON(rf_phy_legacy && rf_datarate_fixed, 2, "WSSIM_PHY_LEGACY and WSSIM_PHY_DATARATE together");
     FATAL_ON(rf_preamble_len + rf_sfd_len > 255, 2, "WSSIM_PHY_PREAMBLE + WSSIM_PHY_SFD above 255 bytes");
@@ -314,6 +323,8 @@ static void rf_phy_settings_init(void)
         INFO("PHY: %u bit/s%s, preamble %u B, SFD %u B, PHR %u B, FCS %u B", rf_datarate,
              rf_datarate_fixed ? " (WSSIM_PHY_DATARATE)" : " until the MAC configures it",
              rf_preamble_len, rf_sfd_len, rf_phr_len, rf_fcs_len);
+    if (rf_rx_ts_jitter_us)
+        INFO("PHY: RX timestamps off by up to +-%u us (WSSIM_PHY_RX_TS_JITTER_US)", rf_rx_ts_jitter_us);
 }
 
 // The PHY mode the MAC configured (sim_proto.h, SIM_PHY_MODE_*), for the
@@ -498,6 +509,20 @@ static double rf_rng_uniform(void)
     return (rf_rng_next() >> 11) * 0x1.0p-53;
 }
 
+// The RX timestamp error (WSSIM_PHY_RX_TS_JITTER_US), splitmix64 on its own state
+static int32_t rf_rx_ts_jitter(void)
+{
+    uint64_t z;
+
+    if (!rf_rx_ts_jitter_us)
+        return 0;
+    z = (rf_jitter_state += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    z ^= z >> 31;
+    return (int32_t)(z % (2 * (uint64_t)rf_rx_ts_jitter_us + 1)) - (int32_t)rf_rx_ts_jitter_us;
+}
+
 // The base seed comes from WSSIM_SEED, or else from the clock; in virtual
 // time, from the conductor. Each node draws from base + node ID, and logs both
 // so a run can be replayed.
@@ -519,6 +544,7 @@ static void rf_rng_seed(int node_id)
     }
 #endif
     rf_rng_state = base + node_id;
+    rf_jitter_state = (base + node_id) ^ 0x6a09e667f3bcc908ULL;
     INFO("loss model: WSSIM_SEED=%llu, node %d", (unsigned long long)base, node_id);
 }
 
@@ -659,7 +685,7 @@ void phy_rf_rx_now(void)
         static struct input_packet *current_input;
         current_input = &input_array[input_index];
         // For now only save packet sync word detect time
-        current_input->rx_time = rf_get_timestamp();
+        current_input->rx_time = rf_get_timestamp() + (uint32_t)rf_rx_ts_jitter();
         // Save the rest of packet in buffer
         current_input->len = pkt_len;
         current_input->channel = pkt_chan;

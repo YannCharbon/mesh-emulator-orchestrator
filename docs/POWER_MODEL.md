@@ -187,6 +187,7 @@ The profiles are examples, not fixed models: a user sets them to the hardware an
 | Battery cell | `--power-cell=mAh[:V[:eff]]` (`POWER_CELL`) | One per run |
 | PHY data rate | The PHY mode in `wsbrd.conf` / `wsnode.conf` (`mode`; `examples/ws*-eu1a.conf`: the FG25 firmware's, 1a), or `-o`/`-m`; `WSSIM_PHY_DATARATE=<bit/s>` in the nodes' environment fixes it whatever the mode | `run.sh`: `NODE_OPTS_<i>`, `NODE_ENV_<i>` |
 | PHY overhead per frame (it lengthens every TX and RX) | `WSSIM_PHY_PREAMBLE` (bytes, default 8, Wi-SUN FAN's minimum), `WSSIM_PHY_SFD` (2), `WSSIM_PHY_PHR` (2), `WSSIM_PHY_FCS` (4 or 2, default 4 as FAN requires) in the nodes' environment. `WSSIM_PHY_LEGACY=1`: the PHY before 2026-10-28 (150 kbit/s whatever the mode, PSDU only), to compare with older runs | `run.sh`: `NODE_ENV_<i>="WSSIM_PHY_PREAMBLE=16"`, `BR_ENV` |
+| RX timestamp error (timing jitter) | `WSSIM_PHY_RX_TS_JITTER_US=<µs>` in the nodes' environment: each received frame's timestamp off by a uniform draw in ±that many µs, from the node's own generator (the loss draws are unchanged), default 0 (exact). The FG25 kits' router TX starts spread by ±30 µs (one 80 µs case) in the 2026-11-04 overnight run; 40 reproduces the LFN rate fault of that run (stack's `docs/LFN_MAC.md` §4) | `run.sh`: `NODE_ENV_<i>`, `BR_ENV`, or exported for all nodes |
 
 The profile's TX table clamps the requested power to the hardware's maximum, as the radio would (the FG25: 15.9 dBm).
 

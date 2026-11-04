@@ -4,14 +4,14 @@
 # exit status 1 if any run failed.
 #
 # usage: lfn_suite.sh [quick|full] <bindir> <workdir(holds examples/)> <outdir>
-#   quick  one run of each test (seed 1; the profile runs 12 h): 49 runs,
+#   quick  one run of each test (seed 1; the profile runs 12 h): 50 runs,
 #          about 70 s of wall time with 12 jobs on a 24-core PC
 #   full   the documented counts, at most 6 runs per check (the root
 #          CLAUDE.md sizing rule): 3 seeds per check, 6 for the checks that
 #          vary most (join with traffic, better parent, restart), 2 for the
 #          profile runs (48 h Balanced, 72 h Eco), one Eco run with a 4 h
 #          listen interval over 72 h, test_lfn_keyreq.sh on its seed 3:
-#          145 runs, about 6 minutes with 12 jobs
+#          148 runs, about 7 minutes with 12 jobs
 # Environment: JOBS (12: runs at once), ONLY (a regular expression: only
 # the runs whose name matches), KEEP (1: keep the run directories; by
 # default only each run's output, <outdir>/<name>.txt, is kept).
@@ -56,6 +56,7 @@ for s in $(seeds 3); do
     echo "revoke_s$s|WSSIM_SEED=$s|$V/test_lfn_revoke.sh $BIN $WORK <out>"
     echo "lost_release_stale_s$s|WSSIM_SEED=$s MODE=release LOST=4 REG_MIN=30|$V/test_lfn_lost.sh $BIN $WORK <out>"
     echo "silence_s$s|WSSIM_SEED=$s|$V/test_lfn_silence.sh $BIN $WORK <out>"
+    echo "silence_jitter_s$s|WSSIM_SEED=$s WSSIM_PHY_RX_TS_JITTER_US=40 MAX_LATENCY=15 SILENCES=4000@4000@4000@4000@4000@4000@4000@4000@4000@4000|$V/test_lfn_silence.sh $BIN $WORK <out>"
     echo "silent_s$s|WSSIM_SEED=$s|$V/test_lfn_silent.sh $BIN $WORK <out>"
     for m in traffic idle uplink; do echo "parent_gone_${m}_s$s|WSSIM_SEED=$s MODE=$m|$V/test_lfn_parent_gone.sh $BIN $WORK <out>"; done
     echo "scale_star_s$s|WSSIM_SEED=$s SCALE=star|$V/test_lfn_scale.sh $BIN $WORK <out>"

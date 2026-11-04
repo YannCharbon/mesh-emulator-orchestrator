@@ -13,12 +13,13 @@
 #
 # Checks, for each LFN:
 #   - joined by JOIN_MAX s and kept its parent (one discovery, no loss);
-#   - each request reached the LFN; the silence before it (the time since
-#     the LFN's last frame other than an ACK, from frames.txt) is printed
-#     and must be at least 95 % of the nominal one.
+#   - each request reached the LFN (within MAX_LATENCY s if set); the
+#     silence before it (the time since the LFN's last frame other than an
+#     ACK, from frames.txt) is printed and must be at least 95 % of the
+#     nominal one.
 #
 # usage: test_lfn_silence.sh <bindir> <workdir(holds examples/)> <outdir>
-# Environment: WSSIM_SEED (1), TUN (none), SILENCES ("3600 10800 36000": the
+# Environment: WSSIM_SEED (1), TUN (none), MAX_LATENCY (none), SILENCES ("3600 10800 36000": the
 # gaps before each request, the first one counted from JOIN_REF, 300 s: the
 # requests go at 3 900, 14 700 and 50 700 s), JOIN_MAX (600), SIM_OPTS (--drift-random=20),
 # LFN_EXTRA, PARENT_EXTRA, KEEP (1: keep the run directory).
@@ -44,11 +45,12 @@ RC=$?
 rm -f "$OUT.topo"
 [ $RC = 0 ] || { echo "test_lfn_silence: run failed ($OUT.run)"; exit 1; }
 
-PYTHONPATH=$HERE python3 - "$OUT" "$JOIN_MAX" "$JOIN_REF $SILENCES" <<'PY'
+PYTHONPATH=$HERE python3 - "$OUT" "$JOIN_MAX" "$JOIN_REF $SILENCES" "${MAX_LATENCY:-}" <<'PY'
 import re, sys
 from lfn_lib import Checks, lines, frames, udp, mac
 out, join_max = sys.argv[1], float(sys.argv[2])
 gaps = [int(x) for x in sys.argv[3].split()]
+max_lat = float(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else 0
 ck = Checks('test_lfn_silence')
 br = udp(f'{out}/br.log')
 sent = sorted({t for t, a, p in br['tx']})
@@ -82,7 +84,7 @@ for node, parent in ((2, 1), (3, 0)):
         silence = t - before[-1] if before else t
         nominal = min(gaps[k + 1] if k + 1 < len(gaps) else 0, t - (oper or 0))
         got = rx.get(p)
-        ck(got is not None and silence >= 0.95 * nominal,
+        ck(got is not None and silence >= 0.95 * nominal and (not max_lat or got - t <= max_lat),
            f"LFN {node}: request {p} at {t / 3600:.2f} h, after {silence / 3600:.2f} h of silence: "
            + (f"received {got - t:.1f} s later" if got is not None else "NOT received"))
 sys.exit(ck.done())
