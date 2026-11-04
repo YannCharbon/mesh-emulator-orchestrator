@@ -462,7 +462,7 @@ Measured on our LFN firmware (`nanostack-efr32fg25-freertos` README, "LFN EM2 fl
 | Key | `efr32fg25-soc.ini` (FFN, HW5) | `efr32fg25-lfn.ini` (our LFN) | Measured |
 | --- | --- | --- | --- |
 | `radio.listen_ma`, `receive_ma`, `cca_ma` | 6.0 | 4.13 | RX plateau of a listening window 6.16–6.38 mA chip total (mean 6.27) − EM1 2.145; an FFN's is 8.1 mA (MCU in EM1 at 97.5 MHz) |
-| `radio.tx_ma` at +10 dBm | 35.75 (`@3`: 35.29) | 33.26 | TX plateau 35.4 mA chip total (2 frames; 608 µC per frame with its CCA, set-up and the RX for the ACK) − 2.145; other levels scaled by 0.9425 [I] |
+| `radio.tx_ma` at +10 dBm | 35.75 (`@3`: 35.29) | 33.26 | TX plateau 35.4 mA chip total (2 frames; 608 µC is the median charge of a wake that contained a transmission, with its CCA, set-up and the RX for the ACK: 12.4 ms of TX, most probably two frames; the formula of the root repo's `LFN_Capabilities_and_Power.md` gives about 283 µC per frame) − 2.145; other levels scaled by 0.9425 [I] |
 | `mcu.deep_sleep_ma` | 0.0070 | 0.0070 | above |
 | `mcu.deep_wake_us`, `deep_wake_ma` | datasheet | 260 µs, 0.73 mA | set-up of a listening wake, first sample above 0.2 mA to the RX plateau: 0.26 ms, 0.19 µC above the floor (kit 440290182; 0.4 ms, 0.5 µC on 440235509) |
 | `radio_transitions` `listen_off` | — | 90 µs, 0.78 mA | teardown, RX plateau to the last sample above 0.2 mA: 0.09 ms, 0.07 µC (0.2 ms, 0.3 µC on 440235509) |
