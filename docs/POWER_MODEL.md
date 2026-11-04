@@ -101,10 +101,10 @@ The ledger reads this in the conductor, so it works for any program that speaks 
 | Empty ticks per second (median) | 54.7 | 0 |
 | Router current (median, datasheet / HW5 profile) | 7.400 / 8.619 mA | 7.405 / 8.592 mA |
 
-- **What is left once joined, per second:** the protocol timer 20, FHSS about 14 (TX-slot poll `fhss_event_timer_cb` about 8, unicast hop 4, broadcast schedule 2), the radio driver's timers about 5 under `dag_simple`'s traffic. Before a node joins, FHSS polls its TX queue every 10 ms (`DEFAULT_POLL_PERIOD`), so unjoined nodes still wake about 100 times a second. The idle-sleep study's 26–30 wakes/s left out the TX-slot poll and the radio's timers.
+- **What is left once joined, per second:** the protocol timer 20, FHSS about 14 (TX-slot poll `fhss_event_timer_cb` about 8, unicast hop 4, broadcast schedule 2), the radio driver's timers about 5 under `dag_simple`'s traffic. Before a node joins, FHSS polls its TX queue every 10 ms (`DEFAULT_POLL_PERIOD`), so unjoined nodes still wake about 100 times a second (since 2026-11-04 only while a frame waits: §15). The idle-sleep study's 26–30 wakes/s left out the TX-slot poll and the radio's timers.
 - **An FFN's current hardly moves** (−0.03 mA with the HW5 profile): its radio listens all the time and its MCU stays in EM1.
 - **Sums:** Σ state and transition times = run time for every node of every run.
-- **A node with RX off when idle** (`NODE_OPTS_1="-o rx_off_when_idle_after=150"`, seed 1): after 150 s node 1 receives no frame (284 before), 839 frames are lost while off; its radio is off for 145.3 of the last 150 s (listen 2.6 s, TX 2.1 s, CCA 0.07 s), and the MCU sleeps deep 143.6 s of them (§4: no hold once the radio is off). Average over the run 4.52 mA, against 7.64 mA for node 2. With `rx_on_when_idle = false` from the start, node 1 never joins, sleeps deep 95.7 % of the time and averages 0.44 mA (with 103 wakes/s, FHSS's 10 ms poll before joining).
+- **A node with RX off when idle** (`NODE_OPTS_1="-o rx_off_when_idle_after=150"`, seed 1): after 150 s node 1 receives no frame (284 before), 839 frames are lost while off; its radio is off for 145.3 of the last 150 s (listen 2.6 s, TX 2.1 s, CCA 0.07 s), and the MCU sleeps deep 143.6 s of them (§4: no hold once the radio is off). Average over the run 4.52 mA, against 7.64 mA for node 2. With `rx_on_when_idle = false` from the start, node 1 never joins, sleeps deep 95.7 % of the time and averages 0.44 mA (with 103 wakes/s, FHSS's 10 ms poll before joining; §15 for the figures without that poll).
 
 ## 4. Sleep depth: a port-level rule
 
@@ -567,6 +567,40 @@ With the test traffic (10 seeds × 1800 s): 49.6–54.5 µA instead of 74.6–79
 **FFN routers once joined** (`dag_simple`, 10 seeds, window 300–600 s, 140 node runs, median [min–max]): 19.3 [15.7–36.8] wakes/s instead of 37.7 [34.2–49.4]; protocol timer 1.17 [1.09–5.59] instead of 20.0; FHSS 13.7, radio 4.2, frames 0.15 unchanged. The current hardly moves (8.67 mA instead of 8.68 mA): RX listening dominates an FFN. The protocol wakes left come mainly from RPL's slow timer, which is not converted and runs every second while an RPL instance exists (0.89/s per router, seed 1), then the Wi-SUN PA/PC trickles (0.16/s) and the timers of routers still joining.
 
 Reproduce: the runs of §14 and `campaign.sh` with `POWER` set; the window figures come from two runs of each seed that differ only in duration: `sim_utils/vtime/wakes_window.py [--nodes 1] <300 s run> <3600 s run> …` (power.json alone covers the whole run).
+
+### 15.1 RPL's slow timer and the FHSS idle poll (2026-11-04)
+
+Two more changes in the stack (stack `b1914a2`; its `docs/PORTING.md`):
+
+- **The protocol timers' leftovers** (same option, `NANOSTACK_PROTOCOL_TIMERS_SKIP_IDLE`): RPL's slow timer, the PAE authenticator's fast timer, MPL seeds holding messages and the 6LoWPAN high-priority state now say when they next have work. Still every second while active: the border router's own timers, the authenticator's slow timer, ND on the backhaul interface. The bootstrap state machine counter stays at every tick while it runs (it counts calls; counting it in ticks would change the bootstrap timing after a delayed core event, as in `run.sh RESTART`).
+- **GS9, the FHSS TX queue poll** (new option `NANOSTACK_FHSS_POLL_SKIP_IDLE`, default on): before its schedules start, a router polls its TX queue every 10 ms only while a frame waits; a skipped poll is restarted on its 10 ms grid when a frame is queued or the FHSS state changes.
+
+**Behaviour.** `dag_simple` logs are byte-identical to the permanent reference runs with both options on and with both off (10 seeds × 300 s), and to the previous stack at 600 s (3 seeds), in the restart case of `test_lfn_keyreq.sh` and in `test_lfn_join.sh` (900 s) and `test_lfn_mesh.sh` (1800 s), apart from the LFN trace of §15. With both options off, `power.json` is identical to the previous stack's (`dag_simple` 3 seeds × 300 s and the searching routers below). The LFN's current is unchanged (68.2 µA, 1.9 wakes/s, `test_lfn_join.sh` seed 1).
+
+**FFN routers once joined and the border router** (`dag_simple`, 3 seeds, window 300–600 s, median [min–max]):
+
+| | Before | After |
+| --- | --- | --- |
+| Routers (42 node runs): wakes per second | 19.73 [16.24–31.47] | 18.85 [15.33–23.72] |
+| of which protocol timer | 1.17 [1.09–4.98] | 0.29 [0.23–4.47] |
+| of which FHSS | 13.72 [13.72–21.98] | 13.72 [13.16–14.56] |
+| Routers: current | 8666.5 µA | 8666.0 µA |
+| Border router: wakes per second | 29.91 [29.78–30.24] | 21.87 [21.14–22.40] |
+| of which protocol timer | 10.00 | 1.79 [1.18–2.01] |
+| Border router: current | 9040.9 µA | 9035.2 µA |
+
+The routers' highest values come from routers still joining in the window. The protocol wakes left on the routers (seed 1, `NS_PROTOCOL_TIMERS_SKIP_STATS`, per router): the Wi-SUN PA/PC trickles 0.17/s, the bootstrap counter 0.12/s and the PAE supplicant 0.11/s (routers still joining), the IPv6 neighbour cache GC 0.05/s, RPL's DIO and DAO timers 0.03/s, RPL's slow timer 0.02/s (about 0.9/s before), the Wi-SUN seconds timer 0.02/s.
+
+**Routers searching for a network** (seed 1, window 300–600 s, median of the routers):
+
+| Case | Before | After |
+| --- | --- | --- |
+| Two routers, no border router in range (`TOPO` with the one edge `1,2:-50`): wakes per second | 103.7 (FHSS 100.0) | 13.8 (FHSS 0.13) |
+| the same: current | 8358 µA | 8295 µA |
+| `dag_simple`, router 1 with RX off when idle (`NODE_OPTS_1="-o rx_on_when_idle=false"`, never joins): wakes per second | 103.4 (FHSS 100.0) | 13.6 (FHSS 0.14) |
+| the same: current | 971 µA | 859 µA |
+
+A listening router hardly gains (listening dominates); a router with its radio off gains 112 µA. What is left on a searching router: the bootstrap counter, 10 wakes per second (above), and the radio driver's timers, 3.3 per second.
 
 ## 16. LGTKs for the LFN (GS8 stage 3, 2026-10-29)
 
