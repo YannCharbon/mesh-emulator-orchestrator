@@ -84,7 +84,7 @@ struct med_lock {
 };
 
 static struct {
-    bool given, tuning, central;
+    bool given, tuning, central, mode_given;
     bool has_tx_ref;
     float tx_ref, lock_snr, capture_db;
     const char *log_path;
@@ -125,7 +125,7 @@ void med_set_mode(const char *arg)
         med.central = true;
     else
         FATAL(1, "--medium: expected legacy or central: %s", arg);
-    med.given = true;
+    med.given = med.mode_given = true;
 }
 
 void med_set_tx_ref(const char *arg)
@@ -158,6 +158,13 @@ bool med_options_given(void)
 bool med_tuning_given(void)
 {
     return med.tuning;
+}
+
+// Virtual time: the central medium unless --medium=legacy (docs/MEDIUM.md §1)
+void med_default_central(void)
+{
+    if (!med.mode_given)
+        med.central = true;
 }
 
 bool med_central(void)

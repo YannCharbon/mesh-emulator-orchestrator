@@ -321,8 +321,9 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --power-out=FILE          the power report (default power.json)\n");
     fprintf(stream, "  --power-log=FILE          also log every state interval of every node\n");
     fprintf(stream, "  --power-cell=MAH[:V[:EFF]] battery life for this cell (capacity, voltage, converter efficiency)\n");
-    fprintf(stream, "  --medium=legacy|central   virtual time: who decides reception: each radio (legacy, the\n");
-    fprintf(stream, "                            default) or the server (central; docs/MEDIUM.md)\n");
+    fprintf(stream, "  --medium=legacy|central   virtual time: who decides reception: the server (central, the\n");
+    fprintf(stream, "                            default; docs/MEDIUM.md) or each radio (legacy: the behaviour\n");
+    fprintf(stream, "                            of the permanent reference runs)\n");
     fprintf(stream, "  --medium-tx-ref=DBM       central: link values are the received power when the sender\n");
     fprintf(stream, "                            transmits at DBM (default: whatever its TX power)\n");
     fprintf(stream, "  --medium-lock-snr=DB      central: lowest SINR at which a receiver locks onto a frame (0)\n");
@@ -661,8 +662,11 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     FATAL_ON((vt_ctls_n || vt_frames_path || vt_drops_n) && !ctxt->vtime_nodes, 1,
              "--vtime-kill, --vtime-start, --vtime-power-up, --vtime-cut, --vtime-link and --vtime-frames need --vtime");
     FATAL_ON(med_options_given() && !ctxt->vtime_nodes, 1, "--medium needs --vtime");
+    if (ctxt->vtime_nodes)
+        med_default_central();
     FATAL_ON(med_tuning_given() && !med_central(), 1,
-             "--medium-tx-ref, --medium-lock-snr, --medium-capture-db and --medium-log need --medium=central");
+             "--medium-tx-ref, --medium-lock-snr, --medium-capture-db and --medium-log need the central medium "
+             "(not --medium=legacy)");
     // The ledger follows each node's radio and MCU without gaps (a node
     // powered up late: its ledger starts at its first wake)
     for (int i = 0; i < vt_ctls_n; i++)

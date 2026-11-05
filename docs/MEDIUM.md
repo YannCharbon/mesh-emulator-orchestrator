@@ -1,18 +1,18 @@
 # Central radio medium (EM4): design for implementers
 
-Plan and rationale: the root repo's `documents/pre-study/investigation/Investigation_Nanostack_Emulator.md` §5 (P2, "Target architecture") and `STATUS.md` EM4. This note fixes the interfaces of the MVP so that the server side and the radio side can be built in parallel. Scope: **virtual time only** (`wssimserver --vtime`, in-process nodes on the simulation port). Wall-clock mode and the split programs keep today's behaviour.
+Plan and rationale: the root repo's `documents/pre-study/investigation/Investigation_Nanostack_Emulator.md` §5 (P2, "Target architecture") and `STATUS.md` EM4. This note fixes the interfaces of the MVP so that the server side and the radio side can be built in parallel. Scope: **virtual time only** (`wssimserver --vtime`, in-process nodes on the simulation port), where it is the default since the gate passed (§8). Wall-clock mode and the split programs keep the per-radio behaviour.
 
 ## 1. What changes
 
 Until EM4, each radio decides reception alone: the server relays a frame to the sender's graph neighbours at the sender's TX start, and the receiver draws a loss from its link's RSSI (`phy_rf_rx_now()`), keeps the first frame and drops any frame that arrives while it receives, and its CCA looks at the state of the neighbours in its own neighbour table (shared memory `/wssimcca`).
 
-With the central medium (`wssimserver --medium=central`):
+With the central medium (the default with `--vtime`; `--medium=central` says it explicitly):
 
 - **The server decides every physical outcome:** the power each receiver gets, whether the receiver locks onto the frame, capture by a stronger frame, the interference over the frame, and success or loss at the frame's end (one draw per frame and receiver, from the server's seeded streams).
 - **The radio keeps its own state machine** (off, listening, receiving, CSMA, sending) and reports it in shared memory, as today. It no longer draws losses, and its RX end comes from the server's verdict, not from its own airtime timer.
 - **CCA asks the server** for the energy on the channel at that moment, and compares it with the CCA threshold the MAC set.
 
-`--medium=legacy` (the default until the EM4 gate passes, §8) is today's behaviour, byte for byte: the nodes' logs must stay identical to the permanent reference runs.
+`--medium=legacy` (the default until the EM4 gate passed, §8) is the behaviour before EM4, byte for byte: with it, the nodes' logs stay identical to the permanent reference runs, so the non-regression scripts pass it.
 
 ## 2. Physical model
 
@@ -68,8 +68,8 @@ Under `NS_PORT_SIM` and `ns_port_sim_medium()` (`app_wshwsim/sl_rf_driver.c`):
 
 ## 7. Server options and outputs
 
-- `--medium=legacy|central` (virtual time only; refused without `--vtime`).
-- `--medium-tx-ref=DBM`, `--medium-lock-snr=DB`, `--medium-capture-db=DB`.
+- `--medium=legacy|central` (virtual time only; refused without `--vtime`). Default with `--vtime`: `central`.
+- `--medium-tx-ref=DBM`, `--medium-lock-snr=DB`, `--medium-capture-db=DB` (refused with `--medium=legacy`).
 - `--medium-log=FILE`: one line per (frame, receiver) outcome: `t_end_us src dst frame_id outcome rx_dbm sinr_min_db`, outcome one of `ok`, `noise` (lost, no interferer), `interference` (lost with an interferer), `captured`, `below_lock` (heard, not locked: too weak against the noise and interference), `busy` (heard while receiving another frame and not captured), `not_listening`, `tx_abort`, `left`.
 - At the end of the run, a summary line per outcome (totals), and the CCA query count with the number of queries that found a frame on air. The server does not know the radios' CCA thresholds: the busy counts are in the radios' exit lines (`rf medium: N CCA, N busy`).
 - Random: the verdict draws use a stream per receiver, `mix64(seed + mix64(node ID + 1) + K)` with a constant `K` that separates it from the port's and the drift's streams.
@@ -82,7 +82,7 @@ Under `NS_PORT_SIM` and `ns_port_sim_medium()` (`app_wshwsim/sl_rf_driver.c`):
 4. **Where it matters:** `sim_utils/vtime/medium_gate_star.sh`, a border router and 40 routers in its range, in four groups that do not hear each other (`hidden`) and, as a control, all hearing each other (`clique`), with UDP requests to the border router: interference, captures and busy outcomes appear at the border router, more interference in `hidden` than in `clique`, CCA busy counts (from the radios' exit counters; the server only knows how many queries had a frame on air) higher in `clique`; the effect on delivery and join times is reported against legacy.
 5. **LFN suite in central mode:** passes, or each difference is explained.
 
-When the gate passes, `--medium=central` becomes the default with `--vtime` and the non-regression scripts pass `--medium=legacy`, including the LFN tests that start `wssimserver` with options of their own (`test_lfn_mac.sh`, `test_lfn_keyreq.sh`; `medium_lfn_suite.sh` shows a wrapper that reaches them).
+The gate passed: the central medium is the default with `--vtime`. What compares with stored runs passes `--medium=legacy`: `sim_utils/migration/nonreg_dag_simple.sh` (the permanent reference runs), the legacy groups of `medium_gate_dag.sh` and `medium_gate_star.sh`, and the fake-node tests of the conductor's own frame relay in `test_conductor.py`. The LFN suite runs in each mode with one command: `lfn_suite.sh` in the default (central), `medium_lfn_suite.sh` in legacy, through a wrapper of `wssimserver` that also reaches the tests that start it with options of their own (`test_lfn_mac.sh`, `test_lfn_keyreq.sh`).
 
 ## 9. Not in the MVP
 

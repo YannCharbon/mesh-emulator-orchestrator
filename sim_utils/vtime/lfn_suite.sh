@@ -16,6 +16,9 @@
 # the runs whose name matches), KEEP (1: keep the run directories; by
 # default only each run's output, <outdir>/<name>.txt, is kept).
 #
+# The runs use wssimserver's default radio medium, the central one
+# (docs/MEDIUM.md); medium_lfn_suite.sh runs this suite in legacy mode.
+#
 # Every run uses each node's clock drawn within +-20 ppm (--drift-random=20)
 # unless its test sets otherwise. The per-test options are in the job list
 # below; the tests are documented in README.md.

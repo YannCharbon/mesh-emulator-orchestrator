@@ -16,7 +16,7 @@ seed and options: virtual-time runs are deterministic.
 | Emulator | `mesh-emulator-orchestrator` 221177b |
 | Made with | `sim_utils/vtime/campaign.sh build-vt <workdir> <out> 300 1 2 3 4 5 6 7 8 9 10`, on the `tunvt` devices (`run_info.txt` of each seed) |
 | Size | 280 MB, 785 files (`seed1`–`seed10`, `out/` the campaign's outputs, `README.txt` the original note) |
-| Compare | `sim_utils/migration/nonreg_dag_simple.sh build-vt $(pwd) /home/yann/mesh-emulator-rework/reference-runs/dag_simple_b1b9cc5`: the same 10 seeds × 300 s with the current build, each compared with `sim_utils/vtime/compare_logs.py --mask-pointers --mask-source-lines`; exit status 1 on any difference. With `TUN=none` (the default) the logs are identical to these, made on `tunvt0`: only printed heap addresses differ, which the masking hides |
+| Compare | `sim_utils/migration/nonreg_dag_simple.sh build-vt $(pwd) /home/yann/mesh-emulator-rework/reference-runs/dag_simple_b1b9cc5`: the same 10 seeds × 300 s with the current build and the legacy medium (`--medium=legacy`: the central medium, the default in virtual time since EM4, postdates these runs), each compared with `sim_utils/vtime/compare_logs.py --mask-pointers --mask-source-lines`; exit status 1 on any difference. With `TUN=none` (the default) the logs are identical to these, made on `tunvt0`: only printed heap addresses differ, which the masking hides |
 | Regenerate | check out the two commits above, build `build-vt` (`docs/VIRTUAL_TIME.md` §2), then the campaign above; the logs must match the checksums below |
 
 The FAN 1.0 logs have been identical to these at every stack and emulator

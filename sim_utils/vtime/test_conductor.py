@@ -25,6 +25,11 @@ import math  # noqa: E402
 import socket  # noqa: E402
 
 ARGS = None
+# The conductor's own tests relay frames to every graph neighbour at the
+# sender's time, as the legacy medium does; with the central medium (the
+# default with --vtime) the fake nodes' radios, which report no state, would
+# hear nothing.
+LEGACY = "--medium=legacy"
 
 
 class Server:
@@ -153,7 +158,7 @@ PERIODIC_EDGES = [(3, 7), (7, 10), (10, 12), (12, 20), (20, 41), (3, 41), (7, 20
 def run_periodic(seed_env=None):
     nodes = {n: Periodic(n) for n in Periodic.PERIODS}
     env = {"WSSIM_SEED": seed_env} if seed_env is not None else None
-    srv = Server([f"--vtime={len(nodes)}", "--vtime-end=0.05"] + graph_args(PERIODIC_EDGES), env)
+    srv = Server([f"--vtime={len(nodes)}", "--vtime-end=0.05", LEGACY] + graph_args(PERIODIC_EDGES), env)
     d = Driver(ARGS.sock, nodes)
     d.connect()
     shm = "/dev/shm/wssimcca." + ARGS.sock.replace("/", "_")
@@ -210,7 +215,7 @@ def test_ties():
         3: {0: ([], 1000), 1000: (["from3"], NEVER)},
     }
     nodes = {n: Script(n) for n in (1, 2, 3)}
-    srv = Server(["--vtime=3", "--vtime-end=1"] + graph_args([(1, 3), (2, 3)]))
+    srv = Server(["--vtime=3", "--vtime-end=1", LEGACY] + graph_args([(1, 3), (2, 3)]))
     d = Driver(ARGS.sock, nodes)
     d.connect()
     log = d.run()
@@ -234,7 +239,7 @@ def test_replacement():
         3: {0: ([], 500), 500: (["poke"], NEVER)},
     }
     nodes = {n: Script(n) for n in (1, 2, 3)}
-    srv = Server(["--vtime=3"] + graph_args([(1, 2), (2, 3)]))
+    srv = Server(["--vtime=3", LEGACY] + graph_args([(1, 2), (2, 3)]))
     d = Driver(ARGS.sock, nodes)
     d.connect()
     log = d.run()
@@ -291,7 +296,7 @@ class Staggered(Behaviour):
 def test_many_nodes():
     ids = list(range(1, 501))
     edges = [(ids[i], ids[(i + 1) % len(ids)]) for i in range(len(ids))]
-    srv = Server([f"--vtime={len(ids)}", "--vtime-end=0.02"] + graph_args(edges))
+    srv = Server([f"--vtime={len(ids)}", "--vtime-end=0.02", LEGACY] + graph_args(edges))
     d = Driver(ARGS.sock, {n: Staggered(n) for n in ids})
     d.connect()
     log = d.run(timeout=60)
@@ -302,7 +307,7 @@ def test_many_nodes():
 
 def test_loop_cap():
     nodes = {n: PingPong(n) for n in (1, 2)}
-    srv = Server(["--vtime=2"])
+    srv = Server(["--vtime=2", LEGACY])
     d = Driver(ARGS.sock, nodes)
     d.connect()
     log = d.run(timeout=120)
@@ -348,7 +353,7 @@ def test_kill_cut_link():
     node 2 stopped at 6 ms (its connection closed, no more wakes);
     --vtime-link: accepted on an existing link, refused on a missing one."""
     nodes = {n: Forever(n) for n in (1, 2, 3)}
-    srv = Server(["--vtime=3", "--vtime-end=0.01", "--vtime-cut=1:2:0.003", "--vtime-kill=2:0.006",
+    srv = Server(["--vtime=3", "--vtime-end=0.01", LEGACY, "--vtime-cut=1:2:0.003", "--vtime-kill=2:0.006",
                   "--vtime-link=1:3:0.002:-80"] + graph_args([(1, 2), (1, 3)]))
     d = Driver(ARGS.sock, nodes)
     d.connect()
@@ -362,7 +367,7 @@ def test_kill_cut_link():
     check(d.quit == {1, 3}, f"xq: {d.quit}")
     out = srv.output()
     check("node 2 stopped at 0.006000 s" in out and "link 1-3 at -80.0 dBm" in out, "events not logged")
-    srv = Server(["--vtime=2", "--vtime-end=0.01", "--vtime-link=1:2:0.002:-80"] + graph_args([(1, 3)]))
+    srv = Server(["--vtime=2", "--vtime-end=0.01", LEGACY, "--vtime-link=1:2:0.002:-80"] + graph_args([(1, 3)]))
     d = Driver(ARGS.sock, {n: Forever(n) for n in (1, 2)})
     d.connect()
     d.run()
@@ -383,7 +388,7 @@ def test_start():
     one is stopped then; it runs first at 5 ms and its timers count from
     there."""
     nodes = {n: Forever(n) for n in (1, 2)}
-    srv = Server(["--vtime=2", "--vtime-end=0.01", "--vtime-start=2:0.005"] + graph_args([(1, 2)]))
+    srv = Server(["--vtime=2", "--vtime-end=0.01", LEGACY, "--vtime-start=2:0.005"] + graph_args([(1, 2)]))
     d = Driver(ARGS.sock, nodes)
     d.connect()
     s2 = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -413,7 +418,7 @@ def test_power_up():
     3.5 ms with start_us 3.5 ms; it does not run or hear before (node 1's
     frames at 1, 2 and 3 ms do not reach it), then runs and hears as usual."""
     nodes = {1: Forever(1), 2: Late(2)}
-    srv = Server(["--vtime=2", "--vtime-end=0.006", "--vtime-power-up=2:0.0035"] + graph_args([(1, 2)]))
+    srv = Server(["--vtime=2", "--vtime-end=0.006", LEGACY, "--vtime-power-up=2:0.0035"] + graph_args([(1, 2)]))
     d = Driver(ARGS.sock, nodes)
     d.connect()
     log = d.run()
@@ -484,7 +489,7 @@ def test_wallclock():
 
 def run_drift(opts, seed="1"):
     nodes = {n: Periodic(n) for n in Periodic.PERIODS}
-    srv = Server([f"--vtime={len(nodes)}", "--vtime-end=0.01", *opts] + graph_args(PERIODIC_EDGES),
+    srv = Server([f"--vtime={len(nodes)}", "--vtime-end=0.01", LEGACY, *opts] + graph_args(PERIODIC_EDGES),
                  {"WSSIM_SEED": seed})
     d = Driver(ARGS.sock, nodes)
     d.connect()
@@ -603,11 +608,20 @@ def empty_wakes(d, nid):
 def test_medium_options():
     for args, msg in ((["--medium=central"], "needs --vtime"),
                       (["--vtime=1", "--medium=bogus"], "legacy or central"),
-                      (["--vtime=1", "--medium-log=/dev/null"], "need --medium=central"),
-                      (["--vtime=1", "--medium=legacy", "--medium-capture-db=3"], "need --medium=central"),
+                      (["--vtime=1", "--medium=legacy", "--medium-log=/dev/null"], "need the central medium"),
+                      (["--vtime=1", "--medium=legacy", "--medium-capture-db=3"], "need the central medium"),
                       (["--vtime=1", "--medium=central", "--medium-lock-snr=x"], "expected a number")):
         srv = Server(args)
         check(srv.wait() != 0 and msg in srv.output(), f"{args} accepted, or no \"{msg}\"")
+    # The default with --vtime is the central medium: the welcome says so, and
+    # the medium's tuning options need no --medium
+    srv = Server(["--vtime=1", "--vtime-end=0.001", "--medium-capture-db=3"])
+    d = Driver(ARGS.sock, {1: Script(1)})
+    d.connect()
+    d.run()
+    check(srv.wait() == 0, "server exit (default medium)")
+    check(d.welcome_flags == {1: WELCOME_MEDIUM} and "medium: central" in srv.output(),
+          f"default welcome flags {d.welcome_flags}")
     # Legacy (explicit): no medium flag in the welcome, frames with no medium fields
     Script.TABLE = {1: {0: (["a"], NEVER)}, 2: {0: ([], NEVER)}}
     srv = Server(["--vtime=2", "--medium=legacy"] + graph_args([(1, 2)]))

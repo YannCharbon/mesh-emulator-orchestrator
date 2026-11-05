@@ -30,6 +30,7 @@ void med_set_capture_db(const char *arg);       // --medium-capture-db=DB
 void med_set_log(const char *path);             // --medium-log=FILE
 bool med_options_given(void);                   // any of the above
 bool med_tuning_given(void);                    // any of them but --medium
+void med_default_central(void);                 // --vtime: central unless --medium=legacy
 bool med_central(void);
 
 // The run. cca_shm: the "/wssimcca" table (SIM_SHM_CCA_STRIDE bytes per
