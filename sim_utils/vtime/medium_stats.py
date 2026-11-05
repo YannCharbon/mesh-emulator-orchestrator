@@ -63,7 +63,7 @@ MILESTONES = [   # as sim_utils/migration/analyze.py
 ]
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 BRTREE = re.compile(r'brtree t=(\S+) nodes=(\d+)')
-LOST = re.compile(r'was lost due to ([a-z_ ]+?)(?: \(|$|,)')
+LOST = re.compile(r'was lost(?: due to|:) ([a-z_ ]+?)(?: \(| by |$|,)')   # legacy, central
 UDP = re.compile(r'test-udp (tx to|rx from) (\S+): ([QR]) (\d+)')
 
 
