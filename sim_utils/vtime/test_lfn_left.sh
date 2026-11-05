@@ -35,8 +35,14 @@
 #   - the MAC: every drop is at an ACK timeout (the MAC's no-ACK confirm at the
 #     same microsecond; a drop elsewhere, e.g. a queued uplink turning the
 #     radio off while a deferred window close waits for a frame, is a MAC
-#     fault), and the frame is sent again (same MAC handle) unless
-#     that was its last attempt;
+#     fault), and the MAC goes on with the frame: sent again (same MAC
+#     handle), its restart blocked by a busy CCA (CSMA attempts with that
+#     handle), its last attempt (the MAC's "MAC tx fail" at the drop), or
+#     expired in the MAC's queue at its restart (more than 10 s since its
+#     first attempt, DATA_REQUEST_TIMEOUT_NORMAL_PRIORITY_S: the adaptation
+#     layer requests it again under a new handle, at once). A frame that
+#     ends otherwise (no later use of its handle, no expiry) was dropped
+#     silently: a fault;
 #   - no stuck RX: the LFN received frames after its last drop;
 #   - window closes during a frame: at least MIN_DEFERRED frames that started
 #     inside one of the LFN's windows ended after its scheduled close; none
@@ -131,6 +137,9 @@ windows = []          # (open us, close us)
 no_ack = set()
 handle_at = {}        # µs of a "waiting_ack=0" line -> handle
 resent = collections.defaultdict(list)    # handle -> µs of each "waiting_ack=1" (a frame sent)
+attempts = collections.defaultdict(list)  # handle -> µs of each "waiting_ack=0" (CSMA done or the exchange's end)
+tx_fail = set()       # µs of the MAC's "MAC tx fail" (the frame's last attempt failed)
+pd_req = []           # µs of each "mcps_pd_data_request" (a frame read from the queue)
 for t, m in lines(f'{out}/node2.log'):
     if r := re.search(r'(?:LFN window open: slot|LFN broadcast window open|LFN discovery window open).* for (\d+) us', m):
         windows.append((us(t), us(t) + int(r[1])))
@@ -138,9 +147,14 @@ for t, m in lines(f'{out}/node2.log'):
         windows.append((us(t), us(t) + PENDING_HOLD_US))
     elif m.endswith(' no_ack'):
         no_ack.add(us(t))
+    elif m.endswith('MAC tx fail'):
+        tx_fail.add(us(t))
+    elif m.endswith('mcps_pd_data_request'):
+        pd_req.append(us(t))
     elif r := re.search(r'waiting_ack=(\d), tx_completed=\d, handle=(\d+)', m):
         if r[1] == '0':
             handle_at[us(t)] = int(r[2])
+            attempts[int(r[2])].append(us(t))
         else:
             resent[int(r[2])].append(us(t))
 windows.sort()
@@ -194,16 +208,39 @@ ck(True, f'ledger: LFN receive time {rx_us / 1e6:.3f} s; the frames left {left_u
 
 # The MAC: the drops at an ACK timeout, and the frames sent again
 at_ack = [fid for fid in left if fid in drop_lfn and drop_lfn[fid][3] in no_ack]
-again = 0
+REUSE_US = 60_000_000    # MAC handles are 8-bit: a handle's uses within this belong to one frame
+EXPIRE_US = 10_000_000   # DATA_REQUEST_TIMEOUT_NORMAL_PRIORITY_S
+def first_use(h, t):
+    """µs of the first attempt of the frame that holds handle h at t"""
+    xs = sorted(x for x in attempts[h] + resent[h] if t - REUSE_US < x <= t)
+    first = xs[-1] if xs else t
+    for a, b in zip(reversed(xs[:-1]), reversed(xs[1:])):
+        if b - a > REUSE_US / 2:
+            break
+        first = a
+    return first
+fate = collections.Counter()
+silent = []
 for fid in at_ack:
     t = drop_lfn[fid][3]
     h = handle_at.get(t)
-    if h is not None and any(x > t for x in resent[h]):
-        again += 1
+    later = lambda xs: [x for x in xs if t < x < t + REUSE_US]
+    if h is not None and later(resent[h]):
+        fate['sent again'] += 1
+    elif t in tx_fail:
+        fate['last attempt'] += 1
+    elif h is not None and later(attempts[h]):
+        fate['restart, CCA busy'] += 1
+    else:
+        # The next frame read from the queue: the expired one, re-requested
+        nxt = [x for x in pd_req if x > t]
+        if h is not None and nxt and nxt[0] - first_use(h, t) > EXPIRE_US:
+            fate['expired in the queue, requested again'] += 1
+        else:
+            silent.append((fid, h, t / 1e6))
 ck(len(at_ack) == len(left), f'MAC: {len(at_ack)} of {len(left)} drops at the MAC\'s ACK timeout (no_ack at the '
    'same microsecond)')
-ck(again >= len(at_ack) - 2, f'MAC: {again} of {len(at_ack)} frames sent again after the drop (same handle; the '
-   'others were their last attempt)')
+ck(not silent, f'MAC: after each drop the MAC went on with the frame {dict(fate)}; dropped silently {silent[:3]}')
 
 # No stuck RX
 last = max((drop_lfn[f][3] for f in left if f in drop_lfn), default=0)
