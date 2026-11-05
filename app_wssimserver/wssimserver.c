@@ -19,6 +19,7 @@
 #include "sim_proto.h"
 #include "ns_port_sim.h"
 #include "sim_power.h"
+#include "sim_medium.h"
 
 #define MAX_NODES SIM_MAX_NODES
 
@@ -318,6 +319,15 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --power-out=FILE          the power report (default power.json)\n");
     fprintf(stream, "  --power-log=FILE          also log every state interval of every node\n");
     fprintf(stream, "  --power-cell=MAH[:V[:EFF]] battery life for this cell (capacity, voltage, converter efficiency)\n");
+    fprintf(stream, "  --medium=legacy|central   virtual time: who decides reception: each radio (legacy, the\n");
+    fprintf(stream, "                            default) or the server (central; docs/MEDIUM.md)\n");
+    fprintf(stream, "  --medium-tx-ref=DBM       central: link values are the received power when the sender\n");
+    fprintf(stream, "                            transmits at DBM (default: whatever its TX power)\n");
+    fprintf(stream, "  --medium-lock-snr=DB      central: lowest SINR at which a receiver locks onto a frame (0)\n");
+    fprintf(stream, "  --medium-capture-db=DB    central: a frame this much stronger, during the SHR of the frame\n");
+    fprintf(stream, "                            being received, captures the receiver (6)\n");
+    fprintf(stream, "  --medium-log=FILE         central: one line per frame and receiver (t_end_us src dst\n");
+    fprintf(stream, "                            frame_id outcome rx_dbm sinr_min_db)\n");
     exit(exit_code);
 }
 
@@ -338,6 +348,11 @@ enum {
     OPT_VTIME_FRAMES,
     OPT_VTIME_LINK,
     OPT_VTIME_DROP,
+    OPT_MEDIUM,
+    OPT_MEDIUM_TX_REF,
+    OPT_MEDIUM_LOCK_SNR,
+    OPT_MEDIUM_CAPTURE_DB,
+    OPT_MEDIUM_LOG,
 };
 
 // --vtime-drop=SRC:DST:SEQ:FROM:TO: frames from SRC with this MAC sequence
@@ -499,6 +514,11 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "vtime-frames", required_argument, 0, OPT_VTIME_FRAMES },
         { "vtime-link", required_argument, 0, OPT_VTIME_LINK },
         { "vtime-drop", required_argument, 0, OPT_VTIME_DROP },
+        { "medium", required_argument, 0, OPT_MEDIUM },
+        { "medium-tx-ref", required_argument, 0, OPT_MEDIUM_TX_REF },
+        { "medium-lock-snr", required_argument, 0, OPT_MEDIUM_LOCK_SNR },
+        { "medium-capture-db", required_argument, 0, OPT_MEDIUM_CAPTURE_DB },
+        { "medium-log", required_argument, 0, OPT_MEDIUM_LOG },
         { 0,       0,                 0,   0  }
     };
     uint64_t mask[MAX_NODES / 64];
@@ -600,6 +620,21 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             case OPT_VTIME_FRAMES:
                 vt_frames_path = optarg;
                 break;
+            case OPT_MEDIUM:
+                med_set_mode(optarg);
+                break;
+            case OPT_MEDIUM_TX_REF:
+                med_set_tx_ref(optarg);
+                break;
+            case OPT_MEDIUM_LOCK_SNR:
+                med_set_lock_snr(optarg);
+                break;
+            case OPT_MEDIUM_CAPTURE_DB:
+                med_set_capture_db(optarg);
+                break;
+            case OPT_MEDIUM_LOG:
+                med_set_log(optarg);
+                break;
             case 'h':
                 print_help(stdout, 0);
                 break;
@@ -615,6 +650,9 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     FATAL_ON((drift_specs_n || drift_random_ppb) && !ctxt->vtime_nodes, 1, "--drift needs --vtime");
     FATAL_ON((vt_ctls_n || vt_frames_path || vt_drops_n) && !ctxt->vtime_nodes, 1,
              "--vtime-kill, --vtime-start, --vtime-cut, --vtime-link and --vtime-frames need --vtime");
+    FATAL_ON(med_options_given() && !ctxt->vtime_nodes, 1, "--medium needs --vtime");
+    FATAL_ON(med_tuning_given() && !med_central(), 1,
+             "--medium-tx-ref, --medium-lock-snr, --medium-capture-db and --medium-log need --medium=central");
     // The ledger follows each node's radio and MCU without gaps
     for (int i = 0; i < vt_ctls_n; i++)
         FATAL_ON(pwr_enabled() && (vt_ctls[i].kind == VT_CTL_KILL || vt_ctls[i].kind == VT_CTL_START), 1,
@@ -857,11 +895,13 @@ static void serve(struct ctxt *ctxt)
  * Virtual time: the conductor (docs/VIRTUAL_TIME.md §3).
  *
  * Events are kept in a binary min-heap ordered by (time, node ID, sequence).
- * An event is either a frame delivery (frame != NULL; one event per
- * receiver, all sharing one reference-counted copy of the frame) or a node's
- * deadline (frame == NULL). A node has at most one live deadline: its
- * sequence number is in vt_deadline_seq[node], and any other deadline entry
- * of that node in the heap is stale and skipped when it reaches the head.
+ * An event is a frame delivery (one event per receiver, all sharing one
+ * reference-counted copy of the frame), a node's deadline, or, with the
+ * central medium (docs/MEDIUM.md), the verdict of a frame a receiver locked
+ * onto, computed when the event is popped. A node has at most one live
+ * deadline: its sequence number is in vt_deadline_seq[node], and any other
+ * deadline entry of that node in the heap is stale and skipped when it
+ * reaches the head.
  */
 #define VT_SAME_TIME_CAP 100000
 
@@ -871,11 +911,16 @@ struct vt_frame {
     uint8_t data[];
 };
 
+enum { VT_EV_DEADLINE, VT_EV_FRAME, VT_EV_VERDICT };
+
 struct vt_event {
     uint64_t t;
     uint64_t seq;
     int node;
-    struct vt_frame *frame;     // NULL: the node's deadline
+    int kind;                   // VT_EV_*
+    struct vt_frame *frame;     // FRAME
+    float rx_dbm;               // FRAME, central medium: the power at this receiver
+    struct med_lock *lock;      // VERDICT
 };
 
 static struct vt_event *vt_heap;
@@ -888,7 +933,8 @@ static uint64_t vt_now;                         // time of the last wake
 static uint64_t vt_wakes, vt_frames_in, vt_frames_out;
 static uint64_t vt_cut[MAX_NODES][MAX_NODES / 64]; // vt_cut[dst]: senders it no longer hears
 static bool vt_late_first[MAX_NODES];           // a started instance's first "xi" may be in the past
-static uint8_t *vt_cca_shm;                     // the CCA shared memory (3 bytes per node)
+static uint64_t vt_verdicts_out, vt_senses;
+static uint8_t *vt_cca_shm;                     // the CCA shared memory (SIM_SHM_CCA_STRIDE bytes per node)
 
 static bool vt_before(const struct vt_event *a, const struct vt_event *b)
 {
@@ -899,9 +945,8 @@ static bool vt_before(const struct vt_event *a, const struct vt_event *b)
     return a->seq < b->seq;
 }
 
-static void vt_push(uint64_t t, int node, struct vt_frame *frame)
+static void vt_push_ev(struct vt_event ev)
 {
-    struct vt_event ev = { .t = t, .seq = vt_seq++, .node = node, .frame = frame };
     size_t i, parent;
 
     if (vt_heap_len == vt_heap_cap) {
@@ -909,10 +954,11 @@ static void vt_push(uint64_t t, int node, struct vt_frame *frame)
         vt_heap = realloc(vt_heap, vt_heap_cap * sizeof(*vt_heap));
         FATAL_ON(!vt_heap, 1, "realloc: %m");
     }
-    if (!frame)
-        vt_deadline_seq[node] = ev.seq;
-    else
-        frame->refs++;
+    ev.seq = vt_seq++;
+    if (ev.kind == VT_EV_DEADLINE)
+        vt_deadline_seq[ev.node] = ev.seq;
+    else if (ev.kind == VT_EV_FRAME)
+        ev.frame->refs++;
     for (i = vt_heap_len++; i > 0; i = parent) {
         parent = (i - 1) / 2;
         if (!vt_before(&ev, &vt_heap[parent]))
@@ -920,6 +966,11 @@ static void vt_push(uint64_t t, int node, struct vt_frame *frame)
         vt_heap[i] = vt_heap[parent];
     }
     vt_heap[i] = ev;
+}
+
+static void vt_push(uint64_t t, int node, struct vt_frame *frame)
+{
+    vt_push_ev((struct vt_event){ .t = t, .node = node, .kind = frame ? VT_EV_FRAME : VT_EV_DEADLINE, .frame = frame });
 }
 
 static struct vt_event vt_pop(void)
@@ -952,7 +1003,7 @@ static void vt_unref(struct vt_frame *frame)
 
 static bool vt_stale(const struct vt_event *ev)
 {
-    return !ev->frame && vt_deadline_seq[ev->node] != ev->seq;
+    return ev->kind == VT_EV_DEADLINE && vt_deadline_seq[ev->node] != ev->seq;
 }
 
 static void vt_drop_stale(void)
@@ -1013,6 +1064,55 @@ static bool vt_drop(int src, int dst, const struct sim_frame_hdr *hdr)
     return false;
 }
 
+// Whether dst hears frames from src: a connected graph neighbour, not cut,
+// and this frame not dropped for it
+static bool vt_hears(struct ctxt *ctxt, int src, int dst, const struct sim_frame_hdr *hdr)
+{
+    return bitmap_get(dst, ctxt->node_graph[src], MAX_NODES / 64) && slot_of_node[dst] &&
+           !bitmap_get(src, vt_cut[dst], MAX_NODES / 64) && !vt_drop(src, dst, hdr);
+}
+
+// Central medium (docs/MEDIUM.md §3): the frame goes on air; each receiver
+// that locks onto it gets it now ("xx" with SIM_FRAME_MEDIUM and its power)
+// and a verdict at its end.
+static void vt_queue_frame_medium(struct ctxt *ctxt, int src, void *msg, int len)
+{
+    struct sim_frame_hdr *hdr = msg;
+    struct vt_frame *frame = NULL;
+    struct med_frame *f;
+    struct med_lock *lock;
+    float rx_dbm;
+    int i;
+
+    med_tx_start(src, vt_now);
+    f = med_frame_start(src, hdr, vt_now);
+    if (!f)
+        return;
+    for (i = 0; i < vt_num_nodes; i++)
+        if (vt_hears(ctxt, src, vt_nodes[i], hdr))
+            med_add_rx(f, vt_nodes[i]);
+    hdr->flags = SIM_FRAME_MEDIUM;
+    hdr->frame_id = med_frame_id(f);
+    for (i = 0; i < med_num_rx(f); i++) {
+        lock = med_decide(f, i, vt_now, &rx_dbm);
+        if (!lock)
+            continue;
+        if (!frame) {
+            frame = malloc(sizeof(*frame) + len);
+            FATAL_ON(!frame, 1, "malloc: %m");
+            frame->refs = 1;    // held until the loop ends
+            frame->len = len;
+            memcpy(frame->data, msg, len);
+        }
+        vt_push_ev((struct vt_event){ .t = vt_now, .node = med_rx_node(f, i), .kind = VT_EV_FRAME,
+                                      .frame = frame, .rx_dbm = rx_dbm });
+        vt_push_ev((struct vt_event){ .t = med_frame_end(f), .node = med_rx_node(f, i), .kind = VT_EV_VERDICT,
+                                      .lock = lock });
+    }
+    if (frame)
+        vt_unref(frame);
+}
+
 // Queue a frame from src for its neighbours at the current time.
 static void vt_queue_frame(struct ctxt *ctxt, int src, void *msg, int len)
 {
@@ -1031,14 +1131,20 @@ static void vt_queue_frame(struct ctxt *ctxt, int src, void *msg, int len)
             fprintf(vt_frames_file, "%02x", psdu[i]);
         fputc('\n', vt_frames_file);
     }
+    hdr->flags = 0;
+    hdr->frame_id = 0;
+    hdr->rx_dbm = 0;
+    if (med_central()) {
+        vt_queue_frame_medium(ctxt, src, msg, len);
+        return;
+    }
     frame = malloc(sizeof(*frame) + len);
     FATAL_ON(!frame, 1, "malloc: %m");
     frame->refs = 1;            // held until the loop below ends
     frame->len = len;
     memcpy(frame->data, msg, len);
     for (i = 0; i < vt_num_nodes; i++)
-        if (bitmap_get(vt_nodes[i], ctxt->node_graph[src], MAX_NODES / 64) && slot_of_node[vt_nodes[i]] &&
-            !bitmap_get(src, vt_cut[vt_nodes[i]], MAX_NODES / 64) && !vt_drop(src, vt_nodes[i], hdr))
+        if (vt_hears(ctxt, src, vt_nodes[i], hdr))
             vt_push(vt_now, vt_nodes[i], frame);
     vt_unref(frame);
 }
@@ -1073,61 +1179,104 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
             vt_late_first[node] = false;
             return 0;
         }
-        if (len >= 2 && !memcmp(buf, "xx", 2))
+        if (len >= 2 && !memcmp(buf, "xx", 2)) {
             vt_queue_frame(ctxt, node, buf, len);
-        else if (pwr_enabled() && len == sizeof(struct sim_radio_report) && !memcmp(buf, "xr", 2))
+        } else if (med_central() && len == sizeof(struct sim_sense) && !memcmp(buf, "xs", 2)) {
+            // CCA: answered at once, the node waits for it
+            struct sim_sense *sense = (struct sim_sense *)buf;
+
+            sense->dbm = med_sense(node, sense->channel, vt_now);
+            vt_senses++;
+            if (vt_send(node, sense, sizeof(*sense)))
+                return -1;
+        } else if (pwr_enabled() && len == sizeof(struct sim_radio_report) && !memcmp(buf, "xr", 2)) {
             pwr_radio(node, vt_now, (const struct sim_radio_report *)buf);
-        else if (pwr_enabled() && len == sizeof(struct nsim_wake) && !memcmp(buf, "xc", 2))
+        } else if (pwr_enabled() && len == sizeof(struct nsim_wake) && !memcmp(buf, "xc", 2)) {
             pwr_wake_report(node, (const struct nsim_wake *)buf);
-        else
+        } else {
             WARN("node %d: unexpected message (%zd bytes, \"%.2s\"), dropped", node, len, buf);
+        }
     }
 }
 
-// Wake node at time t: "xa", then its frames due at t in queue order (they
-// are at the head of the heap). The advance says how many frames follow: the
-// node may read the "xa" before they are in its socket, as they are separate
+// Wake node at time t: "xa", then its messages due at t in queue order (they
+// are at the head of the heap): frames, and with the central medium, the
+// verdicts, computed now. The advance says how many messages follow: the node
+// may read the "xa" before they are in its socket, as they are separate
 // messages, so it waits for exactly that many.
 static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
 {
-    static struct vt_frame **frames;
-    static size_t frames_cap;
+    static struct vt_msg {
+        struct vt_frame *frame;     // NULL: verdict
+        float rx_dbm;
+        struct sim_verdict verdict;
+    } *msgs;
+    static size_t msgs_cap;
+    static uint8_t out[sizeof(buf)];
     struct nsim_advance adv = { .magic = "xa", .now_us = t };
+    struct sim_frame_hdr *hdr;
     struct vt_event ev;
-    size_t num = 0, i;
+    size_t num = 0, num_frames = 0, i;
+    uint32_t delivered = 0;     // the last medium frame delivered
     int ret = 0;
 
+    vt_now = t;
     while (vt_heap_len && vt_heap[0].t == t && vt_heap[0].node == node) {
         ev = vt_pop();
-        if (!ev.frame) {
+        if (ev.kind == VT_EV_DEADLINE) {
             if (ev.seq == vt_deadline_seq[node])
                 vt_deadline_seq[node] = 0; // consumed: the node reports its next one
             continue;
         }
-        if (num == frames_cap) {
-            frames_cap = frames_cap ? frames_cap * 2 : 64;
-            frames = realloc(frames, frames_cap * sizeof(*frames));
-            FATAL_ON(!frames, 1, "realloc: %m");
+        if (num == msgs_cap) {
+            msgs_cap = msgs_cap ? msgs_cap * 2 : 64;
+            msgs = realloc(msgs, msgs_cap * sizeof(*msgs));
+            FATAL_ON(!msgs, 1, "realloc: %m");
         }
-        frames[num++] = ev.frame;
+        if (ev.kind == VT_EV_VERDICT) {
+            if (!med_verdict(ev.lock, t, &msgs[num].verdict))
+                continue;
+            msgs[num++].frame = NULL;
+            continue;
+        }
+        msgs[num].frame = ev.frame;
+        msgs[num++].rx_dbm = ev.rx_dbm;
+        num_frames++;
     }
-    FATAL_ON(num > UINT16_MAX, 1, "node %d: %zu frames due at %" PRIu64 " us", node, num, t);
+    FATAL_ON(num > UINT16_MAX, 1, "node %d: %zu messages due at %" PRIu64 " us", node, num, t);
     adv.frames = num;
-    vt_now = t;
     vt_wakes++;
     if (pwr_enabled())
-        pwr_wake(node, t, num);
+        pwr_wake(node, t, num_frames);
     if (vt_send(node, &adv, sizeof(adv)))
         ret = -1;
     for (i = 0; i < num; i++) {
-        if (!ret && vt_send(node, frames[i]->data, frames[i]->len))
+        if (!msgs[i].frame) {
+            if (!ret && vt_send(node, &msgs[i].verdict, sizeof(msgs[i].verdict)))
+                ret = -1;
+            vt_verdicts_out++;
+            continue;
+        }
+        hdr = (struct sim_frame_hdr *)msgs[i].frame->data;
+        if (!ret && hdr->flags & SIM_FRAME_MEDIUM) {
+            // The power at this receiver, in a copy: the frame is shared
+            memcpy(out, msgs[i].frame->data, msgs[i].frame->len);
+            ((struct sim_frame_hdr *)out)->rx_dbm = msgs[i].rx_dbm;
+            delivered = hdr->frame_id;
+            if (vt_send(node, out, msgs[i].frame->len))
+                ret = -1;
+        } else if (!ret && vt_send(node, msgs[i].frame->data, msgs[i].frame->len)) {
             ret = -1;
+        }
         vt_frames_out++;
-        vt_unref(frames[i]);
+        vt_unref(msgs[i].frame);
     }
     if (ret)
         return ret;
-    return vt_read_until_idle(ctxt, node);
+    ret = vt_read_until_idle(ctxt, node);
+    if (delivered)
+        med_delivered(node, delivered);
+    return ret;
 }
 
 static void vt_log_head(void)
@@ -1138,7 +1287,8 @@ static void vt_log_head(void)
     // The heap array is not sorted; its first entries are a good sample.
     for (i = 0; i < n; i++)
         WARN("  t=%llu us node=%d seq=%llu %s%s", (unsigned long long)vt_heap[i].t, vt_heap[i].node,
-             (unsigned long long)vt_heap[i].seq, vt_heap[i].frame ? "frame" : "deadline",
+             (unsigned long long)vt_heap[i].seq,
+             vt_heap[i].kind == VT_EV_FRAME ? "frame" : vt_heap[i].kind == VT_EV_VERDICT ? "verdict" : "deadline",
              vt_stale(&vt_heap[i]) ? " (stale)" : "");
 }
 
@@ -1203,8 +1353,12 @@ static void vt_kill(int node)
     conn_close(slot_of_node[node]);
     vt_deadline_seq[node] = 0;  // its deadline is stale; its frames are skipped
     // Its radio, as its neighbours' CCA sees it: off, not in the state it had
-    if (vt_cca_shm)
-        vt_cca_shm[node * 3] = 7;   // DRVSTATE_OFF (app_wshwsim/sl_rf_driver.c)
+    if (vt_cca_shm) {
+        vt_cca_shm[node * SIM_SHM_CCA_STRIDE] = 7;   // DRVSTATE_OFF (app_wshwsim/sl_rf_driver.c)
+        vt_cca_shm[node * SIM_SHM_CCA_STRIDE + 3] = SIM_RADIO_OFF;
+    }
+    if (med_central())
+        med_node_stopped(node, vt_now);
 }
 
 static int vt_ctl_run(struct ctxt *ctxt, struct vt_ctl *c, struct nsim_welcome *welcome)
@@ -1283,6 +1437,10 @@ static int vt_run(struct ctxt *ctxt)
         welcome.flags |= NSIM_WELCOME_POWER;
         pwr_start(vt_num_nodes, vt_nodes);
     }
+    if (med_central()) {
+        welcome.flags |= NSIM_WELCOME_MEDIUM;
+        med_start(welcome.seed, vt_cca_shm, nodes_infos_flat_map);
+    }
 
     if (vt_frames_path) {
         vt_frames_file = fopen(vt_frames_path, "w");
@@ -1314,8 +1472,10 @@ static int vt_run(struct ctxt *ctxt)
         // Events of a node that is stopped (frames, its old deadline)
         while (vt_heap_len && !slot_of_node[vt_heap[0].node]) {
             struct vt_event ev = vt_pop();
-            if (ev.frame)
+            if (ev.kind == VT_EV_FRAME)
                 vt_unref(ev.frame);
+            else if (ev.kind == VT_EV_VERDICT)
+                med_lock_free(ev.lock);
             vt_drop_stale();
         }
         if (vt_ctls_next < vt_ctls_n && (!vt_heap_len || vt_ctls[vt_ctls_next].t <= vt_heap[0].t) &&
@@ -1368,6 +1528,11 @@ out:
          (unsigned long long)vt_frames_out);
     INFO("virtual time: wall %.3f s, %.6f wall s per simulated s", wall,
          vt_now ? wall / (vt_now / 1e6) : 0.0);
+    if (med_central()) {
+        INFO("medium: %llu verdicts delivered, %llu CCA queries answered", (unsigned long long)vt_verdicts_out,
+             (unsigned long long)vt_senses);
+        med_finish();
+    }
     // A run that reached its end time lasted until then; any other, until
     // its last wake.
     if (pwr_enabled())

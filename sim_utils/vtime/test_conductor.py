@@ -19,7 +19,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fake_node import (Behaviour, Driver, Model, TestError, NEVER, HELLO, FRAME,  # noqa: E402
-                       HELLO_VTIME)
+                       HELLO_VTIME, frame_msg, frame_unpack, shm_path, RADIO_OFF, RADIO_IDLE,
+                       RADIO_LISTEN, RADIO_RECEIVE, WELCOME_MEDIUM, FRAME_MEDIUM)
+import math  # noqa: E402
 import socket  # noqa: E402
 
 ARGS = None
@@ -439,15 +441,15 @@ def test_wallclock():
     check(closed_by_server(bad), "virtual-time hello accepted in wall-clock mode")
     s1, s2, s3 = (raw_hello(n, 0) for n in (1, 2, 3))
     time.sleep(0.2)
-    s2.send(FRAME.pack(b"xx", 3, 0, 7, 0xFFFF, 10, 4) + b"abc")
+    s2.send(frame_msg(b"abc", seq=7))
     for s in (s1, s3):
         s.settimeout(5)
         msg = s.recv(100)
-        _, ln, _, seq, src, _, _ = FRAME.unpack_from(msg)
-        check(src == 2 and seq == 7 and msg[FRAME.size:] == b"abc", f"relay: {msg!r}")
-    s1.send(FRAME.pack(b"xx", 1, 0, 1, 0, 10, 4) + b"z")
+        h = frame_unpack(msg)
+        check(h["src"] == 2 and h["seq"] == 7 and msg[FRAME.size:] == b"abc", f"relay: {msg!r}")
+    s1.send(frame_msg(b"z", seq=1, src=0))
     s2.settimeout(5)
-    check(FRAME.unpack_from(s2.recv(100))[4] == 1, "relay 1 -> 2")
+    check(frame_unpack(s2.recv(100))["src"] == 1, "relay 1 -> 2")
     s3.setblocking(False)
     try:
         s3.recv(100)
@@ -494,6 +496,253 @@ def test_drift():
     check(len(set(r1.values())) == len(r1), f"--drift-random: equal draws {r1}")
 
 
+# --- Central medium (docs/MEDIUM.md §8 item 2) ------------------------------
+
+NOISE_DBM = -153.930645 + 30 + 4
+PAYLOAD = b"p" * 20             # 20 bytes: with the defaults, 36 bytes on air
+AIRTIME = 36 * 8 * 1000000 // 50000     # 5760 us
+SHR_US = 10 * 8 * 1000000 // 50000      # 1600 us
+BITS = 8 * (2 + 20 + 4)
+
+
+class Radio(Behaviour):
+    """A radio for the central medium. ACTIONS: {time: [action, ...]} with
+    ("tx", fields), ("sense", chan) and ("radio", state, chan). It listens on
+    channel 0 from the start; a frame the medium delivers puts it in RECEIVE,
+    a verdict back to LISTEN, as the real radio does."""
+
+    def __init__(self, nid, actions=None, period=None):
+        super().__init__(nid)
+        self.actions = actions or {}
+        self.period = period        # (first, every, count): ("tx", {}) at these times
+
+    def times(self):
+        t = set(self.actions)
+        if self.period:
+            first, every, count = self.period
+            t |= {first + k * every for k in range(count)}
+        return t
+
+    def run(self, t, frames, first=False):
+        self.now = t
+        self.out = []
+        if first:
+            self.radio = (RADIO_LISTEN, 0)
+        for fr in frames:
+            if fr[0] == "xv":
+                self.radio = (RADIO_LISTEN, self.radio[1])
+            else:
+                self.radio = (RADIO_RECEIVE, self.radio[1])
+        acts = list(self.actions.get(t, []))
+        if self.period and t in self.times() - set(self.actions):
+            acts.append(("tx", {}))
+        for a in acts:
+            if a[0] == "tx":
+                self.send(PAYLOAD, **a[1])
+            elif a[0] == "sense":
+                self.sense(a[1])
+            elif a[0] == "radio":
+                self.radio = (a[1], a[2])
+        later = [x for x in self.times() if x > t]
+        return self.out, min(later) if later else NEVER
+
+
+def medium_run(radios, links, opts=(), seed="1", hook=None):
+    """links: [(a, b, rssi or None)]. Returns the driver, the server output
+    and the --medium-log lines as tuples."""
+    mlog = os.path.join(ARGS.logdir, "medium.log")
+    if os.path.exists(mlog):
+        os.unlink(mlog)
+    g = sum((["-g", f"{a},{b}" + ("" if r is None else f":{r}")] for a, b, r in links), [])
+    srv = Server([f"--vtime={len(radios)}", "--medium=central", f"--medium-log={mlog}", *opts] + g,
+                 {"WSSIM_SEED": seed})
+    d = Driver(ARGS.sock, radios)
+    d.on_wake = hook
+    d.connect()
+    d.run(timeout=60)
+    status = srv.wait(60)
+    out = srv.output()
+    check(status == 0, f"server exit {status}:\n{out[-2000:]}")
+    check(all(f & WELCOME_MEDIUM for f in d.welcome_flags.values()), f"welcome flags {d.welcome_flags}")
+    with open(mlog) as f:
+        lines = [ln.split() for ln in f]
+    rows = [(int(a[0]), int(a[1]), int(a[2]), int(a[3]), a[4], float(a[5]), float(a[6])) for a in lines]
+    return d, out, rows
+
+
+def got(radio, kind):
+    return [(t, m) for t, k, m in radio.rx if k == kind]
+
+
+def test_medium_options():
+    for args, msg in ((["--medium=central"], "needs --vtime"),
+                      (["--vtime=1", "--medium=bogus"], "legacy or central"),
+                      (["--vtime=1", "--medium-log=/dev/null"], "need --medium=central"),
+                      (["--vtime=1", "--medium=legacy", "--medium-capture-db=3"], "need --medium=central"),
+                      (["--vtime=1", "--medium=central", "--medium-lock-snr=x"], "expected a number")):
+        srv = Server(args)
+        check(srv.wait() != 0 and msg in srv.output(), f"{args} accepted, or no \"{msg}\"")
+    # Legacy (explicit): no medium flag in the welcome, frames with no medium fields
+    Script.TABLE = {1: {0: (["a"], NEVER)}, 2: {0: ([], NEVER)}}
+    srv = Server(["--vtime=2", "--medium=legacy"] + graph_args([(1, 2)]))
+    d = Driver(ARGS.sock, {n: Script(n) for n in (1, 2)})
+    d.connect()
+    d.run()
+    check(srv.wait() == 0, "server exit")
+    check(d.welcome_flags == {1: 0, 2: 0}, f"legacy welcome flags {d.welcome_flags}")
+
+
+def test_medium_overlap():
+    """Two overlapping frames at one receiver, from hidden terminals (1 and 3
+    are not neighbours, both reach 2): 2 locks onto the first, the second is
+    interference; the first is lost at equal power, kept 30 dB above. 3's CCA
+    before it sends hears nothing."""
+    for rssi3, ok, cause in ((-60, 0, 2), (-90, 1, 0)):
+        r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {1500: [("sense", 0), ("tx", {})]})}
+        d, out, rows = medium_run(r, [(1, 2, -60), (3, 2, rssi3)])
+        xx, xv = got(r[2], "xx"), got(r[2], "xv")
+        check([(t, m["src"], m["frame_id"], m["flags"], m["rx_dbm"]) for t, m in xx] ==
+              [(1000, 1, 1, FRAME_MEDIUM, -60.0)], f"frames at 2: {xx}")
+        check(len(xv) == 1 and xv[0][0] == 1000 + AIRTIME and xv[0][1]["frame_id"] == 1, f"verdicts at 2: {xv}")
+        v = xv[0][1]
+        sinr = -60 - 10 * math.log10(10 ** (NOISE_DBM / 10) + 10 ** (rssi3 / 10))
+        check(v["ok"] == ok and v["cause"] == cause and abs(v["sinr_db"] - sinr) < 0.01, f"verdict {v}, sinr {sinr}")
+        check(abs(r[3].sensed[0][2] - NOISE_DBM) < 0.01, f"CCA of the hidden terminal: {r[3].sensed}")
+        want = {(1000 + AIRTIME, 1, 2, 1, "ok" if ok else "interference"), (1500 + AIRTIME, 3, 2, 2, "busy")}
+        check({x[:5] for x in rows} == want, f"medium log {rows}")
+        check(not got(r[1], "xx") and not got(r[3], "xx"), "1 or 3 heard the other")
+
+
+def test_medium_capture():
+    """A frame 20 dB stronger captures the receiver during the first frame's
+    SHR (1600 us), not after; one 3 dB stronger never does."""
+    for delay, rssi3, captured in ((SHR_US - 1, -60, True), (SHR_US, -60, False), (500, -77, False)):
+        r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {1000 + delay: [("tx", {})]})}
+        d, out, rows = medium_run(r, [(1, 2, -80), (3, 2, rssi3)])
+        xx = [(t, m["frame_id"]) for t, m in got(r[2], "xx")]
+        xv = [(t, m["frame_id"], m["ok"]) for t, m in got(r[2], "xv")]
+        outcomes = {(x[3], x[4]) for x in rows}
+        if captured:
+            check(xx == [(1000, 1), (1000 + delay, 2)], f"capture: frames {xx}")
+            check(xv == [(1000 + delay + AIRTIME, 2, 1)], f"capture: verdicts {xv}")
+            check(outcomes == {(1, "captured"), (2, "ok")}, f"capture: log {rows}")
+        else:
+            check(xx == [(1000, 1)], f"no capture ({delay}, {rssi3}): frames {xx}")
+            check(xv == [(1000 + AIRTIME, 1, 0)], f"no capture ({delay}, {rssi3}): verdicts {xv}")
+            check(outcomes == {(1, "interference"), (2, "busy")}, f"no capture: log {rows}")
+
+
+def test_medium_half_duplex():
+    """2 sends while it receives 1's frame: its lock ends, no verdict."""
+    r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2, {2000: [("tx", {})]})}
+    d, out, rows = medium_run(r, [(1, 2, -60)])
+    check(len(got(r[2], "xx")) == 1 and not got(r[2], "xv"), f"2 got {r[2].rx}")
+    check((1000 + AIRTIME, 1, 2, 1, "tx_abort") in {x[:5] for x in rows}, f"log {rows}")
+    check("tx_abort       1" in out, "summary")
+
+
+def test_medium_not_listening():
+    """1 sends on channel 3: 2 listens on 5, 3 is idle on 3, 4 listens on 3,
+    5 listens on 3 but gets the frame below the noise floor."""
+    r = {1: Radio(1, {1000: [("tx", {"chan": 3})]}), 2: Radio(2, {0: [("radio", RADIO_LISTEN, 5)]}),
+         3: Radio(3, {0: [("radio", RADIO_IDLE, 3)]}), 4: Radio(4, {0: [("radio", RADIO_LISTEN, 3)]}),
+         5: Radio(5, {0: [("radio", RADIO_LISTEN, 3)]})}
+    d, out, rows = medium_run(r, [(1, 2, -60), (1, 3, -60), (1, 4, -60), (1, 5, -125)])
+    check([n for n in r if got(r[n], "xx")] == [4], f"receivers {[(n, r[n].rx) for n in r]}")
+    check({(x[2], x[4]) for x in rows} == {(2, "not_listening"), (3, "not_listening"), (4, "ok"),
+                                           (5, "below_lock")}, f"log {rows}")
+    check(got(r[4], "xx")[0][1]["chan"] == 3, "channel")
+
+
+def test_medium_same_time():
+    """A frame ends at t at 2 and another starts at t: 2 gets the verdict, then
+    the new frame, in one wake; they do not overlap."""
+    r = {1: Radio(1, {1000 + AIRTIME: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {1000: [("tx", {})]})}
+    d, out, rows = medium_run(r, [(1, 2, -60), (3, 2, -60)])
+    wake = [f for t, n, f, o in d.log if n == 2 and t == 1000 + AIRTIME]
+    check(wake == [(("xv", 1, 1, 0), (1, PAYLOAD))], f"2 at {1000 + AIRTIME}: {wake}")
+    check({x[4] for x in rows} == {"ok"}, f"log {rows}")
+
+
+def test_medium_cca():
+    """CCA energy: the sender's power on its channel at a neighbour (whatever
+    the neighbour's MAC knows of it), the noise floor on another channel, after
+    the frame, at a node that does not hear the sender, and at the sender."""
+    r = {1: Radio(1, {1000: [("tx", {"chan": 3})], 2000: [("sense", 3)]}),
+         2: Radio(2, {0: [("radio", RADIO_IDLE, 3)], 2000: [("sense", 3), ("sense", 4)], 7000: [("sense", 3)]}),
+         3: Radio(3, {2000: [("sense", 3)]})}
+    d, out, rows = medium_run(r, [(1, 2, -70), (2, 3, -50)])
+    e = 10 * math.log10(10 ** (NOISE_DBM / 10) + 10 ** (-70 / 10))
+    s2 = [dbm for t, c, dbm in r[2].sensed]
+    check(len(s2) == 3 and abs(s2[0] - e) < 0.01 and abs(s2[1] - NOISE_DBM) < 0.01 and abs(s2[2] - NOISE_DBM) < 0.01,
+          f"CCA at 2: {r[2].sensed}")
+    check(abs(r[3].sensed[0][2] - NOISE_DBM) < 0.01 and abs(r[1].sensed[0][2] - NOISE_DBM) < 0.01,
+          f"CCA at 3 {r[3].sensed}, at 1 {r[1].sensed}")
+    check("5 CCA queries, 1 with a frame on air" in out, "CCA summary")
+
+
+def test_medium_tx_ref():
+    """--medium-tx-ref=0: a frame sent at +10 dBm arrives 10 dB above the
+    link's value; a link without a value stays perfect (0 dBm)."""
+    r = {1: Radio(1, {1000: [("tx", {"tx_dbm": 10})]}), 2: Radio(2), 3: Radio(3)}
+    d, out, rows = medium_run(r, [(1, 2, -60), (1, 3, None)], opts=["--medium-tx-ref=0"])
+    check(got(r[2], "xx")[0][1]["rx_dbm"] == -50 and got(r[3], "xx")[0][1]["rx_dbm"] == 0,
+          f"{r[2].rx} {r[3].rx}")
+
+
+def test_medium_left():
+    """A receiver stopped (--vtime-kill) or whose radio is off by the next
+    decision leaves its frame: no verdict, outcome "left". The kill writes
+    DRVSTATE_OFF and SIM_RADIO_OFF in the node's 4-byte entry."""
+    seen = {}
+
+    def hook(drv, nid, t):
+        if nid == 1 and t == 4000:
+            with open(shm_path(ARGS.sock), "rb") as f:
+                seen["shm"] = f.read(4 * 6)
+    r = {1: Radio(1, {1000: [("tx", {})], 4000: []}), 2: Radio(2), 3: Radio(3, {3000: [("tx", {})]}),
+         4: Radio(4, {2000: [("radio", RADIO_OFF, 0)]}), 5: Radio(5, {0: [("radio", RADIO_IDLE, 7)]})}
+    d, out, rows = medium_run(r, [(1, 2, -60), (1, 4, -60), (3, 4, -60)], opts=["--vtime-kill=2:0.002"], hook=hook)
+    check(not got(r[2], "xv") and not got(r[4], "xv"), "a verdict after leaving")
+    check({(x[2], x[3], x[4]) for x in rows} == {(2, 1, "left"), (4, 1, "left"), (4, 2, "not_listening")},
+          f"log {rows}")
+    shm = seen.get("shm", b"")
+    check(shm[8:12] == bytes([7, 0, 0, RADIO_OFF]) and shm[20:24] == bytes([2, 7, 0, RADIO_IDLE]),
+          f"shared memory {shm.hex()}")
+
+
+def curve_run(seed):
+    rssis = {2: -108, 3: -110, 4: -112}
+    n = 1000
+    r = {1: Radio(1, period=(1000, 6000, n))}
+    r.update({k: Radio(k) for k in rssis})
+    d, out, rows = medium_run(r, [(1, k, v) for k, v in rssis.items()], seed=seed)
+    return rssis, n, r, rows
+
+
+def test_medium_curve():
+    """Without interference, the loss rate at three RSSI values is today's
+    curve (the radio's formula), and the verdict's SINR is RSSI - noise."""
+    rssis, n, r, rows = curve_run("1")
+    for k, rssi in rssis.items():
+        ber = min(0.5, 0.5 * math.exp(0.5 * (NOISE_DBM - rssi)))
+        fer = 1 - (1 - ber) ** BITS
+        xv = [m for t, m in got(r[k], "xv")]
+        check(len(xv) == n, f"node {k}: {len(xv)} verdicts")
+        lost = sum(1 for m in xv if not m["ok"])
+        sigma = math.sqrt(n * fer * (1 - fer))
+        check(abs(lost - n * fer) < 4.5 * sigma, f"RSSI {rssi}: {lost} lost of {n}, expected {n * fer:.0f}")
+        check(all(m["cause"] in (0, 1) and abs(m["sinr_db"] - (rssi - NOISE_DBM)) < 0.01 for m in xv),
+              f"node {k}: causes or SINR")
+        print(f"     RSSI {rssi} dBm: {lost}/{n} lost, curve {n * fer:.1f} (sigma {sigma:.1f})")
+
+
+def test_medium_determinism():
+    rows = [curve_run(s)[3] for s in ("5", "5", "6")]
+    check(rows[0] == rows[1], "same seed, different medium logs")
+    check(rows[0] != rows[2], "another seed, same medium log")
+
+
 def main():
     global ARGS
     ap = argparse.ArgumentParser()
@@ -529,6 +778,17 @@ def main():
         ("drift", test_drift),
         ("kill_cut_link", test_kill_cut_link),
         ("start", test_start),
+        ("medium_options", test_medium_options),
+        ("medium_overlap", test_medium_overlap),
+        ("medium_capture", test_medium_capture),
+        ("medium_half_duplex", test_medium_half_duplex),
+        ("medium_not_listening", test_medium_not_listening),
+        ("medium_same_time", test_medium_same_time),
+        ("medium_cca", test_medium_cca),
+        ("medium_tx_ref", test_medium_tx_ref),
+        ("medium_left", test_medium_left),
+        ("medium_curve", test_medium_curve),
+        ("medium_determinism", test_medium_determinism),
     ]
     for name, fn in tests:
         if ARGS.k not in name:

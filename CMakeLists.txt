@@ -347,6 +347,7 @@ if(COMPILE_SIMULATION_TOOLS)
     # compiled here, without the port's HAVE_BACKTRACE, as it was before.
     add_executable(wssimserver
         ${NANOSTACK_ROOT}/port/posix/common/log.c
+        app_wssimserver/sim_medium.c
         app_wssimserver/sim_power.c
         app_wssimserver/wssimserver.c)
     target_include_directories(wssimserver PRIVATE

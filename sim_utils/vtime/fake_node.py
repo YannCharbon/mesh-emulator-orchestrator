@@ -13,9 +13,20 @@ conductor rules (order by time, node ID, sequence; "xi" replaces the deadline;
 frames to the graph neighbours at the sender's time). A run over the real
 conductor must give the same event log as the model.
 
+Central medium (docs/MEDIUM.md): a behaviour may set `radio` to
+(state, channel), which the driver writes to the node's 4-byte entry of the
+shared memory "/wssimcca" before it answers each wake; it may send frames with
+header fields (`send(payload, chan=..., ...)`) and CCA queries
+(`sense(chan)`, answered before the node's "xi", the result in `sensed`).
+Verdicts ("xv") reach `on_verdict()`, and in the event log they appear among
+the frames as ("xv", frame_id, ok, cause). `rx` keeps every message received,
+with the frames' headers.
+
 Used by test_conductor.py; no dependencies outside the standard library.
 """
 import heapq
+import mmap
+import os
 import select
 import socket
 import struct
@@ -24,8 +35,44 @@ NEVER = 2**64 - 1
 HELLO_VTIME = 0x0001
 
 HELLO = struct.Struct("=2sHHH")      # magic, node_id, flags, reserved
-FRAME = struct.Struct("=2sHHHHBB")   # magic, len, chan, seq, src, shr_len, fcs_len
+# magic, len, chan, seq, src, shr_len, fcs_len, phr_len, tx_dbm, flags, reserved,
+# rate_bps, frame_id, rx_dbm
+FRAME = struct.Struct("=2sHHHHBBBbBBIIf")
+FRAME_FIELDS = ("magic", "len", "chan", "seq", "src", "shr_len", "fcs_len", "phr_len", "tx_dbm", "flags",
+                "reserved", "rate_bps", "frame_id", "rx_dbm")
+FRAME_MEDIUM = 0x01
+VERDICT = struct.Struct("=2sBBIff")  # magic, ok, cause, frame_id, rx_dbm, sinr_db
+SENSE = struct.Struct("=2sHf")       # magic, channel, dbm
 WELCOME = struct.Struct("=2sHIQiI")  # magic, version, flags, seed, drift_ppb, reserved
+PROTO_VERSION = 3
+WELCOME_POWER = 0x0001
+WELCOME_MEDIUM = 0x0002
+# Defaults of the frames the fake nodes send: SHR 10 bytes, PHR 2, FCS 4, 50 kbit/s
+FRAME_DEFAULTS = {"chan": 0, "shr_len": 10, "phr_len": 2, "fcs_len": 4, "tx_dbm": 0, "rate_bps": 50000}
+
+# enum sim_radio_state, and the driver states of app_wshwsim/sl_rf_driver.c
+# that go with them (byte 0 of the shared-memory entry)
+RADIO_OFF, RADIO_IDLE, RADIO_LISTEN, RADIO_RECEIVE, RADIO_TX = range(5)
+DRVSTATE = {RADIO_OFF: 7, RADIO_IDLE: 2, RADIO_LISTEN: 3, RADIO_RECEIVE: 5, RADIO_TX: 4}
+SHM_STRIDE = 4
+
+
+def frame_msg(payload, seq=0, src=0xFFFF, **fields):
+    """An "xx" message; fields override FRAME_DEFAULTS."""
+    f = dict(FRAME_DEFAULTS, **fields)
+    return FRAME.pack(b"xx", len(payload), f["chan"], seq, src, f["shr_len"], f["fcs_len"], f["phr_len"],
+                      f["tx_dbm"], 0, 0, f["rate_bps"], 0, 0.0) + payload
+
+
+def frame_unpack(msg):
+    return dict(zip(FRAME_FIELDS, FRAME.unpack_from(msg)))
+
+
+def shm_path(sock_path):
+    """The file of the server's "/wssimcca" (sim_shm_name())."""
+    if sock_path == "/tmp/sim_socket":
+        return "/dev/shm/wssimcca"
+    return "/dev/shm/wssimcca." + sock_path.replace("/", "_")
 ADVANCE = struct.Struct("=2s3HQ")    # magic, frames, reserved[2], now_us
 IDLE = struct.Struct("=2s3HQ")       # magic, reserved[3], next_us
 
@@ -47,6 +94,9 @@ class Behaviour:
         self.timers = {}            # name -> absolute deadline (us)
         self.out = []
         self.now = 0
+        self.radio = None           # (state, channel) for the shared memory, or None
+        self.sensed = []            # (time, channel, dBm) of each "xs" answered
+        self.rx = []                # (time, kind, fields) of each message received
 
     def set_timer(self, name, t):
         self.timers[name] = t
@@ -54,8 +104,14 @@ class Behaviour:
     def cancel(self, name):
         self.timers.pop(name, None)
 
-    def send(self, payload):
-        self.out.append(payload.encode() if isinstance(payload, str) else payload)
+    def send(self, payload, **fields):
+        """A frame; fields (FRAME_DEFAULTS' names) only for the central medium."""
+        payload = payload.encode() if isinstance(payload, str) else payload
+        self.out.append((payload, fields) if fields else payload)
+
+    def sense(self, chan):
+        """A CCA query, in order with the frames sent in this run."""
+        self.out.append(("xs", chan))
 
     def start(self):
         pass
@@ -64,6 +120,9 @@ class Behaviour:
         pass
 
     def on_frame(self, src, payload):
+        pass
+
+    def on_verdict(self, frame_id, ok, cause):
         pass
 
     def next_deadline(self):
@@ -76,8 +135,11 @@ class Behaviour:
         self.out = []
         if first:
             self.start()
-        for src, payload in frames:
-            self.on_frame(src, payload)
+        for fr in frames:
+            if fr[0] == "xv":
+                self.on_verdict(*fr[1:])
+            else:
+                self.on_frame(*fr)
         # Like the port: timers due at t fire after the frames, by deadline then name.
         while True:
             due = sorted((d, n) for n, d in self.timers.items() if d <= t)
@@ -169,6 +231,8 @@ class Driver:
         self.on_wake = None            # hook(driver, node, t) -> "close" to drop the node
         self.on_close = None           # hook(driver, node) when the conductor closes a node
         self.socks = {}
+        self.welcome_flags = {}         # node -> flags of its welcome
+        self.shm = None
 
     def connect(self):
         for nid in sorted(self.nodes):
@@ -177,24 +241,55 @@ class Driver:
             s.send(HELLO.pack(b"xh", nid, HELLO_VTIME if self.vtime_flag else 0, 0))
             self.socks[nid] = s
 
+    def _write_radio(self, nid):
+        radio = self.nodes[nid].radio
+        if radio is None:
+            return
+        if self.shm is None:
+            with open(shm_path(self.sock_path), "r+b") as f:
+                self.shm = mmap.mmap(f.fileno(), 0)
+        state, chan = radio
+        self.shm[nid * SHM_STRIDE:(nid + 1) * SHM_STRIDE] = struct.pack("=BHB", DRVSTATE[state], chan, state)
+
     def _reply(self, nid, t, frames, first=False):
-        out, nxt = self.nodes[nid].run(t, frames, first)
-        self.log.append((t, nid, tuple(frames), tuple(out)))
+        node = self.nodes[nid]
+        out, nxt = node.run(t, frames, first)
+        self.log.append((t, nid, tuple(frames), tuple(o for o in out if not (isinstance(o, tuple) and o[0] == "xs"))))
+        self._write_radio(nid)
         s = self.socks[nid]
         for i, p in enumerate(out):
-            s.send(FRAME.pack(b"xx", len(p), 0, i, 0xFFFF, 10, 4) + p)   # src is set by the server
+            if isinstance(p, tuple) and p[0] == "xs":
+                s.send(SENSE.pack(b"xs", p[1], 0.0))
+                s.settimeout(10)
+                msg = s.recv(65536)
+                s.settimeout(None)
+                if len(msg) != SENSE.size or msg[:2] != b"xs":
+                    raise TestError(f"node {nid}: expected the answer to \"xs\", got {msg[:2]!r} ({len(msg)} bytes)")
+                _, chan, dbm = SENSE.unpack(msg)
+                node.sensed.append((t, chan, dbm))
+                continue
+            payload, fields = p if isinstance(p, tuple) else (p, {})
+            s.send(frame_msg(payload, seq=i, **fields))     # src is set by the server
         s.send(IDLE.pack(b"xi", 0, 0, 0, nxt))
 
-    def _recv_frame(self, nid, s):
+    def _recv_frame(self, nid, s, t=None):
         msg = s.recv(65536)
+        if msg[:2] == b"xv":
+            if len(msg) != VERDICT.size:
+                raise TestError(f"node {nid}: verdict of {len(msg)} bytes")
+            _, ok, cause, frame_id, rx_dbm, sinr = VERDICT.unpack(msg)
+            self.nodes[nid].rx.append((t, "xv", {"frame_id": frame_id, "ok": ok, "cause": cause,
+                                                 "rx_dbm": rx_dbm, "sinr_db": sinr}))
+            return ("xv", frame_id, ok, cause)
         if msg[:2] != b"xx":
             raise TestError(f"node {nid}: expected a frame, got {msg[:2]!r}")
-        magic, ln, chan, seq, src, _, _ = FRAME.unpack_from(msg)
-        if ln != len(msg) - FRAME.size:
-            raise TestError(f"node {nid}: frame length {ln}, message {len(msg)}")
-        if src not in self.nodes:
-            raise TestError(f"node {nid}: frame from unknown src {src}")
-        return src, msg[FRAME.size:]
+        hdr = frame_unpack(msg)
+        if hdr["len"] != len(msg) - FRAME.size:
+            raise TestError(f"node {nid}: frame length {hdr['len']}, message {len(msg)}")
+        if hdr["src"] not in self.nodes:
+            raise TestError(f"node {nid}: frame from unknown src {hdr['src']}")
+        self.nodes[nid].rx.append((t, "xx", dict(hdr, payload=msg[FRAME.size:])))
+        return hdr["src"], msg[FRAME.size:]
 
     def run(self, timeout=30.0):
         """Serve until every node got "xq" or was closed."""
@@ -214,15 +309,16 @@ class Driver:
                     continue
                 magic = msg[:2]
                 if magic == b"xw":
-                    _, version, _, seed, drift, _ = WELCOME.unpack(msg)
-                    if version != 2:
+                    _, version, flags, seed, drift, _ = WELCOME.unpack(msg)
+                    if version != PROTO_VERSION:
                         raise TestError(f"node {nid}: welcome version {version}")
+                    self.welcome_flags[nid] = flags
                     self.seed = seed
                     self.drift[nid] = drift
                     self._reply(nid, 0, [], first=True)
                 elif magic == b"xa":
                     _, count, _, _, t = ADVANCE.unpack(msg)
-                    frames = [self._recv_frame(nid, s) for _ in range(count)]
+                    frames = [self._recv_frame(nid, s, t) for _ in range(count)]
                     if self.on_wake and self.on_wake(self, nid, t) == "close":
                         s.close()
                         self.closed.add(nid)
@@ -234,4 +330,7 @@ class Driver:
                     raise TestError(f"node {nid}: unexpected message {magic!r} ({len(msg)} bytes)")
         for s in self.socks.values():
             s.close()
+        if self.shm is not None:
+            self.shm.close()
+            self.shm = None
         return self.log
