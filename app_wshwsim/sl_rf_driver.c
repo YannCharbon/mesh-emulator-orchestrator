@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 #define _GNU_SOURCE
+#include <errno.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -163,6 +165,37 @@ static bool rf_off_state_enabled = true;
 static bool rf_backoff_rx_off;
 static bool rf_csma_deaf;
 
+/* Central medium (docs/MEDIUM.md §6), virtual time only: the server decides
+ * which frame the radio locks onto ("xx" with SIM_FRAME_MEDIUM) and whether
+ * it is received ("xv" at the frame's end); CCA asks it for the energy on
+ * the channel ("xs"). The radio draws no loss and arms no airtime RX timer.
+ * Off in wall-clock builds and with --medium=legacy. */
+static bool rf_medium;
+static uint32_t rf_medium_frame_id;     // the frame held (locked onto), 0 if none
+static uint16_t rf_medium_src;
+static float rf_medium_rx_dbm;
+static struct {
+    unsigned long ok;                   // verdict ok: handed to the MAC
+    unsigned long lost[SIM_RX_CAUSES];  // verdict not ok, by cause
+    unsigned long captured;             // dropped for a stronger frame
+    unsigned long refused;              // locked by the server, but the radio could not receive
+    unsigned long left;                 // dropped without a verdict (radio off, backup timer)
+    unsigned long verdicts_ignored;     // "xv" for a frame not held
+    unsigned long frames_ignored;       // "xx" without SIM_FRAME_MEDIUM
+    unsigned long cca, cca_busy;
+} rf_medium_stats;
+/* CCA threshold in dBm: the MAC sets it before each CCA with
+ * PHY_EXTENSION_SET_CHANNEL_CCA_THRESHOLD (Wi-SUN: the automatic threshold of
+ * rcp/mac/ieee802154/mac_cca_threshold.c, -60 dBm at start, lowered to the
+ * weakest RSSI received on the channel minus 1 dB, down to -100 dBm). Until
+ * then, -85 dBm, the EFR32FG25 firmware's default (RAIL_PHY_CCA_THRESHOLD_DBM).
+ * Used by the central medium only; the channel is busy when its energy is at
+ * or above the threshold. */
+#define RF_CCA_THRESHOLD_DEFAULT_DBM (-85)
+static int8_t rf_cca_threshold_dbm = RF_CCA_THRESHOLD_DEFAULT_DBM;
+static unsigned long rf_cca_threshold_sets;
+static void rf_medium_report(void);
+
 /* Buffers for RX and TX */
 #define MAX_TXRX_BUFFERS 128
 static struct ringbufindex input_ringbuf;
@@ -233,6 +266,7 @@ static void _rf_stop_backup_timer();
 static void ringbufindex_flush(struct ringbufindex *rbi);
 static void _rf_rx_sleep_timeout_timer(uint32_t duration);
 static void _rf_backup_timeout_handler();
+static void _rf_handle_rx_end();
 
 /* Functions DBUS */
 static int rf_dbus_get_rf_status(sd_bus *bus, const char *path, const char *interface,
@@ -315,6 +349,8 @@ static void rf_phy_settings_init(void)
     FATAL_ON(rf_fcs_len == 3, 2, "WSSIM_PHY_FCS=3: expected 2 or 4");
     FATAL_ON(rf_phy_legacy && rf_datarate_fixed, 2, "WSSIM_PHY_LEGACY and WSSIM_PHY_DATARATE together");
     FATAL_ON(rf_preamble_len + rf_sfd_len > 255, 2, "WSSIM_PHY_PREAMBLE + WSSIM_PHY_SFD above 255 bytes");
+    // The medium times a frame with its SHR, PHR and FCS (docs/MEDIUM.md §2)
+    FATAL_ON(rf_phy_legacy && rf_medium, 2, "WSSIM_PHY_LEGACY with the central medium");
     rf_datarate = rf_datarate_fixed ? rf_datarate_fixed : phy_subghz.datarate;
     rf_phy_timing_update();
     if (rf_phy_legacy)
@@ -361,31 +397,12 @@ static void rf_phy_configure(const phy_rf_channel_configuration_s *config)
 }
 
 /*----------------------POWER (virtual time) -------------------------------------------*/
-#ifdef NS_PORT_SIM
-// Power recording (docs/POWER_MODEL.md §3): when the conductor asks for it,
-// every change of the radio's hardware state goes to its power ledger as an
-// "xr" (sim_proto.h). The driver's states map to the hardware's: a CSMA
-// backoff listens, and the driver has no off state yet (GS8 stage 1).
-static int8_t rf_tx_dbm;                // last TX power the MAC asked for
-static int rf_power_last = -1;          // last state reported
-static int8_t rf_power_last_dbm;
+static int8_t rf_tx_dbm;                // last TX power the MAC asked for (also in each frame's header)
 
-static void rf_power_send(uint8_t state, uint8_t events)
-{
-    struct sim_radio_report r = {
-        .magic = "xr",
-        .state = state,
-        .tx_dbm = rf_tx_dbm,
-        .events = events,
-        .phy_mode = rf_phy_mode,
-        .channel = channel,
-    };
-    int ret;
-
-    ret = write(g_rf_host.rf_fd, &r, sizeof(r));
-    FATAL_ON(ret != sizeof(r), 2, "RF socket: %m");
-}
-
+// The radio's hardware state (sim_proto.h, enum sim_radio_state), from the
+// driver's: a CSMA backoff listens, unless the MAC asked for a deaf one. In
+// the shared memory (byte 3, read by the central medium) and in the power
+// ledger's "xr".
 static uint8_t rf_power_state(void)
 {
     switch (driver_state) {
@@ -405,6 +422,29 @@ static uint8_t rf_power_state(void)
         return SIM_RADIO_TX;
     }
     return SIM_RADIO_IDLE;
+}
+
+#ifdef NS_PORT_SIM
+// Power recording (docs/POWER_MODEL.md §3): when the conductor asks for it,
+// every change of the radio's hardware state goes to its power ledger as an
+// "xr" (sim_proto.h).
+static int rf_power_last = -1;          // last state reported
+static int8_t rf_power_last_dbm;
+
+static void rf_power_send(uint8_t state, uint8_t events)
+{
+    struct sim_radio_report r = {
+        .magic = "xr",
+        .state = state,
+        .tx_dbm = rf_tx_dbm,
+        .events = events,
+        .phy_mode = rf_phy_mode,
+        .channel = channel,
+    };
+    int ret;
+
+    ret = write(g_rf_host.rf_fd, &r, sizeof(r));
+    FATAL_ON(ret != sizeof(r), 2, "RF socket: %m");
 }
 
 // Called wherever the driver's state may have changed (set_shm_cca_state())
@@ -435,9 +475,12 @@ static void rf_power_cca(void)
 /*----------------------SHM-------------------------------------------------------------*/
 void set_shm_cca_state()
 {
-    int pos = g_rf_host.node_id * 3;
+    int pos = g_rf_host.node_id * SIM_SHM_CCA_STRIDE;
+    uint8_t hw_state = rf_power_state();
+
     memcpy(shm_ptr+pos, (uint8_t *)&driver_state, 1);
     memcpy(shm_ptr+pos+1, &channel, 2);
+    memcpy(shm_ptr+pos+3, &hw_state, 1);
 #ifdef NS_PORT_SIM
     rf_power_report();
 #endif
@@ -577,6 +620,11 @@ int rf_sim_connect(const char *path, const uint8_t eui64[8])
 #ifdef NS_PORT_SIM
     // Virtual time: this socket is also the conductor's (docs/VIRTUAL_TIME.md)
     ns_port_sim_attach(fd, g_rf_host.node_id);
+    rf_medium = ns_port_sim_medium();
+    if (rf_medium) {
+        INFO("rf medium: central (the server decides reception)");
+        atexit(rf_medium_report);
+    }
 #endif
     rf_rng_seed(g_rf_host.node_id);
     return fd;
@@ -594,6 +642,160 @@ static void rf_fhss_status_poll(void)
     WARN("FHSS : on");
 }
 
+/*----------------------CENTRAL MEDIUM (docs/MEDIUM.md §6) ---------------------------*/
+static const char *rf_medium_cause_str(uint8_t cause)
+{
+    switch (cause) {
+    case SIM_RX_OK:           return "ok";
+    case SIM_RX_NOISE:        return "noise";
+    case SIM_RX_INTERFERENCE: return "interference";
+    }
+    return "unknown cause";
+}
+
+// Can the radio receive a frame on chan now? The server's own test (the
+// hardware state in the shared memory, LISTEN or RECEIVE, and the channel),
+// and not while a transmission blocks reception.
+static bool rf_medium_can_receive(uint16_t chan)
+{
+    uint8_t state = rf_power_state();
+
+    return (state == SIM_RADIO_LISTEN || state == SIM_RADIO_RECEIVE) && chan == channel &&
+           !rx_thread_blokcked;
+}
+
+// "xx" with SIM_FRAME_MEDIUM: the server has locked this radio onto the frame
+static void rf_medium_rx(const struct sim_frame_hdr *hdr, const uint8_t *buf)
+{
+    static char trace_buffer[128];
+    struct input_packet *in;
+    int16_t index;
+    float rssi;
+
+    if (!(hdr->flags & SIM_FRAME_MEDIUM)) {
+        rf_medium_stats.frames_ignored++;
+        WARN("rf medium: frame from node %u without SIM_FRAME_MEDIUM, ignored", hdr->src);
+        return;
+    }
+    if (!rf_medium_can_receive(hdr->chan)) {
+        // The server read another state: should not occur
+        rf_medium_stats.refused++;
+        printf("Packet from node %d was lost: radio cannot receive (state %d, chan=%d/%d, frame %u)\n",
+               hdr->src, driver_state, hdr->chan, channel, hdr->frame_id);
+        return;
+    }
+    if (driver_state == DRVSTATE_RX) {
+        // Capture: the server switched this radio to a stronger frame
+        rf_medium_stats.captured++;
+        printf("Packet from node %d was lost: captured by node %d (RSSI %g dBm, frame %u)\n",
+               rf_medium_src, hdr->src, rf_medium_rx_dbm, rf_medium_frame_id);
+    }
+    TRACE(TR_RF, "   rf rx: chan=%2d/%2d %s (%d bytes)", hdr->chan, channel,
+          bytes_str(buf, hdr->len, NULL, trace_buffer, sizeof(trace_buffer), DELIM_SPACE | ELLIPSIS_STAR), hdr->len);
+    // At most one frame held: the one locked onto
+    ringbufindex_flush(&input_ringbuf);
+    driver_state = DRVSTATE_RX;
+    set_shm_cca_state();
+    // No airtime timer: the verdict ends the frame. The backup timer, a
+    // safety net, at the frame's airtime at the medium plus the usual margin.
+    _rf_start_backup_timer((uint64_t)(hdr->shr_len + hdr->phr_len + hdr->len + hdr->fcs_len) * 8 * 1000000 /
+                           (hdr->rate_bps ? hdr->rate_bps : rf_datarate) + PACKET_SENDING_EXTRA_TIME);
+    __PRINT(31, "Receiving ... pkt_chan=%d, curr_chan=%d, pkt_len=%u, rxseq=%d ts=%u frame=%u", hdr->chan, channel,
+            hdr->len, hdr->seq, rf_get_timestamp(), hdr->frame_id);
+    index = ringbufindex_peek_put(&input_ringbuf);
+    BUG_ON(index < 0, "RX ring buffer full after a flush");
+    in = &input_array[index];
+    in->rx_time = rf_get_timestamp() + (uint32_t)rf_rx_ts_jitter();
+    in->len = hdr->len;
+    in->channel = hdr->chan;
+    rssi = hdr->rx_dbm;
+    in->rssi = rssi < INT8_MIN ? INT8_MIN : rssi > INT8_MAX ? INT8_MAX : rssi;
+    memcpy(in->payload, buf, hdr->len);
+    ringbufindex_put(&input_ringbuf);
+    rf_medium_frame_id = hdr->frame_id;
+    rf_medium_src = hdr->src;
+    rf_medium_rx_dbm = hdr->rx_dbm;
+}
+
+// The held frame is gone without a verdict (radio off, backup timer)
+static void rf_medium_drop_held(const char *why)
+{
+    if (!rf_medium || !rf_medium_frame_id)
+        return;
+    rf_medium_stats.left++;
+    printf("Packet from node %d was lost: %s (RSSI %g dBm, frame %u)\n",
+           rf_medium_src, why, rf_medium_rx_dbm, rf_medium_frame_id);
+    ringbufindex_flush(&input_ringbuf);
+    rf_medium_frame_id = 0;
+}
+
+// "xv": the end of the frame held. The radio leaves RX as at the end of its
+// airtime timer in legacy mode (_rf_handle_rx_end()).
+static void rf_medium_verdict(const struct sim_verdict *v)
+{
+    if (!v->frame_id || v->frame_id != rf_medium_frame_id) {
+        rf_medium_stats.verdicts_ignored++;
+        WARN("rf medium: verdict for frame %u, holding %u: ignored", v->frame_id, rf_medium_frame_id);
+        return;
+    }
+    rf_medium_frame_id = 0;
+    if (v->ok) {
+        rf_medium_stats.ok++;
+        _rf_handle_rx_end();
+        return;
+    }
+    rf_medium_stats.lost[v->cause < SIM_RX_CAUSES ? v->cause : SIM_RX_NOISE]++;
+    printf("Packet from node %d was lost: %s (RSSI %g dBm, SINR %g dB, frame %u)\n",
+           rf_medium_src, rf_medium_cause_str(v->cause), v->rx_dbm, v->sinr_db, v->frame_id);
+    _rf_stop_backup_timer();
+    ringbufindex_flush(&input_ringbuf);
+    driver_state = DRVSTATE_IDLE_WAITING_RX;
+    set_shm_cca_state();
+}
+
+// CCA: "xs" to the conductor, which answers at once; busy when the energy on
+// the channel is at or above the MAC's threshold.
+static bool rf_medium_cca(void)
+{
+    struct sim_sense sense = { .magic = "xs", .channel = channel };
+    union {
+        struct sim_sense sense;
+        char raw[64];
+    } reply;
+    ssize_t ret;
+
+    ret = write(g_rf_host.rf_fd, &sense, sizeof(sense));
+    FATAL_ON(ret != sizeof(sense), 2, "RF socket: %m");
+    do
+        ret = recv(g_rf_host.rf_fd, &reply, sizeof(reply), 0);
+    while (ret < 0 && errno == EINTR);
+    FATAL_ON(!ret, 2, "RF server has gone");
+    FATAL_ON(ret < 0, 2, "RF socket: %m");
+    if (ret >= 2 && !memcmp(reply.raw, "xq", 2))
+        exit(0);    // end of the run, as the port does on "xq"
+    FATAL_ON(ret != sizeof(reply.sense) || memcmp(reply.raw, "xs", 2) || reply.sense.channel != channel, 2,
+             "conductor: expected the CCA answer for channel %u, got %.2s (%zd bytes)", channel, reply.raw, ret);
+    rf_medium_stats.cca++;
+    if (reply.sense.dbm < rf_cca_threshold_dbm)
+        return true;
+    rf_medium_stats.cca_busy++;
+    __PRINT(36, "CCA: CANNEL BUSY (%.1f dBm, threshold %d dBm)", reply.sense.dbm, rf_cca_threshold_dbm);
+    driver_state = DRVSTATE_IDLE_WAITING_RX;
+    set_shm_cca_state();
+    return false;
+}
+
+static void rf_medium_report(void)
+{
+    INFO("rf medium: %lu received, lost %lu noise, %lu interference, %lu captured, %lu without verdict; "
+         "%lu refused, %lu verdicts and %lu frames ignored",
+         rf_medium_stats.ok, rf_medium_stats.lost[SIM_RX_NOISE], rf_medium_stats.lost[SIM_RX_INTERFERENCE],
+         rf_medium_stats.captured, rf_medium_stats.left, rf_medium_stats.refused,
+         rf_medium_stats.verdicts_ignored, rf_medium_stats.frames_ignored);
+    INFO("rf medium: %lu CCA, %lu busy; CCA threshold %d dBm (%lu set by the MAC)",
+         rf_medium_stats.cca, rf_medium_stats.cca_busy, rf_cca_threshold_dbm, rf_cca_threshold_sets);
+}
+
 //int dbg_i_rx = 0;
 void phy_rf_rx_now(void)
 {
@@ -609,6 +811,10 @@ void phy_rf_rx_now(void)
     len = read(g_rf_host.rf_fd, msg, sizeof(msg));
     FATAL_ON(!len, 2, "RF server has gone");
     FATAL_ON(len < 0, 2, "RF socket: %m");
+    if (rf_medium && len == sizeof(struct sim_verdict) && !memcmp(msg, "xv", 2)) {
+        rf_medium_verdict((const struct sim_verdict *)msg);
+        return;
+    }
     if (len < (int)sizeof(*hdr) || memcmp(hdr->magic, "xx", 2) || hdr->len != len - sizeof(*hdr)) {
         TRACE(TR_RF, " rf drop: chan=%2d/%2d %s", -1, channel,
             bytes_str(msg, len, NULL, trace_buffer, sizeof(trace_buffer), DELIM_SPACE | ELLIPSIS_STAR));
@@ -617,6 +823,10 @@ void phy_rf_rx_now(void)
     if (hdr->fcs_len != 2 && hdr->fcs_len != 4) {
         WARN("rf drop: FCS of %u bytes from node %u", hdr->fcs_len, hdr->src);
         goto CANCEL_RX;
+    }
+    if (rf_medium) {
+        rf_medium_rx(hdr, buf);
+        return;
     }
     pkt_len = hdr->len;
     pkt_chan = hdr->chan;
@@ -745,6 +955,9 @@ static int8_t phy_rf_tx_now()
     hdr->src = 0;
     hdr->shr_len = rf_preamble_len + rf_sfd_len;
     hdr->fcs_len = rf_fcs_len;
+    hdr->phr_len = rf_phr_len;
+    hdr->tx_dbm = rf_tx_dbm;
+    hdr->rate_bps = rf_datarate;
     memcpy(msg + sizeof(*hdr), data_ptr, data_len);
     TRACE(TR_RF, "   rf tx: chan=%2d/%2d %s (%d bytes)", channel, channel,
            bytes_str(data_ptr, data_len, NULL, trace_buffer, sizeof(trace_buffer), DELIM_SPACE | ELLIPSIS_STAR), data_len);
@@ -844,6 +1057,7 @@ static void _rf_set_off(void){
         rf_off_pending = true;
         return;
     case DRVSTATE_RX:
+        rf_medium_drop_held("radio off");
         eventOS_callback_timer_stop(rx_sleep_handler_timer);
         _rf_stop_backup_timer();
         ringbufindex_flush(&input_ringbuf);
@@ -898,6 +1112,8 @@ static bool _rf_check_cca(){
 #ifdef NS_PORT_SIM
     rf_power_cca();
 #endif
+    if (rf_medium)
+        return rf_medium_cca();
     struct neighbor_timings *neighbors = g_rf_host.neighbors;
     int i;
 
@@ -916,7 +1132,7 @@ static bool _rf_check_cca(){
             int neigh_id = sim_node_id(neighbors[i].eui64);
             if (neigh_id >= SIM_MAX_NODES)
                 continue;
-            int des_pos_shm = neigh_id * 3;
+            int des_pos_shm = neigh_id * SIM_SHM_CCA_STRIDE;
             uint8_t tmp_st = *(uint8_t*)(shm_ptr+des_pos_shm);
             uint16_t tmp_ch = *(uint16_t*)(shm_ptr+des_pos_shm+1);
             WARN("tmp_st %d, tmp_ch: %d", tmp_st, tmp_ch);
@@ -1125,6 +1341,7 @@ static void _rf_backup_timeout_handler(){
         _rf_set_idle(RADIO_IDLE_ABORT);
         _rf_set_rx();
     } else if (driver_state == DRVSTATE_RX){
+        rf_medium_drop_held("no verdict (backup timer)");
         driver_state = DRVSTATE_IDLE_WAITING_RX;
         set_shm_cca_state();
     }
@@ -1404,16 +1621,19 @@ static int8_t phy_rf_extension(phy_extension_type_e extension_type, uint8_t *dat
                 break;
             }
             case PHY_EXTENSION_SET_CCA_THRESHOLD: {
+                // A percentage of an unspecified range, which Wi-SUN does
+                // not use (as the EFR32FG25 firmware): ignored
                 break;
             }
             case PHY_EXTENSION_SET_CHANNEL_CCA_THRESHOLD: {
+                // dBm, before each CCA (central medium)
+                rf_cca_threshold_dbm = (int8_t)*data_ptr;
+                rf_cca_threshold_sets++;
                 break;
             }
             case PHY_EXTENSION_SET_TX_POWER: {
                 INFO("change tx power to %u", *data_ptr);
-#ifdef NS_PORT_SIM
                 rf_tx_dbm = (int8_t)*data_ptr;
-#endif
                 break;
             }
             case PHY_EXTENSION_SET_RF_CONFIGURATION: {
