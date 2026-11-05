@@ -27,7 +27,11 @@
 #   is given up after 4 tries (LOST >= 4); in both cases the border router's
 #   route to the LFN never goes back to router 1 (no "External target ...
 #   now from" router 1 after the move; router 1's later DAOs are stale), and
-#   every request from 30 s after the move to the end is echoed. REG_MIN (min):
+#   every request from 30 s after the move to the end is echoed (LOST >= 4:
+#   the border router's requests from one listen interval after router 1's
+#   last frame to the LFN: until then router 1, which never got the release,
+#   sends its queued frames in the LFN's windows, where they collide with
+#   router 2's; the requests before are printed). REG_MIN (min):
 #   a short registration lifetime for the LFN and the routers, so that
 #   router 1, which never got the release (LOST >= 4), publishes the LFN's
 #   address again with its old TID: the border router must then log
@@ -169,10 +173,15 @@ for t, m in lines(f'{out}/node{lfn}.log'):
 ck(L['oper'], f"LFN operational at {L['oper'][0]:.1f} s" if L['oper'] else 'LFN operational')
 br, lf = udp(f'{out}/br.log'), udp(f'{out}/node{lfn}.log')
 end = dur - 15 - iv
-def traffic(name, a):
+def traffic(name, a, a_down=None):
     for way, tx, rx, peer in (('BR -> LFN', br, lf, None), ('LFN -> BR', lf, br, None)):
-        q, got, back = exchange(tx, rx, peer, a, end)
-        ck(q and len(back) == len(q), f'{way} {name} ({a:.0f}-{end:.0f} s): {len(q)} requests, {len(back)} echoed')
+        b = a_down if way == 'BR -> LFN' and a_down is not None else a
+        if b > a:
+            q, got, back = exchange(tx, rx, peer, a, b)
+            print(f'info {way} {name} ({a:.0f}-{b:.0f} s, while the old parent still sends to the LFN in its windows): '
+                  f'{len(q)} requests, {len(back)} echoed')
+        q, got, back = exchange(tx, rx, peer, b, end)
+        ck(q and len(back) == len(q), f'{way} {name} ({b:.0f}-{end:.0f} s): {len(q)} requests, {len(back)} echoed')
 if mode in ('na', 'na2'):
     a1 = L['aro'][0] if L['aro'] else None
     ag = L['again']
@@ -215,7 +224,15 @@ else:
     ck(not back and (lost < 4 or daos > 0), f"the border router's route to the LFN stayed on router 2 ({daos} DAOs from router 1 "
        f"after the move, {stale} stale paths to the LFN ignored)" + (f": back to router 1 at {back[0][0]:.1f} s" if back else '')
        + ('' if lost < 4 or daos else ': no DAO from router 1 to test it with'))
-    traffic('after the move', (mv[0] if mv else dur) + 30)
+    # LOST >= 4: router 1 never got the release and sends its queued frames
+    # to the LFN in the LFN's windows until their TTL; router 2's frames for
+    # the same windows collide with them (central medium), so the downlinks
+    # are required from one listen interval after router 1's last frame
+    a = (mv[0] if mv else dur) + 30
+    r1tx = [t for t, m in lines(f'{out}/node1.log') if mv and t > mv[0] and re.search(rf'LFN TX channel: .* {mac(lfn)}', m)]
+    if lost >= 4 and r1tx:
+        print(f'info router 1 sent to the LFN after the move until {r1tx[-1]:.1f} s ({len(r1tx)} attempts)')
+    traffic('after the move', a, max(a, r1tx[-1] + iv) if lost >= 4 and r1tx else None)
 sys.exit(ck.done())
 PY
 finish $?

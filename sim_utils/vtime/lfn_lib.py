@@ -159,6 +159,29 @@ def frames(path):
                 yield int(p[0]) / 1e6, int(p[1]), int(p[2]), f
 
 
+def replay_drops(log, me, allf, t_from=0.0):
+    """The MLME_COUNTER_ERROR drops of node me's log, split into
+    (replays, duplicates). A drop is matched with the frame the node was
+    receiving (the last frame sent to it, or broadcast, before the drop: allf
+    is list(frames(frames.txt)) as (t, src, fields)); the retry of a frame it
+    already received (same sender, key, counter and sequence number sent
+    before: its ACK was lost or late) is a duplicate, rightly dropped, not a
+    replay. Each list holds the drop times."""
+    mymac = f'01020304050600{me:02x}' if me < 256 else None
+    reps, dups = [], []
+    for t, m in lines(log):
+        if t < t_from or 'MLME_COUNTER_ERROR' not in m:
+            continue
+        cand = [x for x in allf if x[0] <= t and x[1] != me and x[2]['dst'] in (mymac, None, 'ffff')]
+        last = cand[-1] if cand else None
+        if last and any(x[0] < last[0] and x[1] == last[1] and x[2]['counter'] == last[2]['counter'] and
+                        x[2]['seq'] == last[2]['seq'] and x[2]['key_index'] == last[2]['key_index'] for x in cand[:-1]):
+            dups.append(t)
+        else:
+            reps.append(t)
+    return reps, dups
+
+
 # --- Frames an LFN received against its listen windows
 
 ACK_WAIT_S = 0.0105     # the MAC's wait for an ACK after its frame (TX_done to no_ack:

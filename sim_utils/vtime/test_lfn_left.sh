@@ -30,9 +30,12 @@
 #   - the power ledger: every frame the LFN locked onto is one "radio
 #     receive" interval, from the frame's start to its end (verdict) or to the
 #     drop (left), and the LFN has no other receive time; after a drop by
-#     "radio off" the radio is off;
-#   - the MAC: each drop at an ACK timeout is the MAC's no-ACK confirm at the
-#     same microsecond, and the frame is sent again (same MAC handle) unless
+#     "radio off" the radio is off (or, in the same microsecond, on again for
+#     the MAC's next queued frame);
+#   - the MAC: every drop is at an ACK timeout (the MAC's no-ACK confirm at the
+#     same microsecond; a drop elsewhere, e.g. a queued uplink turning the
+#     radio off while a deferred window close waits for a frame, is a MAC
+#     fault), and the frame is sent again (same MAC handle) unless
 #     that was its last attempt;
 #   - no stuck RX: the LFN received frames after its last drop;
 #   - window closes during a frame: at least MIN_DEFERRED frames that started
@@ -177,9 +180,12 @@ extra = [(s, e) for s, e in recv if s not in expect and s not in caps and s < (d
 ck(not extra, f'ledger: no other receive time at the LFN ({len(recv)} intervals) {extra[:3]}')
 after = {s: st for (s, e, st) in radio}
 ends = {e: st for (s, e, st) in radio}
+# after a drop by "radio off" the radio is off; the MAC may turn it on in the
+# same microsecond for its next queued frame (a zero-length off interval is
+# not logged): then it is not receiving
 bad = [fid for fid in left if drop_lfn.get(fid, (0, ''))[1] == 'radio off'
-       and after.get(drop_lfn[fid][3]) != 'off']
-ck(not bad, f'ledger: the radio is off after each drop by "radio off" {bad[:3]}')
+       and after.get(drop_lfn[fid][3]) not in ('off', 'idle', 'cca', 'listen', 'tx')]
+ck(not bad, f'ledger: the radio is off (or starts a transmission) after each drop by "radio off" {bad[:3]}')
 rx_us = sum(e - s for s, e in recv)
 left_us = sum(drop_lfn[f][3] - took_lfn[f] for f in left if f in drop_lfn)
 left_air = sum(r[0] - took_lfn[f] for f, r in left.items() if f in took_lfn)
@@ -214,7 +220,8 @@ for fid, r in mine_lfn.items():
     if i >= 0 and windows[i][0] <= s <= windows[i][1] < r[0]:
         deferred.append((fid, r[2], r[0] - windows[i][1]))
 ck(len(deferred) >= min_deferred and not any(o in ('left', 'tx_abort') for _, o, _ in deferred),
-   f'windows: {len(deferred)} frames ended after their window\'s close (up to '
+   f'deferred window closes: no frame dropped while the MAC waited for it to end; {len(deferred)} frames '
+   f'ended after their window\'s close (up to '
    f'{max((d for *_, d in deferred), default=0) / 1e3:.1f} ms later), none left: '
    f'{dict(collections.Counter(o for _, o, _ in deferred))}')
 

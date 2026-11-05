@@ -12,7 +12,9 @@
 # echoes.
 #
 # Checks:
-#   - no frame dropped as a replay (MLME_COUNTER_ERROR) by any node;
+#   - no frame dropped as a replay (MLME_COUNTER_ERROR) by any node, other
+#     than the MAC retry of a frame already received (its ACK lost or late:
+#     a duplicate, rightly dropped; from frames.txt, lfn_lib.replay_drops());
 #   - the reset node restored its group-key frame counters above the values
 #     it had reached before the reset (LGTKs on the router, the LFN's LGTKs
 #     in its group-key slots), so no counter value is used twice;
@@ -48,15 +50,16 @@ RST="-o test_reset_at_s=$RESET_AT -o test_reset_for_s=$RESET_FOR"
 export NODE_OPTS_1="-o device_type=ffn -o enable_lfn=true $( [ $RNODE = 1 ] && echo "$RST") ${ROUTER_EXTRA:-}"
 export NODE_OPTS_2="-o device_type=lfn -o enable_lfn=false -o test_udp_echo=true -o test_udp_dst=$BR_ADDR -o test_udp_period_s=$LFN_PERIOD -o test_udp_start_s=70 $( [ $RNODE = 2 ] && echo "$RST") ${LFN_EXTRA:-}"
 BR_OPTS="-o test_udp_echo=true -o test_udp_dst=$LFN_ADDR -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60" \
-CONF=lfn TOPO="$OUT.topo" TUN=$TUN SIM_OPTS="$SIM_OPTS" \
+CONF=lfn TOPO="$OUT.topo" TUN=$TUN FRAMES=1 SIM_OPTS="$SIM_OPTS" \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT" "$DUR" > "$OUT.run" 2>&1
 RC=$?
 rm -f "$OUT.topo"
 [ $RC = 0 ] || { echo "test_lfn_reset: run failed ($OUT.run)"; exit 1; }
 rm -f "$OUT.run"
 
-python3 - "$OUT" "$DUR" "$RNODE" "$RESET_AT" "$RECOVER" <<'EOF'
+PYTHONPATH=$HERE python3 - "$OUT" "$DUR" "$RNODE" "$RESET_AT" "$RECOVER" <<'EOF'
 import re, sys
+from lfn_lib import frames, replay_drops
 out, dur, rnode, reset_at, recover = sys.argv[1], float(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])
 T0 = 1700000000.0
 fails = []
@@ -72,9 +75,13 @@ def lines(name):
         except ValueError:
             pass
 logs = {0: 'br.log', 1: 'node1.log', 2: 'node2.log'}
-replays = {n: sum('MLME_COUNTER_ERROR' in m for t, m in lines(f)) for n, f in logs.items()}
-check(not any(replays.values()), 'frames dropped as replays (MLME_COUNTER_ERROR): ' +
-      ', '.join(f'node {n}: {c}' for n, c in replays.items()))
+allf = [(t, src, f) for t, src, ch, f in frames(f'{out}/frames.txt')]
+rd = {n: replay_drops(f'{out}/{f}', n, allf) for n, f in logs.items()}
+if any(d for r, d in rd.values()):
+    print('info retries of frames already received, dropped as duplicates: ' +
+          ', '.join(f'node {n}: {len(d)} ({", ".join(f"{t:.1f}" for t in d)} s)' for n, (r, d) in rd.items() if d))
+check(not any(r for r, d in rd.values()), 'frames dropped as replays (MLME_COUNTER_ERROR, not a retry of a frame '
+      'received): ' + ', '.join(f'node {n}: {len(r)}' for n, (r, d) in rd.items()))
 # Counters reached before the reset, restored after it, per key slot
 before, restored = {}, {}
 lgtk = rnode == 1
