@@ -748,16 +748,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("server", help="wssimserver binary (copied before use)")
     ap.add_argument("--sock", default="/tmp/em3c_sock")
-    ap.add_argument("--copy", default="/tmp/wssimserver-em3c", help="name of the copy that runs")
+    ap.add_argument("--copy", default=None,
+                    help="name of the copy that runs (default: wssimserver-em3c in the log directory, so that "
+                         "several runs at once do not share it)")
     ap.add_argument("--logdir", default=None)
     ap.add_argument("-k", default="", help="run only tests whose name contains this")
     ARGS = ap.parse_args()
     if ARGS.sock == "/tmp/sim_socket":
         sys.exit("refusing the default socket: it may belong to a real run")
-    shutil.copy2(ARGS.server, ARGS.copy)
-    ARGS.bin = ARGS.copy
     ARGS.logdir = ARGS.logdir or tempfile.mkdtemp(prefix="em3c_")
     os.makedirs(ARGS.logdir, exist_ok=True)
+    ARGS.copy = ARGS.copy or os.path.join(ARGS.logdir, "wssimserver-em3c")
+    shutil.copy2(ARGS.server, ARGS.copy)
+    ARGS.bin = ARGS.copy
 
     failed = 0
     periodic_log = None
