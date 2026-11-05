@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generate a connected topology for wssimserver, deterministic from a seed.
 
-usage: gen_topology.py <nodes> [--shape rgg|grid] [--degree D] [--seed S] [-o FILE]
+usage: gen_topology.py <nodes> [--shape rgg|grid|star] [--degree D] [--groups G]
+                       [--seed S] [-o FILE]
 
 Writes one edge per line, "a,b:rssi" (wssimserver's -g syntax, as read by
 sim_utils/vtime/run.sh TOPO=<file>). Node 0 is the border router.
@@ -62,6 +63,21 @@ def grid(n, rnd):
     return edges
 
 
+def star(n, groups, rnd):
+    edges = {}
+    for i in range(1, n):
+        edges[(0, i)] = round(rnd.uniform(-78, -40), 1)
+    routers = list(range(1, n))
+    size = math.ceil(len(routers) / groups)
+    for g in range(groups):
+        members = routers[g * size:(g + 1) * size]
+        for a in members:
+            for b in members:
+                if a < b:
+                    edges[(a, b)] = round(rnd.uniform(-75, -45), 1)
+    return edges
+
+
 def component(n, edges, start):
     adj = collections.defaultdict(list)
     for a, b in edges:
@@ -97,17 +113,26 @@ def hops(n, edges):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('nodes', type=int, help='number of nodes, border router included')
-    ap.add_argument('--shape', choices=('rgg', 'grid'), default='rgg')
+    ap.add_argument('--shape', choices=('rgg', 'grid', 'star'), default='rgg')
     ap.add_argument('--degree', type=float, default=6.0, help='rgg: mean degree (default 6)')
+    ap.add_argument('--groups', type=int, default=3, help='star: groups of routers that hear each other (default 3)')
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('-o', '--output', help='output file (default stdout)')
     args = ap.parse_args()
     if not 2 <= args.nodes <= 4096:
         sys.exit('gen_topology.py: 2 to 4096 nodes')
     rnd = random.Random(args.seed)
-    edges = rgg(args.nodes, args.degree, rnd) if args.shape == 'rgg' else grid(args.nodes, rnd)
+    if args.shape == 'rgg':
+        edges = rgg(args.nodes, args.degree, rnd)
+    elif args.shape == 'grid':
+        edges = grid(args.nodes, rnd)
+    else:
+        if not 1 <= args.groups <= args.nodes - 1:
+            sys.exit('gen_topology.py: --groups from 1 to the number of routers')
+        edges = star(args.nodes, args.groups, rnd)
     out = open(args.output, 'w') if args.output else sys.stdout
-    out.write(f'# gen_topology.py {args.nodes} --shape {args.shape} --degree {args.degree} --seed {args.seed}\n')
+    extra = f' --groups {args.groups}' if args.shape == 'star' else f' --degree {args.degree}'
+    out.write(f'# gen_topology.py {args.nodes} --shape {args.shape}{extra} --seed {args.seed}\n')
     for (a, b), r in sorted(edges.items()):
         out.write(f'{a},{b}:{r}\n')
     if args.output:

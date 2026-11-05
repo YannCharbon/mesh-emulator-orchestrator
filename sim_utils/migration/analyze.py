@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Summarise one or more headless dag_simple runs and compare groups.
 
-usage: analyze.py ref_run1 ref_run2 -- new_run1 new_run2
+usage: analyze.py [--until=S] ref_run1 ref_run2 -- new_run1 new_run2
 Per node: time (s after launch) of the Wi-SUN join milestones, the selected
 Wi-SUN parent, the last RPL preferred parent; per run: message-type histogram
 (numbers/addresses masked) and the BR's node list at the end.
@@ -12,6 +12,8 @@ and t0 holds the start time. The routers are the node<i>.log files present.
 The BR's node list comes from dbus_nodes.txt (D-Bus snapshots, wall clock) or,
 without it, from the "brtree" lines of br.log (virtual time). The topology is
 topology.txt ("a,b:rssi" per line) when the run has one, dag_simple otherwise.
+Only the first 295 s of each node log are read (runs differ in length),
+unless --until=S gives another limit (seconds since the run's start).
 """
 import os, re, sys, statistics, collections
 
@@ -109,7 +111,7 @@ def run_summary(d):
                 t = float(ts) - t0
             except ValueError:
                 continue
-            if t > 295:   # runs differ in length; compare the first 295 s
+            if t > UNTIL:   # runs differ in length; by default compare the first 295 s
                 break
             if not msg.startswith('[DBG'):
                 hist[mask(msg)] += 1
@@ -132,9 +134,12 @@ def run_summary(d):
 def fmt(v):
     return '-' if v is None else str(v)
 
+UNTIL = 295.0
 groups = [[]]
 for a in sys.argv[1:]:
-    if a == '--':
+    if a.startswith('--until='):
+        UNTIL = float(a.split('=', 1)[1])
+    elif a == '--':
         groups.append([])
     else:
         groups[-1].append(a)
