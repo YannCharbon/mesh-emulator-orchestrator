@@ -329,3 +329,59 @@ def listen_interval_s(log):
     iv = [int(r.group(1)) for t, m in lines(log) if 'schedule:' in m
           for r in [re.search(r'interval (\d+) ms', m)] if r]
     return max(iv) / 1000 if iv else 0.0
+
+
+def lpas_timing(path):
+    """An LFN's LPAS sweeps (stack GS11, ws_lfn_jitter.h): 'first', the
+    delays from each discovery start to its first sweep; 'gaps', between
+    the sweeps of one discovery (no parent yet); 'dither', from each
+    better-parent check or parent search (decided on the seconds timer) to
+    its sweep. Sweeps sent back to back (a check's two) count once."""
+    r = {'first': [], 'gaps': [], 'dither': []}
+    t_ds = last_join = decided = last_sweep = None
+    for t, m in lines(path):
+        if 'LFN discovery start' in m:
+            t_ds, last_join, decided = t, None, None
+        elif re.search(r'LFN: parent \S+, PAN', m):
+            t_ds = None
+        elif 'LFN: better-parent check (' in m or re.search(r'LFN: parent search \(', m):
+            decided = t
+        elif 'LFN: LPAS sweep' in m:
+            if last_sweep is not None and t == last_sweep:
+                continue
+            last_sweep = t
+            if decided is not None:
+                r['dither'].append(t - decided)
+                decided = None
+            elif t_ds is not None:
+                if last_join is None:
+                    r['first'].append(t - t_ds)
+                else:
+                    r['gaps'].append(t - last_join)
+                last_join = t
+    return r
+
+
+def lpas_timing_checks(path, check, name='LFN', interval_s=10):
+    """The random spread of the sweeps (GS11): the first 0.5-1.5 s after a
+    discovery start; then lpas_interval_s +- 25 % apart (a sweep due while
+    a window is still open waits 0.5-1.5 s more); a check's or search's
+    sweep 0-0.99 s into its second, not always at its start (the former
+    fixed timing gave first 0-1 s on the second grid, gaps of exactly
+    interval_s, and no delay after a check or search)"""
+    r = lpas_timing(path)
+    f, g, d = r['first'], r['gaps'], r['dither']
+    check(f and all(0.49 <= x <= 1.51 for x in f),
+          f'{name}: first LPAS sweep 0.5-1.5 s after each discovery start ({len(f)}: '
+          + (f'{min(f):.2f}-{max(f):.2f} s)' if f else 'none)'))
+    if g:
+        check(all(0.75 * interval_s - 0.02 <= x <= 1.25 * interval_s + 1.52 for x in g)
+              and (len(g) < 3 or max(g) - min(g) > 0.05),
+              f'{name}: LPAS sweeps {0.75 * interval_s:.1f}-{1.25 * interval_s:.1f} s apart, at random '
+              f'({len(g)} gaps: {min(g):.2f}-{max(g):.2f} s)')
+    if d:
+        check(all(-0.001 <= x <= 1.0 for x in d) and (len(d) < 3 or max(d) >= 0.02),
+              f'{name}: check/search sweeps 0-0.99 s after their second, at random ({len(d)}: '
+              f'{min(d):.2f}-{max(d):.2f} s)')
+    return r
+

@@ -33,6 +33,10 @@
 # It prints the LFN's average current from STEADY_FROM s to the end, with
 # the share of each part (EM2 ledger, the profile given).
 #
+# Also the LPAS sweeps' random timing (stack GS11, lfn_lib.lpas_timing_checks()):
+# the first 0.5-1.5 s after a discovery start, then lpas_interval_s +- 25 %
+# apart, a check's or search's sweep 0-0.99 s into its second.
+#
 # usage: test_lfn_join.sh <bindir> <workdir(holds examples/)> <outdir> [profile]
 # Environment: DUR (900), WSSIM_SEED (1), RSSI (-50), TUN (tunvt0),
 # BR_PERIOD (37), LFN_PERIOD (53; both 0: no test traffic, idle LFN), STEADY_FROM (300), JOIN_MAX (120),
@@ -349,5 +353,8 @@ for k, (tm, ch) in sorted(parts.items(), key=lambda x: -x[1][1]):
     if ch > 0:
         print(f'info   {k:28s} {ch / span:7.2f} uA  {100 * ch / total:5.1f} %  ({tm / 1e6 / span * 100:.3f} % of the time)')
 print('test_lfn_join: ' + ('PASSED' if not fails else f'FAILED ({len(fails)})'))
+# The LPAS sweeps' random timing (stack GS11): the join's, and each search's
+from lfn_lib import lpas_timing_checks
+lpas_timing_checks(f'{out}/node{lfn_node}.log', check)
 sys.exit(1 if fails else 0)
 EOF

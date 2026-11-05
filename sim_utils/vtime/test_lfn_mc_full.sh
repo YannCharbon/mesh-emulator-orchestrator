@@ -15,6 +15,10 @@
 #   - a refusal does not cost the LFN its parent (the NA with status 2 used
 #     to remove the neighbour, as for a failed address registration).
 #
+# Also the LPAS sweeps' random timing (stack GS11, lfn_lib.lpas_timing_checks()):
+# the first 0.5-1.5 s after a discovery start, then lpas_interval_s +- 25 %
+# apart, a check's or search's sweep 0-0.99 s into its second.
+#
 # usage: test_lfn_mc_full.sh <bindir> <workdir(holds examples/)> <outdir>
 # Environment: LFNS (9), NGROUPS (4), CAPACITY (32), DUR (600), WSSIM_SEED (1),
 # TUN (none), SIM_OPTS (--drift-random=20), SPREAD.
@@ -45,7 +49,7 @@ rm -f "$OUT.topo"
 [ $RC = 0 ] || { echo "test_lfn_mc_full: run failed ($OUT.run)"; exit 1; }
 rm -f "$OUT.run"
 
-python3 - "$OUT" "$LFNS" "$GROUPS_N" "$CAPACITY" <<'EOF'
+PYTHONPATH=$HERE python3 - "$OUT" "$LFNS" "$GROUPS_N" "$CAPACITY" <<'EOF'
 import re, sys
 out, lfns, groups, cap = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 fails = []
@@ -85,5 +89,9 @@ removed = sum(1 for m in lines('br.log') if 'Neighbour removed for negative resp
 lost = sum(sum(1 for m in lines(f'node{i}.log') if re.search(r'parent .* lost|LFN discovery start', m)) for i in range(1, lfns + 1))
 check(not removed and lost == lfns, f'LFN children removed by the border router: {removed}; discoveries {lost} (one per LFN)')
 print('test_lfn_mc_full: ' + ('PASSED' if not fails else f'FAILED ({len(fails)})'))
+# The LPAS sweeps' random timing (stack GS11), for every LFN
+from lfn_lib import lpas_timing_checks
+for i in range(1, lfns + 1):
+    lpas_timing_checks(f'{out}/node{i}.log', check, name=f'LFN {i}')
 sys.exit(1 if fails else 0)
 EOF

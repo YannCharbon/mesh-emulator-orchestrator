@@ -23,6 +23,10 @@
 # release), all delivered: the requests are denser for it (BR_PERIOD 13 s,
 # LFN_PERIOD 17 s by default).
 #
+# Also the LPAS sweeps' random timing (stack GS11, lfn_lib.lpas_timing_checks()):
+# the first 0.5-1.5 s after a discovery start, then lpas_interval_s +- 25 %
+# apart, a check's or search's sweep 0-0.99 s into its second.
+#
 # usage: test_lfn_better.sh <bindir> <workdir(holds examples/)> <outdir> [profile]
 # Environment: DUR (1800), WSSIM_SEED (1), TUN (tunvt0), EXPECT (move),
 # OLD_RSSI (-87 for move, -70 for stay), NEW_RSSI (-60 for move, -67 for
@@ -59,7 +63,7 @@ RC=$?
 rm -f "$OUT.topo"
 [ $RC = 0 ] || { echo "test_lfn_better: run failed ($OUT.run)"; exit 1; }
 
-python3 - "$OUT" "$DUR" "$EXPECT" "$LATE" "$MOVE_MAX" "${MOVE_REQ:-3}" <<'EOF'
+PYTHONPATH=$HERE python3 - "$OUT" "$DUR" "$EXPECT" "$LATE" "$MOVE_MAX" "${MOVE_REQ:-3}" <<'EOF'
 import re, sys
 out, dur, expect, late, move_max = sys.argv[1], float(sys.argv[2]), sys.argv[3], float(sys.argv[4]), float(sys.argv[5])
 move_req = int(sys.argv[6])
@@ -155,5 +159,8 @@ if expect == 'move' and mv:
         check((len(q) >= move_req or b - a < 90) and len(back) == len(q),
               f"{name} across the move ({a:.0f}-{b:.0f} s): {len(q)} requests (at least {move_req}), {len(back)} echoed")
 print('test_lfn_better: ' + ('PASSED' if not fails else f'FAILED ({len(fails)})'))
+# The LPAS sweeps' random timing (stack GS11): the join's, and each check's
+from lfn_lib import lpas_timing_checks
+lpas_timing_checks(f'{out}/node3.log', check)
 sys.exit(1 if fails else 0)
 EOF
