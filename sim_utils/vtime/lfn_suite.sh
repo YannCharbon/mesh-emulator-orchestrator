@@ -4,14 +4,14 @@
 # exit status 1 if any run failed.
 #
 # usage: lfn_suite.sh [quick|full] <bindir> <workdir(holds examples/)> <outdir>
-#   quick  one run of each test (seed 1; the profile runs 12 h): 51 runs,
+#   quick  one run of each test (seed 1; the profile runs 12 h): 52 runs,
 #          about 70 s of wall time with 12 jobs on a 24-core PC
 #   full   the documented counts, at most 6 runs per check (the root
 #          CLAUDE.md sizing rule): 3 seeds per check, 6 for the checks that
 #          vary most (join with traffic, better parent, restart), 2 for the
 #          profile runs (48 h Balanced, 72 h Eco), one Eco run with a 4 h
 #          listen interval over 72 h, test_lfn_keyreq.sh on its seed 3:
-#          149 runs, about 7 minutes with 12 jobs
+#          150 runs, about 7 minutes with 12 jobs
 # Environment: JOBS (12: runs at once), ONLY (a regular expression: only
 # the runs whose name matches), KEEP (1: keep the run directories; by
 # default only each run's output, <outdir>/<name>.txt, is kept).
@@ -93,6 +93,7 @@ for c in race txfail; do echo "keyreq_${c}_s3|WSSIM_SEED=3 CASE=$c|$V/test_lfn_k
 [ $MODE = full ] && echo "profiles_eco_4h_s1|WSSIM_SEED=1 BR_PERIOD=18500 LFN_PERIOD=27000 DUR=259200 STEADY_FROM=86400 LFN_EXTRA=-o@lfn_listen_interval_ms=14400000@-o@lfn_listen_interval_max_ms=16777215|$V/test_lfn_profiles.sh $BIN $WORK <out> eco"
 echo "radio_off|WSSIM_SEED=1|$V/test_radio_off.sh $BIN $WORK <out>"
 echo "medium_radio|WSSIM_SEED=1|$V/test_medium_radio.sh $BIN $WORK <out>"
+echo "medium_left|WSSIM_SEED=1|$V/test_lfn_left.sh $BIN $WORK <out>"
 echo "conductor||python3 $V/test_conductor.py $BIN/wssimserver --sock /tmp/lfn_suite_$$.sock"
 echo "power||python3 $V/test_power.py $BIN/wssimserver"
 } | { [ -n "${ONLY:-}" ] && grep -E "^[^|]*(${ONLY})" || cat; } > "$OUT/jobs.txt"

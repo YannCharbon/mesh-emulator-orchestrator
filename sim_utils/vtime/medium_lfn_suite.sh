@@ -15,7 +15,8 @@
 #
 # The suite's unit tests are left out: test_conductor.py and test_power.py
 # copy and run the server with options of their own, test_medium_radio.sh
-# is about the central medium: ONLY defaults to every other test.
+# and test_lfn_left.sh are about the central medium: ONLY defaults to every
+# other test.
 #
 # usage: medium_lfn_suite.sh [quick|full] <bindir> <workdir(holds examples/)> <outdir>
 # Environment: MEDIUM_ARGS ("--medium=legacy"; e.g. "--medium-capture-db=10"
