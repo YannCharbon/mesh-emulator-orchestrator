@@ -49,6 +49,45 @@ struct sim_frame_hdr {
     // bytes, and its FCS, 2 or 4 bytes (on air, the PHR's FCS type bit).
     uint8_t shr_len;
     uint8_t fcs_len;
+    // Central medium (docs/MEDIUM.md). The sender's radio fills these three
+    // in both modes; the airtime at the medium is
+    // (shr_len + phr_len + len + fcs_len) * 8 * 10^6 / rate_bps, in whole µs.
+    uint8_t phr_len;
+    int8_t tx_dbm;              // TX power the MAC asked for
+    uint8_t flags;              // SIM_FRAME_*, set by the server
+    uint8_t reserved;
+    uint32_t rate_bps;
+    // Set by the server in central mode only (0 in legacy mode)
+    uint32_t frame_id;          // run-wide, from 1
+    float rx_dbm;               // received power at this receiver
+};
+
+#define SIM_FRAME_MEDIUM 0x01   // the medium locked this receiver onto the frame: wait for its "xv"
+
+// Central medium: outcome of a frame at a receiver ("xv" and --medium-log)
+enum sim_rx_cause {
+    SIM_RX_OK,
+    SIM_RX_NOISE,               // lost, no interferer during the frame
+    SIM_RX_INTERFERENCE,        // lost, with at least one interferer
+    SIM_RX_CAUSES
+};
+
+// "xv": the end of a frame the receiver was locked onto, at the frame's end
+struct sim_verdict {
+    char magic[2];              // "xv"
+    uint8_t ok;
+    uint8_t cause;              // enum sim_rx_cause
+    uint32_t frame_id;
+    float rx_dbm;
+    float sinr_db;              // lowest over the frame's segments
+};
+
+// "xs": energy on a channel (CCA). The radio sends it during its run; the
+// conductor answers at once with the same message, dbm filled in.
+struct sim_sense {
+    char magic[2];              // "xs"
+    uint16_t channel;
+    float dbm;                  // noise + every frame on air at the radio on that channel
 };
 
 // Power recording (docs/POWER_MODEL.md), virtual time only: when the welcome
@@ -105,9 +144,11 @@ static inline struct node_infos *sim_link(struct node_infos *map, int rx, int tx
     return map + (long)rx * SIM_MAX_NODES + tx;
 }
 
-// Shared memory "/wssimcca": 3 bytes per node, the radio state then the
-// channel, read by the neighbours' CCA.
-#define SIM_SHM_CCA_SIZE (SIM_MAX_NODES * 3)
+// Shared memory "/wssimcca": SIM_SHM_CCA_STRIDE bytes per node: the driver's
+// state (read by the neighbours' legacy CCA), the channel (2 bytes), then the
+// radio's hardware state (enum sim_radio_state, read by the central medium).
+#define SIM_SHM_CCA_STRIDE 4
+#define SIM_SHM_CCA_SIZE (SIM_MAX_NODES * SIM_SHM_CCA_STRIDE)
 
 // Shared-memory names belong to one server socket, so that several runs can
 // share a PC. The default socket keeps the historical names.
