@@ -461,11 +461,11 @@ Measured on our LFN firmware (`nanostack-efr32fg25-freertos` README, "LFN EM2 fl
 
 | Key | `efr32fg25-soc.ini` (FFN, HW5) | `efr32fg25-lfn.ini` (our LFN) | Measured |
 | --- | --- | --- | --- |
-| `radio.listen_ma`, `receive_ma`, `cca_ma` | 6.0 | 4.13 | RX plateau of a listening window 6.16–6.38 mA chip total (mean 6.27) − EM1 2.145; an FFN's is 8.1 mA (MCU in EM1 at 97.5 MHz) |
+| `radio.listen_ma`, `receive_ma`, `cca_ma` | 6.0 | 4.13 (4.32 since 2026-11-05, §12.9) | RX plateau of a listening window 6.16–6.38 mA chip total (mean 6.27) − EM1 2.145; an FFN's is 8.1 mA (MCU in EM1 at 97.5 MHz) |
 | `radio.tx_ma` at +10 dBm | 35.75 (`@3`: 35.29) | 33.26 | TX plateau 35.4 mA chip total (2 frames; 608 µC is the median charge of a wake that contained a transmission, with its CCA, set-up and the RX for the ACK: 12.4 ms of TX, most probably two frames; the formula of the root repo's `LFN_Capabilities_and_Power.md` gives about 283 µC per frame) − 2.145; other levels scaled by 0.9425 [I] |
 | `mcu.deep_sleep_ma` | 0.0070 | 0.0070 | above |
 | `mcu.deep_wake_us`, `deep_wake_ma` | datasheet | 260 µs, 0.73 mA | set-up of a listening wake, first sample above 0.2 mA to the RX plateau: 0.26 ms, 0.19 µC above the floor (kit 440290182; 0.4 ms, 0.5 µC on 440235509) |
-| `radio_transitions` `listen_off` | — | 90 µs, 0.78 mA | teardown, RX plateau to the last sample above 0.2 mA: 0.09 ms, 0.07 µC (0.2 ms, 0.3 µC on 440235509) |
+| `radio_transitions` `listen_off` | — | 90 µs, 0.78 mA (1000 µs, 6.56 mA since 2026-11-05, §12.9) | teardown, RX plateau to the last sample above 0.2 mA: 0.09 ms, 0.07 µC (0.2 ms, 0.3 µC on 440235509) |
 | `mcu.wake_charge_uc` | 0.56 | 0 | a timer wake without the radio costs 0.09–0.10 µC in all (peak 0.36–0.6 mA), less than the set-up already charged; HW5's 0.56 µC per FFN wake does not apply |
 
 A whole listening wake (window, set-up, teardown) measured 9.0 ms and 44–46 µC (median).
@@ -491,6 +491,19 @@ The measured floor adds 2.4 µA everywhere. With Eco, the automatic widening bou
 | Silicon Labs' LFN, Test profile, same kit, under Silicon Labs' embedded border router | 49.0 µA | — |
 
 Above a listen interval of about 10 s, the LFN broadcast slots (every 10 s), the sync frame (every 50 s) and the floor dominate, which is why the profiles with long broadcast intervals (Balanced, Eco) reach 10–13 µA.
+
+### 12.9 Cost of an LFN window, measured window by window (2026-11-05)
+
+The kits drew about 4 µA more than the LFN power formula (root repo `LFN_Capabilities_and_Power.md` §5), which shares this profile's constants. AEM dumps at 100 kHz on kit 440290182 (stack `443185c` + `1ee1481` and stack `8ca400e`, default LFN settings, EU mode 3; firmware README, "LFN current against the power formula") split the current window by window. The windows open, widen (5 ppm once the rate is measured, 50 ppm before) and close as the stack intends; the difference is in the cost of each window:
+
+- **RX plateau:** median 6.465 mA chip total over 105 windows (6.15 mA on kit 440235509), against 6.275 mA in the profile.
+- **Fixed cost per window:** a window costs 6.465 mA × (*W* + 2*w*) + 7.2–7.5 µC, against 0.86 µC in the ledger (set-up 0.19 µC, teardown 0.07 µC, cycles). The wake from EM2 (0.33 ms, 0.37 µC), 0.37 ms of CPU at 4.4 mA before the radio starts (1.65 µC), the radio on 0.40 ms longer than the window (2.6 µC), the CPU active during about 1.1 ms of the radio time (+2.5 µC) and the teardown (0.11 µC). The stack's own work in such a wake is about 15 000 cycles (0.16 ms, DWT counters), so most of that CPU time is outside the stack (RAIL, the power manager, interrupts) and is not modelled as cycles.
+
+**Profile change** (`efr32fg25-lfn.ini`): `radio.listen_ma`, `receive_ma` and `cca_ma` 4.13 → **4.32** mA (6.465 − EM1 2.145); `radio_transitions.listen_off` 90 µs at 0.78 mA → **1000 µs at 6.56 mA**, which carries the rest of the fixed cost: with the set-up and the cycles a window now costs 7.35 µC beyond `listen_ma` × its length. The transition is charged at every radio-off, also after an uplink's ACK and after a discovery window: the kits show a similar overhead on those wakes (an LPAS frame costs 197 µC on the kit, 184 µC in the ledger). The floor (`deep_sleep_ma` 7.0 µA) is unchanged: the kits' floor moves between days (440290182: 7.0 µA on 2026-11-03, 8.3 µA on 2026-11-05 with the old and new stacks alike; 440235509: 12.3 and 6.1 µA), so it stays a setting.
+
+**Effect** (`sim_utils/vtime/lfn_power_campaign.sh`, 21 runs, all passed): an empty window costs 41.1–41.4 µC in the ledger (33.7–33.9 µC before), a sync window 43.3 µC, one uplink frame 294 µC (287 µC). The idle Test LFN draws 19.44–19.50 µA (17.20–17.26 µA before), Balanced 9.35–9.39 µA, Eco 11.18–11.24 µA; `lfn_power_formula.py`, with *I_w* = 6.465 mA and *Q_fix* = 7.35 µC, matches every case within −0.8 … +1.5 % idle and −5.5 … +1.5 % with traffic (as before, the traffic cases deviate most).
+
+**Not in the profile** (kit terms the emulated stack does not produce): a short wake every 20 s and some more (5.8 µC, about 0.4 µA; in both stacks, not identified), the processing after a received sync frame (3.5 µC in the window and a 4.2 µC wake 24 ms later, against about 2 µC in the ledger) and timer wakes every 1.02 s on the kits (0.09 µC each, 0.09 µA). Together about 0.5 µA on the kits.
 
 ## 13. LFN timed receive windows (GS8 stage 2, 2026-10-28)
 

@@ -7,13 +7,13 @@ import json, glob, os, re, sys
 R = sys.argv[1]
 # hardware constants: emulator LFN profile efr32fg25-lfn.ini, EU mode 3, +10 dBm
 I_FLOOR = 7.0          # uA
-I_W = 4.13 + 2.145     # mA, radio RX + MCU EM1 while a window is open
-Q_FIX = 0.86           # uC per window wake (set-up, teardown, CPU)
+I_W = 4.32 + 2.145     # mA, radio RX + MCU EM1 while a window is open
+Q_FIX = 7.35           # uC per window wake (set-up, CPU, radio beyond the window, teardown; kits 7.2-7.5)
 Q_SYNC = 2.0           # uC extra per received sync frame
 Q_TIMER = 0.70         # uC per timer wake (emulator; kits 0.1)
 N_TIMER = 0.094        # timer wakes per s, idle
-Q_CHECK = 16.6e3       # uC per better-parent check (2 LPAS sweeps of 35 frames + 0.6 s window)
-Q_XCH = 440.0          # uC per request/echo exchange (uplink 283 + downlink increment 158)
+Q_CHECK = 16.8e3       # uC per better-parent check (2 LPAS sweeps of 35 frames + 0.6 s window)
+Q_XCH = 450.0          # uC per request/echo exchange (uplink 290 + downlink increment 159)
 cases = {  # T_u, T_b, N, sync_only, r_ppm, BR period, LFN period
     'T5': (5, 10, 5, False, 5, 1800, 2700), 'T2': (2, 10, 5, False, 5, 1800, 2700),
     'T30': (30, 10, 5, False, 5, 1800, 2700), 'TS': (5, 10, 5, True, 5, 1800, 2700),
