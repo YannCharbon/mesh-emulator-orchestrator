@@ -18,7 +18,7 @@ With the central medium (`wssimserver --medium=central`):
 
 All powers in dBm at the receiver's antenna; sums are done in mW.
 
-- **Received power.** `P = link(rx, tx)` from the `-g` options (and `--vtime-link`), as today: the value is the received power, whatever TX power the sender uses. With `--medium-tx-ref=DBM`, the value is the received power when the sender transmits at DBM, and `P = link + (tx_dbm − DBM)`, with `tx_dbm` from the frame header. An edge without a value (0 dBm) stays a perfect link. Pairs that are not graph neighbours do not hear each other at all: no reception, no interference, no energy in CCA.
+- **Received power.** `P = link(rx, tx)` from the `-g` options (and `--vtime-link`), as today: the value is the received power, whatever TX power the sender uses. With `--medium-tx-ref=DBM`, the value is the received power when the sender transmits at DBM, and `P = link + (tx_dbm − DBM)`, with `tx_dbm` from the frame header: the TX power the MAC last set (`wsnode` and `wsbrd` set it from their `tx_power` setting at start; a radio whose MAC never set one reports 0 dBm). An edge without a value (0 dBm) stays a perfect link; it is also a 0 dBm interferer and 0 dBm of CCA energy, so two frames over such links always destroy each other and neither can capture the other. Give RSSIs to the edges when collisions matter. Pairs that are not graph neighbours do not hear each other at all: no reception, no interference, no energy in CCA.
 - **Noise floor.** `N = −119.93 dBm`, the constant of today's curve (`kTB` at 293 K and 100 kHz, NF 4 dB: `−153.93 + 30 + 4`).
 - **Error model.** Today's empirical curve, with the SINR in place of `P − N`: `BER = min(0.5, 0.5 · exp(−0.5 · SINR_dB))`, `SINR = P / (N + I)`, `I` the sum of the interferers' powers in mW. Without interference this is exactly today's formula. The counted bits are those of today's draw: `8 · (PHR + PSDU + FCS)`.
 - **Over a frame.** The frame `[t_start, t_end)` is cut into segments wherever an interferer starts or ends. Each segment `k` holds a share of the counted bits proportional to its duration, `bits_k`, and has its own `SINR_k`. `P_success = Π_k (1 − BER_k)^bits_k`. One uniform draw from the receiver's stream decides; draws are made only when `0 < P_success < 1`.
@@ -35,7 +35,9 @@ Each receiver `r` has, in the server, at most one **lock** (the frame it is rece
 3. **Receiving `A`:** if `t − t_start(A)` < SHR airtime of `A` and `P_F ≥ P_A + capture margin`, `r` drops `A` (**captured**) and locks onto `F`. Otherwise `F` is interference to `A`.
 4. **Half duplex:** when `r` itself starts a frame, its lock, if any, ends with no verdict (outcome `tx_abort` in the log). A radio does not start to send while it receives (`_rf_is_busy()`), so this should not occur; it is counted.
 
-A lock also ends when the radio's state in shared memory is no longer `SIM_RADIO_RECEIVE` at the next decision about `r` (the radio turned off: outcome `left`).
+A lock also ends when the radio's state in shared memory is no longer `SIM_RADIO_RECEIVE` at the next decision about `r` or at the verdict (the radio turned off: outcome `left`). This is checked only once `r` has run since the frame was delivered: before that, its shared memory still shows its state from before the delivery. A stopped node (`--vtime-kill`) loses its lock the same way; a stopped sender's frame stays on air until its natural end.
+
+Same-time ties: frames that start at the same µs are decided in the order of their senders' wakes (node ID), so the lower ID's frame gets the lock and the other is `busy` (or captures it, by the rule above). At `t_end(A)`, a frame starting at that µs can lock `r` although `r` has not yet seen `A`'s verdict, since its shared memory still says RECEIVE; `r` then gets `A`'s verdict and the new frame in the same wake. Both need exact-µs coincidences and are rare.
 
 When `r` locks onto `F`, the server delivers `F` to `r` at `t` (an `"xx"` message with `SIM_FRAME_MEDIUM`, §4) and queues a **verdict** event for `r` at `t_end(F)`. The verdict is computed when that event is popped, so every interferer that started before `t_end` is known. Same-time order: at `t_end`, the verdict comes before any frame that starts at `t_end` for the same receiver (it was queued earlier, so its sequence number is lower).
 
@@ -44,7 +46,7 @@ When `r` locks onto `F`, the server delivers `F` to `r` at `t` (an `"xx"` messag
 All in `app_wssimserver/sim_proto.h`. Each is one `SOCK_SEQPACKET` message on the node's conductor socket.
 
 - **Frame** `"xx"` (`struct sim_frame_hdr` + PSDU). New fields, filled by the sender's radio in both modes: `phr_len`, `tx_dbm` (the TX power the MAC asked for), `rate_bps`. The server fills `src` (as today) and, in central mode only, `frame_id` (a run-wide counter from 1), `rx_dbm` (the received power `P`) and `flags = SIM_FRAME_MEDIUM`. In legacy mode `flags`, `frame_id` and `rx_dbm` are 0 and the radio behaves as today.
-- **Verdict** `"xv"` (`struct sim_verdict`), central mode only, to the receiver at `t_end`: `frame_id`, `ok`, `cause` (`enum sim_rx_cause`), `rx_dbm`, `sinr_db` (the lowest segment SINR). Not sent for a captured frame (the next `"xx"` replaces it) or a `tx_abort`.
+- **Verdict** `"xv"` (`struct sim_verdict`), central mode only, to the receiver at `t_end`: `frame_id`, `ok`, `cause` (`enum sim_rx_cause`), `rx_dbm`, `sinr_db` (the lowest segment SINR). Not sent for a captured frame (the next `"xx"` replaces it), a `tx_abort`, a `left` or a stopped node: a radio that leaves RX by itself drops the frame it holds and waits for no verdict.
 - **Sense** `"xs"` (`struct sim_sense`), central mode only: the radio sends it during its run with its channel; the conductor answers at once with the same struct, `dbm` = `10·log10(N + Σ P)` over the frames on air at the radio on that channel at the current time (the radio's own excluded). The radio blocks on the reply (it is the only message the conductor sends to a running node).
 - **Welcome flag** `NSIM_WELCOME_MEDIUM` (stack's `port/sim/ns_port_sim.h`, protocol version 3) and `ns_port_sim_medium()`: the node's radio runs in central mode.
 
@@ -69,7 +71,7 @@ Under `NS_PORT_SIM` and `ns_port_sim_medium()` (`app_wshwsim/sl_rf_driver.c`):
 - `--medium=legacy|central` (virtual time only; refused without `--vtime`).
 - `--medium-tx-ref=DBM`, `--medium-lock-snr=DB`, `--medium-capture-db=DB`.
 - `--medium-log=FILE`: one line per (frame, receiver) outcome: `t_end_us src dst frame_id outcome rx_dbm sinr_min_db`, outcome one of `ok`, `noise` (lost, no interferer), `interference` (lost with an interferer), `captured`, `below_lock` (heard, not locked: too weak against the noise and interference), `busy` (heard while receiving another frame and not captured), `not_listening`, `tx_abort`, `left`.
-- At the end of the run, a summary line per outcome (totals), and the CCA query count with the busy count.
+- At the end of the run, a summary line per outcome (totals), and the CCA query count with the number of queries that found a frame on air. The server does not know the radios' CCA thresholds: the busy counts are in the radios' exit lines (`rf medium: N CCA, N busy`).
 - Random: the verdict draws use a stream per receiver, `mix64(seed + mix64(node ID + 1) + K)` with a constant `K` that separates it from the port's and the drift's streams.
 
 ## 8. Checks (the EM4 gate)
@@ -84,4 +86,4 @@ When the gate passes, `--medium=central` becomes the default with `--vtime` and 
 
 ## 9. Not in the MVP
 
-Adjacent-channel rejection, fading and shadowing, bursts of losses, external interferers, preamble-sniff detection, node positions and path-loss models, RX↔TX turnaround and settling times, a reported RSSI with its own error (Investigation §5, P4–P11 and the layered loss model). The radio still decides its own TX timing; the medium does not delay or refuse a transmission.
+Adjacent-channel rejection, fading and shadowing, bursts of losses, external interferers, preamble-sniff detection, node positions and path-loss models, RX↔TX turnaround and settling times, a reported RSSI with its own error (Investigation §5, P4–P11 and the layered loss model). The radio still decides its own TX timing; the medium does not delay or refuse a transmission. A frame that will be lost keeps its receiver in RX for its whole airtime, as on a real radio (legacy dropped it at its start), so central runs show more RX time.
