@@ -563,9 +563,10 @@ class Radio(Behaviour):
         return self.out, min(later) if later else NEVER
 
 
-def medium_run(radios, links, opts=(), seed="1", hook=None):
+def medium_run(radios, links, opts=(), seed="1", hook=None, setup=None):
     """links: [(a, b, rssi or None)]. Returns the driver, the server output
-    and the --medium-log lines as tuples."""
+    and the --medium-log lines as tuples. setup(driver), if given, runs once
+    the nodes are connected (e.g. to connect a later instance)."""
     mlog = os.path.join(ARGS.logdir, "medium.log")
     if os.path.exists(mlog):
         os.unlink(mlog)
@@ -575,6 +576,8 @@ def medium_run(radios, links, opts=(), seed="1", hook=None):
     d = Driver(ARGS.sock, radios)
     d.on_wake = hook
     d.connect()
+    if setup:
+        setup(d)
     d.run(timeout=60)
     status = srv.wait(60)
     out = srv.output()
@@ -769,6 +772,162 @@ def test_medium_determinism():
     check(rows[0] != rows[2], "another seed, same medium log")
 
 
+def sinr_db(p, *intf):
+    return p - 10 * math.log10(10 ** (NOISE_DBM / 10) + sum(10 ** (i / 10) for i in intf))
+
+
+def p_success(segments):
+    """MEDIUM.md §2: segments [(share of the frame, SINR dB)] -> P_success."""
+    return math.prod((1 - min(0.5, 0.5 * math.exp(-0.5 * s))) ** (BITS * share) for share, s in segments)
+
+
+def test_medium_segments():
+    """The counted bits are shared over the segments (§2): an interferer
+    covers a quarter of the frame, at the end (it starts after the lock) or
+    at the start (it started before the frame, while the receiver was idle),
+    at a SINR where that quarter loses about half of the frames. The loss
+    rate matches P_success of the formula, far from the whole frame
+    interfered (about 96 %). 2 locks every frame and hears every interferer
+    (busy, or not_listening when it was idle)."""
+    n, period, p_a, p_i = 400, 12000, -80, -87
+    quarter = AIRTIME // 4
+    want_loss = 1 - p_success([(0.75, sinr_db(p_a)), (0.25, sinr_db(p_a, p_i))])
+    whole = 1 - p_success([(1, sinr_db(p_a, p_i))])
+    sigma = math.sqrt(n * want_loss * (1 - want_loss))
+    for where in ("end", "start"):
+        first = 10000
+        if where == "end":
+            off3, acts2 = AIRTIME - quarter, {}
+        else:
+            # 2 idle when 3's frame starts, listening again before 1's
+            off3 = quarter - AIRTIME
+            acts2 = {}
+            for k in range(n):
+                t = first + k * period
+                acts2[t + off3 - 1] = [("radio", RADIO_IDLE, 0)]
+                acts2[t - 1] = [("radio", RADIO_LISTEN, 0)]
+        r = {1: Radio(1, period=(first, period, n)), 2: Radio(2, acts2), 3: Radio(3, period=(first + off3, period, n))}
+        d, out, rows = medium_run(r, [(1, 2, p_a), (3, 2, p_i)])
+        xv = [m for t, m in got(r[2], "xv")]
+        check(len(xv) == n and all(m["frame_id"] % 2 == (1 if where == "end" else 0) for m in xv),
+              f"{where}: {len(xv)} verdicts, or not for 1's frames")
+        lost = sum(1 for m in xv if not m["ok"])
+        check(all(m["ok"] or m["cause"] == 2 for m in xv), f"{where}: a loss not caused by interference")
+        check(all(abs(m["sinr_db"] - sinr_db(p_a, p_i)) < 0.01 for m in xv), f"{where}: segment SINR")
+        check(abs(lost - n * want_loss) < 4 * sigma, f"{where}: {lost} lost of {n}, formula {n * want_loss:.0f}")
+        heard3 = {x[4] for x in rows if x[1] == 3}
+        check(heard3 == ({"busy"} if where == "end" else {"not_listening"}), f"{where}: 3's frames at 2: {heard3}")
+        print(f"     interferer at the {where}: {lost}/{n} lost, formula {n * want_loss:.1f} (sigma {sigma:.1f}), "
+              f"whole frame interfered {n * whole:.0f}")
+
+
+def test_medium_lock_refused():
+    """2 is idle when 3's frame starts, then listens: 1's frame, 50 dB above
+    the noise but 10 dB below 3's frame on air, is not locked (below_lock,
+    SINR -10 dB from I(t)); with 3's frame 20 dB below 1's, it is."""
+    for p3, locked in ((-60, False), (-90, True)):
+        r = {1: Radio(1, {2000: [("tx", {})]}), 2: Radio(2, {0: [("radio", RADIO_IDLE, 0)],
+                                                         1500: [("radio", RADIO_LISTEN, 0)]}),
+             3: Radio(3, {1000: [("tx", {})]})}
+        d, out, rows = medium_run(r, [(1, 2, -70), (3, 2, p3)])
+        log = {(x[1], x[4]): x[6] for x in rows}
+        check(log.get((3, "not_listening")) is not None, f"{p3}: 3's frame at 2: {rows}")
+        xx = [m["src"] for t, m in got(r[2], "xx")]
+        if locked:
+            check(xx == [1] and abs(log.get((1, "ok"), 99) - sinr_db(-70, p3)) < 0.01, f"{p3}: {rows}, {xx}")
+        else:
+            check(not xx and abs(log.get((1, "below_lock"), 99) - sinr_db(-70, p3)) < 0.01, f"{p3}: {rows}, {xx}")
+
+
+def test_medium_other_channel():
+    """A frame on another channel, starting during the lock or before it,
+    does not interfere: the verdict's SINR is the noise SNR, and the other
+    frame is not_listening at 2 (its channel is not 2's)."""
+    for t3 in (2000, 500):
+        r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {t3: [("tx", {"chan": 1})]})}
+        d, out, rows = medium_run(r, [(1, 2, -100), (3, 2, -50)])
+        xv = [m for t, m in got(r[2], "xv")]
+        check(len(xv) == 1 and abs(xv[0]["sinr_db"] - sinr_db(-100)) < 0.01, f"t3 {t3}: verdicts {xv}")
+        check({(x[1], x[4]) for x in rows} - {(1, "ok"), (1, "noise")} == {(3, "not_listening")}, f"t3 {t3}: {rows}")
+
+
+def test_medium_cut_drop():
+    """A frame that 2 does not hear (--vtime-cut 3 -> 2, or --vtime-drop of
+    its sequence number to 2) is neither interference to 2's frame nor
+    energy in 2's CCA, and not in the log for 2; node 4 still hears it. The
+    control without either: 3's frame, 20 dB stronger, destroys 1's and is
+    in 2's CCA energy."""
+    t3 = 1000 + SHR_US + 100
+    for opt in ("", "--vtime-cut=3:2:0.0005", f"--vtime-drop=3:2:{PAYLOAD[2]}:0:1"):
+        r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2, {t3 + 100: [("sense", 0)]}),
+             3: Radio(3, {t3: [("tx", {})]}), 4: Radio(4)}
+        d, out, rows = medium_run(r, [(1, 2, -80), (3, 2, -60), (3, 4, -60)], opts=[opt] if opt else [])
+        xv = [m for t, m in got(r[2], "xv")]
+        sensed = r[2].sensed[0][2]
+        to2 = {(x[1], x[4]) for x in rows if x[2] == 2}
+        check(got(r[4], "xx") and got(r[4], "xx")[0][1]["src"] == 3, f"{opt}: 4 did not hear 3")
+        if opt:
+            check(len(xv) == 1 and xv[0]["ok"] and abs(xv[0]["sinr_db"] - sinr_db(-80)) < 0.01, f"{opt}: {xv}")
+            check(abs(sensed - 10 * math.log10(10 ** (NOISE_DBM / 10) + 10 ** (-80 / 10))) < 0.01,
+                  f"{opt}: CCA at 2 {sensed}")
+            check(to2 == {(1, "ok")}, f"{opt}: log for 2 {to2}")
+        else:
+            check(len(xv) == 1 and not xv[0]["ok"] and xv[0]["cause"] == 2, f"control: {xv}")
+            check(abs(sensed - 10 * math.log10(10 ** (NOISE_DBM / 10) + 10 ** (-80 / 10) + 10 ** (-60 / 10))) < 0.01,
+                  f"control: CCA at 2 {sensed}")
+            check(to2 == {(1, "interference"), (3, "busy")}, f"control: log for 2 {to2}")
+
+
+def test_medium_capture_margin():
+    """Capture margin 6 dB (default): a frame exactly 6 dB stronger,
+    during the SHR, captures; 0.01 dB less does not. With
+    --medium-capture-db=10, 6 dB no longer captures and 10 dB does. The
+    captured frame stays on air: it interferes with the capturing one."""
+    for p3, opts, captured in ((-74, [], True), (-74.01, [], False),
+                               (-74, ["--medium-capture-db=10"], False), (-70, ["--medium-capture-db=10"], True)):
+        r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {1500: [("tx", {})]})}
+        d, out, rows = medium_run(r, [(1, 2, -80), (3, 2, p3)], opts=opts)
+        outcomes = {(x[1], x[4]) for x in rows}
+        if captured:
+            check(outcomes in ({(1, "captured"), (3, "ok")}, {(1, "captured"), (3, "interference")}) and
+                  abs(rows[-1][6] - sinr_db(p3, -80)) < 0.01, f"{p3} {opts}: {rows}")
+        else:
+            check(outcomes == {(1, "interference"), (3, "busy")}, f"{p3} {opts}: {rows}")
+
+
+def test_medium_restart():
+    """A receiver stopped while it holds a frame (left), restarted
+    (--vtime-start) before that frame's end: the new instance gets no verdict
+    and no wake at the old frame's end, and receives the next frame as
+    usual. Also with the new instance started after the frame's end."""
+    for opts, t_new in ((["--vtime-start=2:0.003"], 3000),
+                        (["--vtime-kill=2:0.002", "--vtime-start=2:0.004"], 4000),
+                        (["--vtime-kill=2:0.002", "--vtime-start=2:0.008"], 8000)):
+        old, new2 = Radio(2), Radio(2)
+        r = {1: Radio(1, {1000: [("tx", {})], 10000: [("tx", {})]}), 2: old}
+
+        def setup(drv):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            s.connect(ARGS.sock)
+            s.send(HELLO.pack(b"xh", 2, HELLO_VTIME, 0))
+
+            def swap(drv2, nid):
+                if nid == 2 and drv2.nodes[2] is not new2:
+                    drv2.socks[2] = s
+                    drv2.nodes[2] = new2
+                    drv2.closed.discard(2)
+            drv.on_close = swap
+        d, out, rows = medium_run(r, [(1, 2, -60)], opts=opts, setup=setup)
+        check([(t, m["frame_id"]) for t, m in got(old, "xx")] == [(1000, 1)] and not got(old, "xv"),
+              f"{opts}: old instance {old.rx}")
+        check([(t, k, m["frame_id"]) for t, k, m in new2.rx] == [(10000, "xx", 2), (10000 + AIRTIME, "xv", 2)],
+              f"{opts}: new instance {new2.rx}")
+        w2 = [t for t, n, f, o in d.log if n == 2 and t >= t_new]
+        check(w2 == [t_new, 10000, 10000 + AIRTIME], f"{opts}: wakes of the new instance {w2}")
+        check({(x[3], x[4]) for x in rows} == {(1, "left"), (2, "ok")}, f"{opts}: log {rows}")
+        check(d.start.get(2) == t_new, f"{opts}: start {d.start}")
+
+
 def main():
     global ARGS
     ap = argparse.ArgumentParser()
@@ -819,6 +978,12 @@ def main():
         ("medium_left", test_medium_left),
         ("medium_curve", test_medium_curve),
         ("medium_determinism", test_medium_determinism),
+        ("medium_segments", test_medium_segments),
+        ("medium_lock_refused", test_medium_lock_refused),
+        ("medium_other_channel", test_medium_other_channel),
+        ("medium_cut_drop", test_medium_cut_drop),
+        ("medium_capture_margin", test_medium_capture_margin),
+        ("medium_restart", test_medium_restart),
     ]
     for name, fn in tests:
         if ARGS.k not in name:
