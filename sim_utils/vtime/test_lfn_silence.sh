@@ -21,12 +21,19 @@
 # usage: test_lfn_silence.sh <bindir> <workdir(holds examples/)> <outdir>
 # Environment: WSSIM_SEED (1), TUN (none), MAX_LATENCY (none), SILENCES ("3600 10800 36000": the
 # gaps before each request, the first one counted from JOIN_REF, 300 s: the
-# requests go at 3 900, 14 700 and 50 700 s), JOIN_MAX (600), SIM_OPTS (--drift-random=20),
+# requests go at 3 900, 14 700 and 50 700 s), JOIN_MAX (600; 3600 with a listen
+# interval of 300 s or more in LFN_EXTRA, Silicon Labs' Eco), SIM_OPTS (--drift-random=20),
 # LFN_EXTRA, PARENT_EXTRA, KEEP (1: keep the run directory).
 # Exit status 0 if every check passes.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
-TUN=${TUN:-none}; JOIN_MAX=${JOIN_MAX:-600}; SIM_OPTS=${SIM_OPTS---drift-random=20}
+# Eco's join: the LPC and the ARO each wait one 300 s listen interval, and
+# the DHCPv6 delay adds up to 600 s; the stack's LFN_STACK.md §11 records
+# 619-638 s under the border router and 689-3 429 s under the router (3 429 s
+# when the router itself was ready late). 600 s fits the shorter intervals.
+LI=$(printf '%s\n' "${LFN_EXTRA:-}" | grep -o 'lfn_listen_interval_ms=[0-9]*' | head -1 | cut -d= -f2)
+JM=600; [ "${LI:-0}" -ge 300000 ] && JM=3600
+TUN=${TUN:-none}; JOIN_MAX=${JOIN_MAX:-$JM}; SIM_OPTS=${SIM_OPTS---drift-random=20}
 SILENCES=${SILENCES:-3600 10800 36000}; JOIN_REF=${JOIN_REF:-300}
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT" && OUT=$(realpath "$OUT")
