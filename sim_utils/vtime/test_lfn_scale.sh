@@ -14,7 +14,16 @@
 #     kept it (one discovery, no parent loss);
 #   - unicast both ways, for every LFN: the requests from 15 s after it became
 #     operational (and TRAFFIC_FROM) to the end (less 30 s) arrived and were
-#     echoed;
+#     echoed. A request or echo lost on the FFN backbone is accepted (and
+#     printed apart) when a node of its path, from the LFN's parent through
+#     each router's FHSS parent ("synch to parent") to the border router,
+#     reports its MAC retries exhausted ("MCPS Data fail") to the next node
+#     of the path, in the right direction, within BACKBONE_WIN (30) s of
+#     the packet's departure, with no such failure on the LFN hop (the LFN
+#     to its parent, or the parent to the LFN), and while the echoes in
+#     each direction stay at 99 % or more of the requests (FAN 1.0 routers
+#     hidden from each other can collide in lock-step at the border router
+#     until their retries run out). Any other loss fails;
 #   - group: every GROUP request reached every LFN once;
 #   - every frame each LFN received started inside one of its windows (ACKs
 #     to its own frames aside) and each received at least MIN_RX frames;
@@ -103,6 +112,58 @@ seq = mpl_seq_of_requests(f'{out}/br.log', group)
 mpl_got = {r: mpl_received(f'{out}/node{r}.log') for r in routers}
 ffn_lost = {}
 bad = {k: [] for k in ('join', 'down', 'up', 'group', 'win')}
+# The FFN backbone: each router's FHSS parent over time, and the MAC
+# failures of every FFN and LFN (sender -> [(t, destination node)])
+BACKBONE_WIN = 30.0
+fparent, fails = {}, {}
+def scan_fails(n, path):
+    fails[n] = []
+    pend = None
+    for t, m in lines(path):
+        if 'MCPS Data fail' in m:
+            pend = t
+        elif pend is not None and 'Dest addr: ' in m:
+            fails[n].append((pend, eui_node(m.split('Dest addr: ')[1].strip())))
+            pend = None
+        if n in routers:
+            r = re.search(r'synch to parent: (\S+),', m)
+            if r:
+                fparent.setdefault(n, []).append((t, eui_node(r.group(1))))
+scan_fails(0, f'{out}/br.log')
+for r in routers:
+    scan_fails(r, f'{out}/node{r}.log')
+def ffn_parent(r, t):
+    p = None
+    for x, q in fparent.get(r, []):
+        if x > t:
+            break
+        p = q
+    return p
+def chain(par, t):
+    """The LFN's parent, its FHSS parent, ..., the border router"""
+    c = [par]
+    while c[-1] != 0 and c[-1] is not None and len(c) < 20:
+        nxt = ffn_parent(c[-1], t)
+        if nxt is None or nxt in c:
+            return None
+        c.append(nxt)
+    return c if c[-1] == 0 else None
+def failed(a, b, t):
+    return any(t <= x <= t + BACKBONE_WIN and d == b for x, d in fails.get(a, []))
+def backbone_loss(n, par, t, up):
+    """A packet lost after leaving at t, upward (LFN -> BR) or downward:
+    the hop that failed, on the backbone, or None"""
+    if (up and failed(n, par, t)) or (not up and failed(par, n, t)):
+        return None     # the LFN hop failed
+    c = chain(par, t)
+    if not c:
+        return None
+    for a, b in zip(c, c[1:]):
+        if (up and failed(a, b, t)) or (not up and failed(b, a, t)):
+            return f'{a}->{b}' if up else f'{b}->{a}'
+    return None
+backbone = {'down': [], 'up': []}
+totals = {'down': [0, 0], 'up': [0, 0]}     # requests, echoes
 opers, delays, nrx, parents = [], [], [], {}
 for n in range(first, last + 1):
     oper, disc, lost, par = None, 0, 0, None
@@ -124,14 +185,32 @@ for n in range(first, last + 1):
     lf = udp(f'{out}/node{n}.log')
     end = end0 - listen_interval_s(f'{out}/node{n}.log')   # downlinks wait for a window
     a = max(oper + 15, t_from)
-    q, got, back = exchange(br, lf, None, a, end, dst=lfn_addr(n))
-    if not q or len(got) < len(q) or len(back) < len(q):
-        bad['down'].append(f'{n} ({len(q)} requests, {len(got)} received, {len(back)} echoed)')
-    rxt = {p: t for t, s, p in lf['rx']}
-    delays += [rxt[p] - t for t, p in got]
-    q, got, back = exchange(lf, br, lfn_addr(n), a, end)
-    if not q or len(got) < len(q) or len(back) < len(q):
-        bad['up'].append(f'{n} ({len(q)} requests, {len(got)} received, {len(back)} echoed)')
+    for way, tx, rx, peer, dst in (('down', br, lf, None, lfn_addr(n)), ('up', lf, br, lfn_addr(n), None)):
+        q, got, back = exchange(tx, rx, peer, a, end, dst=dst)
+        if way == 'down':
+            rxt = {p: t for t, s, p in lf['rx']}
+            delays += [rxt[p] - t for t, p in got]
+        totals[way][0] += len(q)
+        totals[way][1] += len(back)
+        gotp, backp = {p for t, p in got}, {p for t, p in back}
+        lost = []
+        for t, p in q:
+            if p in backp:
+                continue
+            rp = p.replace('Q', 'R', 1)
+            if p not in gotp:
+                # the request: from the requester at t
+                hop = backbone_loss(n, par, t, way == 'up')
+            else:
+                # the echo: from the requested side when it sent it
+                et = [x for x, d, y in rx['tx'] if y == rp]
+                hop = backbone_loss(n, par, et[0], way == 'down') if et else None
+            if hop:
+                backbone[way].append(f'LFN {n} {p} ({"request" if p not in gotp else "echo"}, {hop})')
+            else:
+                lost.append(p)
+        if not q or lost:
+            bad[way].append(f'{n} ({len(q)} requests, {len(got)} received, {len(back)} echoed; lost {", ".join(lost)})')
     gw = [p for t, p in gsent if a < t < end]
     if par in mpl_got:
         lost = [p for p in gw if seq.get(p) not in mpl_got[par]]
@@ -152,6 +231,11 @@ ck(not bad['join'], f'{N - len(bad["join"])} of {N} LFNs joined by {join_max:.0f
    + (f' (operational {min(opers):.0f}-{max(opers):.0f} s)' if opers else '') + show(bad['join']))
 ck(not bad['down'], f'BR -> LFN unicast complete for {N - len(bad["down"])} of {N} LFNs' + show(bad['down']))
 ck(not bad['up'], f'LFN -> BR unicast complete for {N - len(bad["up"])} of {N} LFNs' + show(bad['up']))
+for way, name in (('down', 'BR -> LFN'), ('up', 'LFN -> BR')):
+    nq, nb = totals[way]
+    if backbone[way]:
+        ck(nb >= 0.99 * nq, f'{name}: {len(backbone[way])} lost on the FFN backbone (MAC retries exhausted on a router hop), '
+           f'{nb} of {nq} echoed (at least 99 %): ' + '; '.join(backbone[way][:6]))
 if ffn_lost:
     ck.info(f'{group}: requests a parent router never got by MPL (FFN loss, not counted against the LFNs): '
             + '; '.join(f'LFN {n} under {p}: {len(l)}' for n, (p, l) in sorted(ffn_lost.items())))
