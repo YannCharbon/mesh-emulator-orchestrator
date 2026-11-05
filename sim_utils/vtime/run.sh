@@ -61,9 +61,17 @@
 #   RESTART="<i>:<s> ..." a new instance of node i (same options, same key
 #                      storage) starts at virtual second s (--vtime-start);
 #                      the running one, if any, is stopped then. Its log is
-#                      node<i>.r<k>.log (k = 1, 2, ...); the lines of its first
-#                      run carry the time of its start minus the run's
-#                      (they print before its first wake: see the README)
+#                      node<i>.r<k>.log (k = 1, 2, ...); its clock starts
+#                      at 0 at s, as a device's at power-up
+#   POWER_UP="<i>:<s> ..." node i is powered up (welcomed) at virtual second s
+#                      instead of 0: until then it neither runs nor hears
+#                      (--vtime-power-up). With POWER, its ledger starts then
+#   SPREAD=<s>         with SPREAD_NODES="<i> ...": each of these nodes is
+#                      powered up at its own offset in [0, s), drawn from
+#                      WSSIM_SEED and its ID (the same for the same seed);
+#                      0 or unset: all at 0. Devices do not power up within
+#                      the same microsecond: without it, nodes with the same
+#                      deterministic timers (an LFN's LPAS sweeps) send in step
 #   CUT="<a>:<b>:<s> ..." from virtual second s, frames from node a no longer
 #                      reach node b (one direction; --vtime-cut)
 #   LINK="<a>:<b>:<s>:<rssi> ..." from virtual second s, the link a-b (both
@@ -198,6 +206,17 @@ for k in ${RESTART:-}; do
 	CTL+=(--vtime-start="$k"); STOPPED[$i]=$(( ${STOPPED[$i]:-0} + 1 ))
 	NINST[$i]=$(( ${NINST[$i]:-0} + 1 )); LATE+=("$i:node$i.r${NINST[$i]}")
 done
+for k in ${POWER_UP:-}; do CTL+=(--vtime-power-up="$k"); done
+if [ -n "${SPREAD_NODES:-}" ] && [ "${SPREAD:-0}" != 0 ]; then
+	for k in $(python3 -c '
+import hashlib, sys
+seed, spread = sys.argv[1], float(sys.argv[2])
+for i in sys.argv[3:]:
+    h = int.from_bytes(hashlib.sha256(f"power-up {seed} {i}".encode()).digest()[:8], "big")
+    print(f"{i}:{h / 2**64 * spread:.6f}")' "$SEED" "$SPREAD" $SPREAD_NODES); do
+		CTL+=(--vtime-power-up="$k")
+	done
+fi
 for k in ${CUT:-}; do CTL+=(--vtime-cut="$k"); done
 for k in ${LINK:-}; do CTL+=(--vtime-link="$k"); done
 for k in ${DROP:-}; do CTL+=(--vtime-drop="$k"); done

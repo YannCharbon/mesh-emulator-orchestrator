@@ -17,7 +17,12 @@
 #
 # usage: test_lfn_mc_full.sh <bindir> <workdir(holds examples/)> <outdir>
 # Environment: LFNS (9), NGROUPS (4), CAPACITY (32), DUR (600), WSSIM_SEED (1),
-# TUN (none), SIM_OPTS (--drift-random=20).
+# TUN (none), SIM_OPTS (--drift-random=20), SPREAD.
+# SPREAD (10): the LFNs power up at offsets in [0, SPREAD) s drawn from
+# the seed (run.sh SPREAD); 0 starts them all at 0, in step: their LPAS
+# sweeps, on the same deterministic timers, then collide at the parent for
+# as long as the drift keeps them together (with the central medium; a
+# mass power-up hazard).
 # Exit status 0 if every check passes.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
@@ -33,7 +38,7 @@ for i in $(seq 1 "$LFNS"); do
     for g in $(seq 1 "$GROUPS_N"); do G="$G -o test_udp_group=ff05::$i:$g"; done
     export NODE_OPTS_$i="-o device_type=lfn -o enable_lfn=false -o lfn_parent_check_s=0 $G"
 done
-BR_OPTS="-o lfn_mc_reg_max=$CAPACITY" CONF=lfn TOPO="$OUT.topo" TUN=$TUN SIM_OPTS="$SIM_OPTS" \
+BR_OPTS="-o lfn_mc_reg_max=$CAPACITY" CONF=lfn TOPO="$OUT.topo" TUN=$TUN SIM_OPTS="$SIM_OPTS" SPREAD=${SPREAD:-10} SPREAD_NODES="$(seq -s ' ' 1 "$LFNS")" \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT" "$DUR" > "$OUT.run" 2>&1
 RC=$?
 rm -f "$OUT.topo"

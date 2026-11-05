@@ -303,6 +303,8 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --vtime-start=ID:SECONDS  virtual time: one more instance of node ID connects at the start\n");
     fprintf(stream, "                            (after the first one) and is welcomed at that time, once the\n");
     fprintf(stream, "                            previous one is stopped (stopped then if still running); repeatable\n");
+    fprintf(stream, "  --vtime-power-up=ID:SECONDS virtual time: node ID (its first instance) is welcomed at that\n");
+    fprintf(stream, "                            time instead of at 0: until then it neither runs nor hears; repeatable\n");
     fprintf(stream, "  --vtime-cut=SRC:DST:SECONDS virtual time: from that time, frames from SRC no longer reach\n");
     fprintf(stream, "                            DST (one direction); repeatable\n");
     fprintf(stream, "  --vtime-link=A:B:SECONDS:RSSI virtual time: from that time, the link between A and B has\n");
@@ -344,6 +346,7 @@ enum {
     OPT_DRIFT_RANDOM,
     OPT_VTIME_KILL,
     OPT_VTIME_START,
+    OPT_VTIME_POWER_UP,
     OPT_VTIME_CUT,
     OPT_VTIME_FRAMES,
     OPT_VTIME_LINK,
@@ -367,7 +370,8 @@ static struct vt_drop vt_drops[VT_DROP_MAX];
 static int vt_drops_n;
 static uint64_t vt_dropped;
 
-// Node events in virtual time (--vtime-kill, --vtime-start, --vtime-cut),
+// Node events in virtual time (--vtime-kill, --vtime-start and
+// --vtime-power-up, --vtime-cut, --vtime-link),
 // applied at their time before any wake at that time, in time order (option
 // order on a tie).
 enum { VT_CTL_KILL, VT_CTL_START, VT_CTL_CUT, VT_CTL_LINK };
@@ -377,6 +381,7 @@ struct vt_ctl {
     int node;                   // CUT: the receiver
     int src;                    // CUT: the sender
     int slot;                   // START: the connection of the instance, 0 until its hello
+    bool first;                 // START: --vtime-power-up, the node's first instance
     float rssi;                 // LINK: the new RSSI of the link, both directions
 };
 #define VT_CTL_MAX 256
@@ -404,8 +409,8 @@ static int node_id(const char *opt, const char *str)
     return id;
 }
 
-// "ID:SECONDS" (kill, start), "SRC:DST:SECONDS" (cut) or "A:B:SECONDS:RSSI" (link)
-static void vt_ctl_add(int kind, const char *opt, char *arg)
+// "ID:SECONDS" (kill, start, power-up), "SRC:DST:SECONDS" (cut) or "A:B:SECONDS:RSSI" (link)
+static void vt_ctl_add(int kind, const char *opt, char *arg, bool first)
 {
     struct vt_ctl *c = &vt_ctls[vt_ctls_n];
     char *f[4];
@@ -426,7 +431,8 @@ static void vt_ctl_add(int kind, const char *opt, char *arg)
         c->rssi = strtof(f[3], &end);
         FATAL_ON(*end || c->rssi > 0 || c->rssi < -200, 1, "%s: bad RSSI: %s", opt, f[3]);
     }
-    if (kind == VT_CTL_START)
+    c->first = first;
+    if (kind == VT_CTL_START && !first)
         vt_starts_n++;
     vt_ctls_n++;
 }
@@ -510,6 +516,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "drift-random", required_argument, 0, OPT_DRIFT_RANDOM },
         { "vtime-kill", required_argument, 0, OPT_VTIME_KILL },
         { "vtime-start", required_argument, 0, OPT_VTIME_START },
+        { "vtime-power-up", required_argument, 0, OPT_VTIME_POWER_UP },
         { "vtime-cut", required_argument, 0, OPT_VTIME_CUT },
         { "vtime-frames", required_argument, 0, OPT_VTIME_FRAMES },
         { "vtime-link", required_argument, 0, OPT_VTIME_LINK },
@@ -590,13 +597,16 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
                 FATAL_ON(drift_random_ppb < 0, 1, "--drift-random: expected a positive bound");
                 break;
             case OPT_VTIME_KILL:
-                vt_ctl_add(VT_CTL_KILL, "--vtime-kill", optarg);
+                vt_ctl_add(VT_CTL_KILL, "--vtime-kill", optarg, false);
                 break;
             case OPT_VTIME_START:
-                vt_ctl_add(VT_CTL_START, "--vtime-start", optarg);
+                vt_ctl_add(VT_CTL_START, "--vtime-start", optarg, false);
+                break;
+            case OPT_VTIME_POWER_UP:
+                vt_ctl_add(VT_CTL_START, "--vtime-power-up", optarg, true);
                 break;
             case OPT_VTIME_CUT:
-                vt_ctl_add(VT_CTL_CUT, "--vtime-cut", optarg);
+                vt_ctl_add(VT_CTL_CUT, "--vtime-cut", optarg, false);
                 break;
             case OPT_VTIME_DROP: {
                 char *f[5], *q;
@@ -615,7 +625,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
                 break;
             }
             case OPT_VTIME_LINK:
-                vt_ctl_add(VT_CTL_LINK, "--vtime-link", optarg);
+                vt_ctl_add(VT_CTL_LINK, "--vtime-link", optarg, false);
                 break;
             case OPT_VTIME_FRAMES:
                 vt_frames_path = optarg;
@@ -649,13 +659,14 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     FATAL_ON(pwr_enabled() && !ctxt->vtime_nodes, 1, "--power needs --vtime");
     FATAL_ON((drift_specs_n || drift_random_ppb) && !ctxt->vtime_nodes, 1, "--drift needs --vtime");
     FATAL_ON((vt_ctls_n || vt_frames_path || vt_drops_n) && !ctxt->vtime_nodes, 1,
-             "--vtime-kill, --vtime-start, --vtime-cut, --vtime-link and --vtime-frames need --vtime");
+             "--vtime-kill, --vtime-start, --vtime-power-up, --vtime-cut, --vtime-link and --vtime-frames need --vtime");
     FATAL_ON(med_options_given() && !ctxt->vtime_nodes, 1, "--medium needs --vtime");
     FATAL_ON(med_tuning_given() && !med_central(), 1,
              "--medium-tx-ref, --medium-lock-snr, --medium-capture-db and --medium-log need --medium=central");
-    // The ledger follows each node's radio and MCU without gaps
+    // The ledger follows each node's radio and MCU without gaps (a node
+    // powered up late: its ledger starts at its first wake)
     for (int i = 0; i < vt_ctls_n; i++)
-        FATAL_ON(pwr_enabled() && (vt_ctls[i].kind == VT_CTL_KILL || vt_ctls[i].kind == VT_CTL_START), 1,
+        FATAL_ON(pwr_enabled() && (vt_ctls[i].kind == VT_CTL_KILL || (vt_ctls[i].kind == VT_CTL_START && !vt_ctls[i].first)), 1,
                  "--power cannot be combined with --vtime-kill or --vtime-start");
     // Stable sort: ties keep the option order (qsort is not stable)
     for (int i = 1; i < vt_ctls_n; i++)
@@ -732,7 +743,7 @@ static bool vt_start_take(int node, int slot)
     int i;
 
     for (i = 0; i < vt_ctls_n; i++)
-        if (vt_ctls[i].kind == VT_CTL_START && vt_ctls[i].node == node && !vt_ctls[i].slot) {
+        if (vt_ctls[i].kind == VT_CTL_START && !vt_ctls[i].first && vt_ctls[i].node == node && !vt_ctls[i].slot) {
             vt_ctls[i].slot = slot;
             return true;
         }
@@ -932,7 +943,6 @@ static int vt_num_nodes;
 static uint64_t vt_now;                         // time of the last wake
 static uint64_t vt_wakes, vt_frames_in, vt_frames_out;
 static uint64_t vt_cut[MAX_NODES][MAX_NODES / 64]; // vt_cut[dst]: senders it no longer hears
-static bool vt_late_first[MAX_NODES];           // a started instance's first "xi" may be in the past
 static uint64_t vt_verdicts_out, vt_senses;
 static uint8_t *vt_cca_shm;                     // the CCA shared memory (SIM_SHM_CCA_STRIDE bytes per node)
 
@@ -1033,11 +1043,7 @@ static void vt_set_deadline(int node, uint64_t next)
     vt_deadline_seq[node] = 0;
     if (next == NSIM_NEVER)
         return;
-    if (next < vt_now && vt_late_first[node]) {
-        // A started instance ran its first run on a clock from 0: its
-        // timers due before its start fire now (a node that was frozen)
-        next = vt_now;
-    } else if (next < vt_now) {
+    if (next < vt_now) {
         WARN("node %d: deadline %llu us is before now (%llu us), moved to now",
              node, (unsigned long long)next, (unsigned long long)vt_now);
         next = vt_now;
@@ -1176,7 +1182,6 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
             if (pwr_enabled())
                 pwr_idle(node, vt_now, idle->next_us);
             vt_set_deadline(node, idle->next_us);
-            vt_late_first[node] = false;
             return 0;
         }
         if (len >= 2 && !memcmp(buf, "xx", 2)) {
@@ -1218,14 +1223,17 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
     struct vt_event ev;
     size_t num = 0, num_frames = 0, i;
     uint32_t delivered = 0;     // the last medium frame delivered
+    bool deadline = false;      // the node's own deadline is due
     int ret = 0;
 
     vt_now = t;
     while (vt_heap_len && vt_heap[0].t == t && vt_heap[0].node == node) {
         ev = vt_pop();
         if (ev.kind == VT_EV_DEADLINE) {
-            if (ev.seq == vt_deadline_seq[node])
+            if (ev.seq == vt_deadline_seq[node]) {
                 vt_deadline_seq[node] = 0; // consumed: the node reports its next one
+                deadline = true;
+            }
             continue;
         }
         if (num == msgs_cap) {
@@ -1243,6 +1251,12 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
         msgs[num++].rx_dbm = ev.rx_dbm;
         num_frames++;
     }
+    // Only verdicts of locks that ended before their frame's end (captured,
+    // tx_abort, left): nothing to tell the node, so no wake (it would count
+    // as an MCU wake in the power report). Never the case in legacy mode,
+    // whose head event is always a live deadline or a frame.
+    if (!num && !deadline)
+        return 0;
     FATAL_ON(num > UINT16_MAX, 1, "node %d: %zu messages due at %" PRIu64 " us", node, num, t);
     adv.frames = num;
     vt_wakes++;
@@ -1388,10 +1402,13 @@ static int vt_ctl_run(struct ctxt *ctxt, struct vt_ctl *c, struct nsim_welcome *
             WARN("virtual time: no instance of node %d to start at %s: run aborted", c->node, vt_time_str(vt_now));
             return -1;
         }
-        INFO("virtual time: node %d started at %s (new instance)", c->node, vt_time_str(vt_now));
+        INFO("virtual time: node %d started at %s (%s)", c->node, vt_time_str(vt_now),
+             c->first ? "powered up" : "new instance");
         slot_of_node[c->node] = c->slot;
         c->slot = 0;
-        vt_late_first[c->node] = true;
+        welcome->start_us = vt_now;   // its clock starts now (protocol version 4)
+        if (pwr_enabled())
+            pwr_wake(c->node, vt_now, 0);
         welcome->drift_ppb = drift_of(c->node, welcome->seed);
         if (vt_send(c->node, welcome, sizeof(*welcome)) || vt_read_until_idle(ctxt, c->node))
             return -1;
@@ -1446,11 +1463,27 @@ static int vt_run(struct ctxt *ctxt)
         vt_frames_file = fopen(vt_frames_path, "w");
         FATAL_ON(!vt_frames_file, 1, "%s: %m", vt_frames_path);
     }
+    // --vtime-power-up: the node's connection waits for its start time, as
+    // an instance of --vtime-start does; its radio is off meanwhile
+    for (i = 0; i < vt_ctls_n; i++) {
+        if (vt_ctls[i].kind != VT_CTL_START || !vt_ctls[i].first)
+            continue;
+        node = vt_ctls[i].node;
+        FATAL_ON(!slot_of_node[node], 1, "--vtime-power-up: node %d is not connected (or named twice)", node);
+        vt_ctls[i].slot = slot_of_node[node];
+        slot_of_node[node] = 0;
+        if (vt_cca_shm) {
+            vt_cca_shm[node * SIM_SHM_CCA_STRIDE] = 7;   // DRVSTATE_OFF (app_wshwsim/sl_rf_driver.c)
+            vt_cca_shm[node * SIM_SHM_CCA_STRIDE + 3] = SIM_RADIO_OFF;
+        }
+    }
     clock_gettime(CLOCK_MONOTONIC, &start);
     // Welcome the nodes one at a time, in ID order, and read each one's first
     // run at time 0 until its "xi": no two nodes ever run at once.
     for (i = 0; i < vt_num_nodes; i++) {
         node = vt_nodes[i];
+        if (!slot_of_node[node])
+            continue;   // powered up later
         if (pwr_enabled())
             pwr_wake(node, 0, 0);
         welcome.drift_ppb = drift_of(node, welcome.seed);

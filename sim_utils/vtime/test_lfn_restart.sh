@@ -79,8 +79,8 @@ def node_of(name):
 drops, dups = collections.Counter(), collections.Counter()
 for path in sorted(glob.glob(f'{out}/*.log')):
     name = os.path.basename(path)[:-4]
-    if name == 'simserver':
-        continue
+    if name != 'br' and not name.startswith('node'):
+        continue    # simserver.log, medium.log
     me = node_of(name)
     mymac = f'01020304050600{me:02x}'
     start = r_at if name == 'node1.r1' else l_at if name == 'node2.r1' else 0

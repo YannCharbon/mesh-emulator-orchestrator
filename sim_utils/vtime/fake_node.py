@@ -43,8 +43,8 @@ FRAME_FIELDS = ("magic", "len", "chan", "seq", "src", "shr_len", "fcs_len", "phr
 FRAME_MEDIUM = 0x01
 VERDICT = struct.Struct("=2sBBIff")  # magic, ok, cause, frame_id, rx_dbm, sinr_db
 SENSE = struct.Struct("=2sHf")       # magic, channel, dbm
-WELCOME = struct.Struct("=2sHIQiI")  # magic, version, flags, seed, drift_ppb, reserved
-PROTO_VERSION = 3
+WELCOME = struct.Struct("=2sHIQiIQ")  # magic, version, flags, seed, drift_ppb, reserved, start_us
+PROTO_VERSION = 4
 WELCOME_POWER = 0x0001
 WELCOME_MEDIUM = 0x0002
 # Defaults of the frames the fake nodes send: SHR 10 bytes, PHR 2, FCS 4, 50 kbit/s
@@ -226,6 +226,7 @@ class Driver:
         self.log = []
         self.seed = None
         self.drift = {}                 # node -> drift_ppb from its welcome
+        self.start = {}                 # node -> start_us from its welcome
         self.quit = set()
         self.closed = set()            # closed by the conductor without "xq"
         self.on_wake = None            # hook(driver, node, t) -> "close" to drop the node
@@ -309,13 +310,14 @@ class Driver:
                     continue
                 magic = msg[:2]
                 if magic == b"xw":
-                    _, version, flags, seed, drift, _ = WELCOME.unpack(msg)
+                    _, version, flags, seed, drift, _, start = WELCOME.unpack(msg)
                     if version != PROTO_VERSION:
                         raise TestError(f"node {nid}: welcome version {version}")
                     self.welcome_flags[nid] = flags
                     self.seed = seed
                     self.drift[nid] = drift
-                    self._reply(nid, 0, [], first=True)
+                    self.start[nid] = start
+                    self._reply(nid, start, [], first=True)
                 elif magic == b"xa":
                     _, count, _, _, t = ADVANCE.unpack(msg)
                     frames = [self._recv_frame(nid, s, t) for _ in range(count)]

@@ -370,19 +370,18 @@ def test_kill_cut_link():
 
 
 class Late(Forever):
-    """A started instance: timers armed in its first run (at its time 0) fire
-    at its first wake, as the simulation port does."""
+    """A started instance: its first run is at its start (the welcome's
+    start_us), and its timers count from there, as the simulation port's."""
 
-    def run(self, t, frames, first=False):
-        for k, d in self.timers.items():
-            self.timers[k] = max(d, t)
-        return super().run(t, frames, first)
+    def start(self):
+        self.set_timer("tx", self.now + 1000)
 
 
 def test_start():
     """--vtime-start: a second instance of node 2 connects at the start and is
-    welcomed at 5 ms, after the first one is stopped then; its first "xi"
-    deadline (relative to its own start at 0) is moved to 5 ms silently."""
+    welcomed at 5 ms with start_us 5 ms (protocol version 4), after the first
+    one is stopped then; it runs first at 5 ms and its timers count from
+    there."""
     nodes = {n: Forever(n) for n in (1, 2)}
     srv = Server(["--vtime=2", "--vtime-end=0.01", "--vtime-start=2:0.005"] + graph_args([(1, 2)]))
     d = Driver(ARGS.sock, nodes)
@@ -402,10 +401,27 @@ def test_start():
     log = d.run()
     check(srv.wait() == 0, "server exit status")
     w2 = [t for t, nid, f, o in log if nid == 2]
-    check(welcomed and 0 in w2 and 5000 in w2 and max(w2) >= 9000, f"node 2 wakes: {w2}")
+    check(welcomed and 0 in w2 and 5000 in w2 and 6000 in w2 and max(w2) >= 9000, f"node 2 wakes: {w2}")
+    check(d.start == {1: 0, 2: 5000}, f"welcome start_us: {d.start}")
     check(d.quit == {1, 2}, f"xq: {d.quit}")
     out = srv.output()
     check("node 2 started at 0.005000 s" in out and "is before now" not in out, "start not logged, or a warning")
+
+
+def test_power_up():
+    """--vtime-power-up=2:0.0035: node 2 (its only instance) is welcomed at
+    3.5 ms with start_us 3.5 ms; it does not run or hear before (node 1's
+    frames at 1, 2 and 3 ms do not reach it), then runs and hears as usual."""
+    nodes = {1: Forever(1), 2: Late(2)}
+    srv = Server(["--vtime=2", "--vtime-end=0.006", "--vtime-power-up=2:0.0035"] + graph_args([(1, 2)]))
+    d = Driver(ARGS.sock, nodes)
+    d.connect()
+    log = d.run()
+    check(srv.wait() == 0, "server exit status")
+    w2 = [(t, len(f)) for t, nid, f, o in log if nid == 2]
+    check(w2 == [(3500, 0), (4000, 1), (4500, 0), (5000, 1), (5500, 0), (6000, 1)], f"node 2 wakes: {w2}")
+    check(d.start == {1: 0, 2: 3500}, f"welcome start_us: {d.start}")
+    check("node 2 started at 0.003500 s (powered up)" in srv.output(), "start not logged")
 
 
 def raw_hello(nid, flags):
@@ -574,6 +590,13 @@ def got(radio, kind):
     return [(t, m) for t, k, m in radio.rx if k == kind]
 
 
+def empty_wakes(d, nid):
+    """Wakes of nid with no message (a stale verdict must not wake it): the
+    radios here have no deadline of their own at those times."""
+    acts = d.nodes[nid].times()
+    return [t for t, n, f, o in d.log if n == nid and t and not f and t not in acts]
+
+
 def test_medium_options():
     for args, msg in ((["--medium=central"], "needs --vtime"),
                       (["--vtime=1", "--medium=bogus"], "legacy or central"),
@@ -626,6 +649,7 @@ def test_medium_capture():
             check(xx == [(1000, 1), (1000 + delay, 2)], f"capture: frames {xx}")
             check(xv == [(1000 + delay + AIRTIME, 2, 1)], f"capture: verdicts {xv}")
             check(outcomes == {(1, "captured"), (2, "ok")}, f"capture: log {rows}")
+            check(not empty_wakes(d, 2), f"capture: empty wakes of 2 {empty_wakes(d, 2)}")
         else:
             check(xx == [(1000, 1)], f"no capture ({delay}, {rssi3}): frames {xx}")
             check(xv == [(1000 + AIRTIME, 1, 0)], f"no capture ({delay}, {rssi3}): verdicts {xv}")
@@ -639,6 +663,7 @@ def test_medium_half_duplex():
     check(len(got(r[2], "xx")) == 1 and not got(r[2], "xv"), f"2 got {r[2].rx}")
     check((1000 + AIRTIME, 1, 2, 1, "tx_abort") in {x[:5] for x in rows}, f"log {rows}")
     check("tx_abort       1" in out, "summary")
+    check(not empty_wakes(d, 2), f"half duplex: empty wakes of 2 {empty_wakes(d, 2)}")
 
 
 def test_medium_not_listening():
@@ -706,6 +731,7 @@ def test_medium_left():
     check(not got(r[2], "xv") and not got(r[4], "xv"), "a verdict after leaving")
     check({(x[2], x[3], x[4]) for x in rows} == {(2, 1, "left"), (4, 1, "left"), (4, 2, "not_listening")},
           f"log {rows}")
+    check(not empty_wakes(d, 4), f"left: empty wakes of 4 {empty_wakes(d, 4)}")
     shm = seen.get("shm", b"")
     check(shm[8:12] == bytes([7, 0, 0, RADIO_OFF]) and shm[20:24] == bytes([2, 7, 0, RADIO_IDLE]),
           f"shared memory {shm.hex()}")
@@ -781,6 +807,7 @@ def main():
         ("drift", test_drift),
         ("kill_cut_link", test_kill_cut_link),
         ("start", test_start),
+        ("power_up", test_power_up),
         ("medium_options", test_medium_options),
         ("medium_overlap", test_medium_overlap),
         ("medium_capture", test_medium_capture),

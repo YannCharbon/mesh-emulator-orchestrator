@@ -32,7 +32,11 @@
 # (tunvt0), GROUP (ff05::1234), BR_PERIOD (37; balanced 90, eco 450), LIFETIME_MIN (5; balanced 10,
 # eco 30), LEAVE_AT (1200; balanced 5400, eco 14400), JOIN_MAX (300;
 # balanced 900, eco 3600), SIM_OPTS (e.g. --drift-random=20), LFN_EXTRA,
-# ROUTER_EXTRA.
+# ROUTER_EXTRA, SPREAD (10): LFNs 3 and 5 power up at offsets in
+# [0, SPREAD) s drawn from the seed (run.sh SPREAD), so that 4 and 5 (both
+# under the router, not hearing each other) do not send their LPAS sweeps in
+# step; 2 and 4 start at 0, so that LEAVE_AT stays the leave's time. 0: all
+# at 0 (their sweeps then collide at the router with the central medium).
 # Exit status 0 if every check passes.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
@@ -55,7 +59,7 @@ export NODE_OPTS_3="$LFN"
 export NODE_OPTS_4="$LFN -o test_udp_group=$GROUP -o test_udp_group_leave_s=$LEAVE_AT"
 export NODE_OPTS_5="$LFN"
 BR_OPTS="-o test_udp_echo=true -o test_udp_dst=$GROUP -o test_udp_period_s=$BR_PERIOD -o test_udp_start_s=60 $PARENT_PROF" \
-CONF=lfn TOPO="$OUT.topo" TUN=$TUN POWER=$PROFILE \
+CONF=lfn TOPO="$OUT.topo" TUN=$TUN POWER=$PROFILE SPREAD=${SPREAD:-10} SPREAD_NODES="3 5" \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT" "$DUR" > "$OUT.run" 2>&1
 RC=$?
 rm -f "$OUT.topo"

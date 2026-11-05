@@ -7,20 +7,28 @@
 # supplicants' keys) and installs a new LGTK (lgtk_rotate_at_s); at 600 s the
 # router restarts with its key storage (run.sh RESTART). The router sees the
 # LGTK hash mismatch during its join and sends a key request; the border
-# router answers with a full EAP-TLS. The router - border router link is dead
-# (LINK -140 dBm) around it, so that:
-#   CASE=race:   the request goes out, the link dies, the EAP-TLS comes after
-#                the router's bootstrap has ended (which removes the
-#                supplicant's EAPOL target): before the fix the supplicant
-#                refused it ("Incoming KMP rejected, auth not ongoing") and the
-#                LGTK came with a request minutes later;
-#   CASE=txfail: the request is lost at the MAC: before the fix the next one
+# router answers with a full EAP-TLS. Around it:
+#   CASE=race:   the border router's first EAP-TLS frame to the router (MAC
+#                sequence number 216, at 654.65 s) is dropped with its MAC
+#                retries (DROP), so that its EAP-TLS comes again (712 s) after
+#                the router's bootstrap has ended (663 s), which removes the
+#                supplicant's EAPOL target: before the fix (stack 3adcae6)
+#                the supplicant refused it ("Incoming KMP rejected, auth not
+#                ongoing") and the LGTK came with a request minutes later;
+#                the fix's branch logs "Incoming KMP for our key request";
+#   CASE=txfail: the request is lost at the MAC (the link is dead, LINK
+#                -140 dBm, 654.6-665.3 s): before the fix the next one
 #                waited for the retry timer (180-420 s).
-# The link windows are set for seed 3 (virtual-time runs are deterministic:
-# the router's request goes out at 653.1 s in that seed).
+# The windows and the sequence number are set for seed 3 (virtual-time runs
+# are deterministic: the router, restarted at 600 s with its clock from
+# then, sends its request at 654.4 s in that seed). The router's restart
+# started its clock at 0 before protocol version 4 (a node frozen during its
+# boot): the request then went out at 653.1 s, and the race came from link
+# windows; with the clock from the restart, the bootstrap ends ~14 s after
+# the EAP-TLS starts and no link window reproduces it.
 #
 # Checks: no incoming KMP refused by the router, and its LGTK installed at
-# most LGTK_MAX (60) s after the link's return.
+# most LGTK_MAX (60) s after the link's return (race: the end of the drop window, 670 s).
 #
 # usage: test_lfn_keyreq.sh <bindir> <workdir(holds examples/)> <outdir>
 # Environment: CASE (race; race or txfail), WSSIM_SEED (3), TUN (none),
@@ -32,8 +40,8 @@ CASE=${CASE:-race}; TUN=${TUN:-none}; LGTK_MAX=${LGTK_MAX:-60}
 export WSSIM_SEED=${WSSIM_SEED:-3}
 HERE=$(cd "$(dirname "$0")" && pwd)
 case $CASE in
-race)   LINKS="0:1:653.3:-140 0:1:664:-50 0:1:672.6:-140 0:1:681:-50"; BACK=681 ;;
-txfail) LINKS="0:1:653.3:-140 0:1:664:-50"; BACK=664 ;;
+race)   LINKS=""; DROPS="0:1:216:654:670"; BACK=670 ;;
+txfail) LINKS="0:1:654.6:-140 0:1:665.3:-50"; DROPS=""; BACK=665.3 ;;
 *) echo "test_lfn_keyreq: CASE race or txfail" >&2; exit 2 ;;
 esac
 mkdir -p "$OUT" && OUT=$(realpath "$OUT")
@@ -42,7 +50,7 @@ printf '0,1:-50\n1,2:-50\n' > "$OUT.topo"
 export NODE_OPTS_1="-o device_type=ffn -o enable_lfn=true"
 export NODE_OPTS_2="-o device_type=lfn -o enable_lfn=false"
 BR_OPTS="-o test_keys_remove_at_s=590 -o lgtk_rotate_at_s=590 -o test_revoke_eui64=01:02:03:04:05:06:00:01" \
-CONF=lfn TOPO="$OUT.topo" TUN=$TUN SIM_OPTS="--drift-random=20" RESTART="1:600" LINK="$LINKS" \
+CONF=lfn TOPO="$OUT.topo" TUN=$TUN SIM_OPTS="--drift-random=20" RESTART="1:600" LINK="$LINKS" DROP="$DROPS" \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT" 1300 > "$OUT.run" 2>&1
 RC=$?
 rm -f "$OUT.topo"

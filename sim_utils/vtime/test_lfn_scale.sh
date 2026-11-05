@@ -30,7 +30,12 @@
 # (1000 star, 2000 mesh), LFN_PERIOD (as BR_PERIOD), TRAFFIC_FROM (600 star,
 # 1200 mesh), JOIN_MAX (900 star, 1500 mesh), GROUP (ff05::1234), MIN_RX
 # (20), DELAY_MAX (60), SIM_OPTS (--drift-random=20), LFN_EXTRA,
-# ROUTER_EXTRA, KEEP.
+# ROUTER_EXTRA, KEEP, SPREAD.
+# SPREAD (10): the LFNs power up at offsets in [0, SPREAD) s drawn from
+# the seed (run.sh SPREAD); 0 starts them all at 0, in step: their LPAS
+# sweeps, on the same deterministic timers, then collide at the parent for
+# as long as the drift keeps them together (with the central medium; a
+# mass power-up hazard).
 # Exit status 0 if every check passes.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
@@ -69,7 +74,7 @@ for r in $ROUTERS; do export NODE_OPTS_$r="-o device_type=ffn -o enable_lfn=true
 for (( i = FIRST; i <= LAST; i++ )); do
     export NODE_OPTS_$i="-o device_type=lfn -o enable_lfn=false -o test_udp_echo=true -o test_udp_group=$GROUP -o test_udp_dst=$BR_ADDR -o test_udp_period_s=$LFN_PERIOD -o test_udp_start_s=$((TRAFFIC_FROM + 30 + (i - FIRST) * LFN_PERIOD / LFNS)) ${LFN_EXTRA:-}"
 done
-BR_OPTS="$BR_T" CONF=lfn TOPO="$OUT.topo" TUN=$TUN SIM_OPTS="$SIM_OPTS" \
+BR_OPTS="$BR_T" CONF=lfn TOPO="$OUT.topo" TUN=$TUN SIM_OPTS="$SIM_OPTS" SPREAD=${SPREAD:-10} SPREAD_NODES="$(seq -s ' ' $FIRST $LAST)" \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT" "$DUR" > "$OUT.run" 2>&1
 RC=$?
 rm -f "$OUT.topo"
