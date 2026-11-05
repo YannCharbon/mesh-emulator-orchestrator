@@ -503,7 +503,7 @@ The kits drew about 4 µA more than the LFN power formula (root repo `LFN_Capabi
 
 **Effect** (`sim_utils/vtime/lfn_power_campaign.sh`, 21 runs, all passed): an empty window costs 41.1–41.4 µC in the ledger (33.7–33.9 µC before), a sync window 43.3 µC, one uplink frame 294 µC (287 µC). The idle Test LFN draws 19.44–19.50 µA (17.20–17.26 µA before), Balanced 9.35–9.39 µA, Eco 11.18–11.24 µA; `lfn_power_formula.py`, with *I_w* = 6.465 mA and *Q_fix* = 7.35 µC, matches every case within −0.8 … +1.5 % idle and −5.5 … +1.5 % with traffic (as before, the traffic cases deviate most).
 
-**Not in the profile** (kit terms the emulated stack does not produce, or charges less): the processing after a received sync frame (3.5 µC in the window and a 4.2 µC wake 24 ms later, against about 2 µC in the ledger) and short wakes every 1.02 s on the kits (0.09 µC each, 0.09 µA). The short wakes every 20 s and some more on the kits (5.8 µC, about 0.4 µA; in both stacks) are the stack's housekeeping, which the emulated stack has too (§15: the neighbour and destination cache collection every 20 s, the blacklist purge, MLD's query timer; 0.073 per s): the ledger charges them 0.70 µC each, about 0.37 µA less than the kits. `mcu.wake_charge_uc` is not raised for them because it also applies to window wakes, whose cost is calibrated above. Together about 0.5 µA on the kits (root repo `LFN_Capabilities_and_Power.md` §6.4).
+**Not in the profile** (kit terms the emulated stack does not produce, or charges less): the processing after a received sync frame (3.5 µC in the window and a 4.2 µC wake 24 ms later, against about 2 µC in the ledger) and short wakes every 1.02 s on the kits (0.09 µC each, 0.09 µA). The short wakes every 20 s and some more on the kits (5.8 µC, about 0.4 µA; in both stacks) are the stack's housekeeping, which the emulated stack has too (§15: the neighbour and destination cache collection every 20 s, the blacklist purge, MLD's query timer; 0.073 per s): the ledger charges them 0.70 µC each, about 0.37 µA less than the kits. Since §15.2 the stack skips them; one wake a minute is left (the PAE frame-counter check), 0.10 µA on the kits. `mcu.wake_charge_uc` is not raised for them because it also applies to window wakes, whose cost is calibrated above. Together about 0.5 µA on the kits (root repo `LFN_Capabilities_and_Power.md` §6.4).
 
 ## 13. LFN timed receive windows (GS8 stage 2, 2026-10-28)
 
@@ -574,7 +574,7 @@ The stack's 50 ms protocol timer and its core timer (the modules' 100 ms and 1 s
 | radio driver timers | 0.07 | 0.07 |
 | frames, event-loop tick | 0.02, 0.01 | 0.02, 0.01 |
 
-Where the 16.6 µA go (seed 1): radio listening 5.8, deep-sleep floor 4.6, TX 2.5, MCU in EM1 with the radio on 2.3, RX 0.6, charge per wake 0.36, MCU active 0.34, wake-up from deep sleep 0.07. The protocol wakes left (0.07/s, from the stack's `NS_PROTOCOL_TIMERS_SKIP_STATS` build) are periodic maintenance: the IPv6 neighbour cache GC every 20 s (0.050/s), the blacklist purge about every 60 s with a random draw (0.017/s), MLD's query timer every 125 s (0.006/s).
+Where the 16.6 µA go (seed 1): radio listening 5.8, deep-sleep floor 4.6, TX 2.5, MCU in EM1 with the radio on 2.3, RX 0.6, charge per wake 0.36, MCU active 0.34, wake-up from deep sleep 0.07. The protocol wakes left (0.07/s, from the stack's `NS_PROTOCOL_TIMERS_SKIP_STATS` build) are periodic maintenance: the IPv6 neighbour cache GC every 20 s (0.050/s), the blacklist purge about every 60 s with a random draw (0.017/s), MLD's query timer every 125 s (0.006/s). Removed in §15.2.
 
 With the test traffic (10 seeds × 1800 s): 49.6–54.5 µA instead of 74.6–79.5 µA (25.0 µA less in every seed), 1.7 wakes/s instead of 21.6.
 
@@ -615,6 +615,32 @@ The routers' highest values come from routers still joining in the window. The p
 | the same: current | 971 µA | 859 µA |
 
 A listening router hardly gains (listening dominates); a router with its radio off gains 112 µA. What is left on a searching router: the bootstrap counter, 10 wakes per second (above), and the radio driver's timers, 3.3 per second.
+
+### 15.2 Housekeeping with nothing to do (2026-11-05)
+
+The housekeeping wakes left on an idle LFN (§15, §12.9) are removed (stack `aa2a828`, its `docs/PORTING.md`, "Housekeeping with nothing to do"; new option `NANOSTACK_PROTOCOL_TIMERS_SKIP_HOUSEKEEPING`, default on): the neighbour and destination cache collections (every 20 s) are due only when they would remove entries or reset a path MTU, MLD's query timer (125 s) only on a querier, and an LFN's blacklist purge timer (30–90 s) only when the purge would remove entries. The ageing they do in between is applied for the whole time at their next call.
+
+**Behaviour.** `dag_simple` (10 seeds × 300 s) gives the permanent reference runs' logs with the option on and off (`nonreg_dag_simple.sh`). The LFN suite passes, 148/148 (`lfn_suite.sh full`, 360 s). With the option off, the wakes and currents are those of §15.1 (below). The LFN's purge draws move later in its random sequence; in `test_lfn_keyreq.sh` (seed 3) the logs of all four programs are still identical to those with the option off, apart from the LFN trace of §15.
+
+**Idle LFN** (FG25 LFN profile `efr32fg25-lfn.ini`, EU mode 3, `test_lfn_join.sh` with `BR_PERIOD=0 LFN_PERIOD=0`, clocks within ±20 ppm, seed 1; the LFN under the border router and under a router, `MESH=1`; runs of 300 s and 1800 s, window 300–1800 s; wake causes from the `NS_PROTOCOL_TIMERS_SKIP_STATS` builds):
+
+| | Option off | Option on |
+| --- | --- | --- |
+| Core timer wakes in 1500 s | 108–109: neighbour cache GC 75, Wi-SUN seconds timer (the blacklist purge) 25, MLD 8–9 | 26: PAE frame-counter check 22–23, `ReachableTime` 2–3, destination cache 1 |
+| Wakes per minute | 4.3–4.4 | 1.04 |
+| Protocol timer wakes per second | 0.07 | 0.02 |
+| All wakes per second | 0.73 | 0.68 |
+| Average current | 19.51 µA | 19.47 µA |
+
+The emulator charges these wakes 0.70 µC each, so the current falls by only 0.04 µA. On the kits they cost 6.05 µC (below). The wake left every 60 s is the PAE controller's frame-counter check (`FRAME_COUNTER_STORE_INTERVAL`), which the stack keeps (it reads the MAC's frame counters); before, it fell in the same wake as the cache collections.
+
+**FFN routers and the border router** (`dag_simple`, 3 seeds, window 300–600 s, `efr32fg25-soc.ini`): routers' protocol timer wakes 0.29 [0.23–4.47] → 0.25 [0.19–4.45] per second, all wakes 18.85 → 18.82, current 8665.99 → 8665.96 µA; the border router unchanged (21.87 wakes/s, 9035.18 µA: its own timers run every second).
+
+**Kits** (FG25, EU mode 3, default LFN settings, LFN 440290182 under a router; AEM dumps at 100 kHz, no RAM reads): the wakes without radio activity went from 4.0 a minute (12 in 180 s: every 20 s and 3 more; stack `8ca400e`) to 1.0 a minute (4 in 240 s, every 60 s; stack `aa2a828`), 6.05 µC each: 0.40 µA → 0.10 µA. The LFN joined under the router in 27 s and answered 10 of 10 pings and a UDP datagram from the border router (firmware README).
+
+**Power formula campaign** (`lfn_power_campaign.sh`, 21 runs, with the option on; `lfn_power_formula.py`'s timer-wake rate `N_TIMER` 0.094 → 0.039 per s, the rate of the ledger's timer wakes in the Test-profile runs): 21 runs, all passed (209 s of wall time). The window lengths are unchanged; every ledger current is 0.04 µA lower: the idle Test LFN 19.40–19.46 µA (19.44–19.50 µA before), Balanced 9.31–9.35 µA, Eco 11.14–11.20 µA. The formula matches every case within −0.8 … +1.5 % idle and −5.5 … +1.5 % with traffic, as before.
+
+Reproduce: `test_lfn_join.sh` as above with a `-DNS_PROTOCOL_TIMERS_SKIP_STATS` build (the counts are in the node logs at exit), `wakes_window.py --nodes 1 <300 s run> <1800 s run>`; `-DNANOSTACK_PROTOCOL_TIMERS_SKIP_HOUSEKEEPING=OFF` for the previous wakes.
 
 ## 16. LGTKs for the LFN (GS8 stage 3, 2026-10-29)
 
