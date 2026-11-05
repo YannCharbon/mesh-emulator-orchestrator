@@ -82,7 +82,7 @@ All of them come from the real stack's behaviour, not from a script.
 
 In virtual time the node's run loop (`NGS/port/sim/sim_scheduler.c`) runs until idle, sends "xi" with its next deadline, and blocks until "xa". So:
 
-- **A wake** starts at each "xa" (time t). The welcome is the first wake, at 0.
+- **A wake** starts at each "xa" (time t). The welcome is the first wake: at 0, or at the node's power-up for a node powered up later (`--vtime-power-up`, `run.sh` `POWER_UP` and `SPREAD`). Such a node's ledger starts at its power-up: nothing is charged before (MCU or radio), and its report covers its own time, from its power-up to the end (§7).
 - **The wake's work** is known at its "xi": the port's "xc" (§5.1) and the "xr" seen in between.
 - **The idle** that follows lasts until the next "xa" of that node.
 
@@ -224,9 +224,9 @@ python3 sim_utils/power_summary.py runs/pw/seed*           # --cell 3000:6:0.9, 
 
 `wssimserver` options (virtual time only): `--power=PROFILE` (every node), `--power-node=IDS:PROFILE` (repeatable, the last match wins: mixed networks), `--power-mode=[IDS:]MODE` (repeatable: whose profile values apply, §6.2), `--power-out=FILE` (default `power.json`), `--power-log=FILE`, `--power-cell=MAH[:V[:EFF]]`. `run.sh` maps them from `POWER`, `POWER_LOG=1`, `POWER_CELL` and `POWER_OPTS`.
 
-- **Report** (`power.json`, format `wssim-power 1`): per node, the average current, total charge and energy; per MCU and radio state and transition, time, charge and count (TX per power level); wakes, causes, empty ticks, unseen frames; the sum check; the battery life when `--power-cell` is given (cell current = average × supply V / (cell V × efficiency); without a voltage, the average itself). `simserver.log` gets one line per node.
+- **Report** (`power.json`, format `wssim-power 1`): per node, the average current, total charge and energy; per MCU and radio state and transition, time, charge and count (TX per power level); wakes, causes, empty ticks, unseen frames; the sum check; the battery life when `--power-cell` is given (cell current = average × supply V / (cell V × efficiency); without a voltage, the average itself; `null` for a node that drew nothing). A node powered up later (§3.2) also has `start_us`, its power-up time; its `check.run_time_us`, its average current and its rates per second are over its own time (from `start_us` to the end; 0 for a node powered up at or after the end), and its MCU and radio state times add up to that. The other nodes have no `start_us`, and their figures are over the whole run (the top-level `run_time_us`). `simserver.log` gets one line per node.
 - **State log** (`--power-log`, optional, about 90 MB per `dag_simple` run of 300 s): `start_us end_us node mcu|radio state [dBm]`, one line per interval, in time order per node and part.
-- **Summary** (`sim_utils/power_summary.py`): a table per run, the median and range per node over several runs, and the sum check (exit status 1 if it fails).
+- **Summary** (`sim_utils/power_summary.py`): a table per run, the median and range per node over several runs, and the sum check (exit status 1 if it fails); shares and rates per node are over the node's own time.
 
 ## 8. Protocol additions
 

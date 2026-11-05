@@ -6,8 +6,10 @@ usage: power_summary.py [options] <run dir or power.json>...
 Per run: one line per node (average current, MCU and radio time shares,
 wakes and empty ticks per second, battery life, the PHY mode the node ran and
 whose profile values were used: docs/POWER_MODEL.md §6.2) and the checks: the MCU's and
-the radio's state times (transitions included) must each add up to the run
-time. With several runs: per node, the median and range of the average
+the radio's state times (transitions included) must each add up to the
+node's run time: the run's, or from its power-up for a node powered up later
+(wssimserver --vtime-power-up; its "start_us"), over which its shares and
+averages are also taken. With several runs: per node, the median and range of the average
 current over the runs.
 
 Options:
@@ -88,11 +90,12 @@ def main(argv):
                     print(f"CHECK FAILED: {path} node {n['node']}: {part} {c[part]:.3f} != run {c['run_time_us']:.3f}")
                     failed += 1
             ms, rs, w = n['mcu']['states'], n['radio']['states'], n['wakes']
-            sec = run_us / 1e6
+            node_us = c['run_time_us'] or float('inf')     # from its power-up; 0: after the end
+            sec = node_us / 1e6
             life = battery(n, supply[n['profile']], cell)
             per_node.setdefault(n['node'], []).append(n['avg_current_ma'])
             if not quiet:
-                pct = lambda t: 100 * t / run_us
+                pct = lambda t: 100 * t / node_us
                 print(f"{n['node']:>4} {n['avg_current_ma']:>8.4f} {pct(ms['active']['time_us']):>8.3f} "
                       f"{pct(ms['deep_sleep']['time_us']):>6.2f} {pct(rs['listen']['time_us']):>7.2f} "
                       f"{pct(rs['receive']['time_us']):>6.3f} {pct(rs['tx']['time_us']):>6.3f} "

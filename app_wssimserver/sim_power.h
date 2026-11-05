@@ -29,6 +29,7 @@ bool pwr_enabled(void);
 
 // The run: nodes are those connected, ascending
 void pwr_start(int num_nodes, const int *nodes);
+void pwr_power_up(int node, uint64_t t);   // --vtime-power-up: the node's ledger starts at t, not 0
 void pwr_wake(int node, uint64_t t, unsigned int frames);  // "xa" (and the welcome, at 0)
 void pwr_radio(int node, uint64_t t, const struct sim_radio_report *r);
 void pwr_wake_report(int node, const struct nsim_wake *w);

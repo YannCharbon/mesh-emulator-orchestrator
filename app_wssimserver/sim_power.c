@@ -397,6 +397,7 @@ struct pwr_node {
     // MCU: active from act_start until busy_until (the modelled work), then
     // asleep at depth until the next wake.
     bool started;
+    double start;               // its power-up (--vtime-power-up), 0 for the others
     double act_start, busy_until;
     int depth;                  // MCU_SLEEP or MCU_DEEP, chosen at "xi"
     double mcu_time[MCU_STATES];
@@ -640,6 +641,19 @@ static void log_interval(const struct pwr_node *n, const char *part, const char 
         fprintf(pwr.log, "%.3f %.3f %d %s %s\n", start, start + len, n->id, part, state);
 }
 
+// A node powered up later: nothing is charged before t (MCU and radio), and
+// its averages are over its own time, from t to the end (docs/POWER_MODEL.md
+// §7). Called before the run, so also for a node powered up after the end.
+void pwr_power_up(int node, uint64_t t)
+{
+    struct pwr_node *n = pwr.nodes[node];
+
+    if (!n)
+        return;
+    n->start = t;
+    n->r_since = t;
+}
+
 /* ---- MCU */
 
 static void mcu_add(struct pwr_node *n, int state, double start, double len)
@@ -880,8 +894,8 @@ struct pwr_totals {
 static void node_close(struct pwr_node *n, double t_end)
 {
     if (!n->started) {
-        n->started = true;      // never ran: asleep from 0
-        n->act_start = n->busy_until = 0;
+        n->started = true;      // never ran: asleep from its power-up
+        n->act_start = n->busy_until = n->start;
     }
     if (n->busy_until >= t_end) {
         mcu_add(n, MCU_ACTIVE, n->act_start, t_end - n->act_start);
@@ -943,11 +957,14 @@ static void write_node(FILE *f, const struct pwr_node *n, double t_end, bool las
 {
     const struct pwr_profile *p = n->p;
     struct pwr_totals tt;
-    double avg_ma, secs = t_end / 1e6, i_batt, life_h;
+    double avg_ma, secs, i_batt, life_h;
     bool clamped;
     int i, j, first;
 
     node_totals(n, &tt);
+    // The node's own time: from its power-up (0 for most) to the end
+    t_end = fmax(t_end - n->start, 0);
+    secs = t_end / 1e6;
     avg_ma = t_end > 0 ? tt.charge * 1000 / t_end : 0;
     fprintf(f, "    {\n      \"node\": %d,\n      \"profile\": \"%s\",\n", n->id, p->name);
     // PHY mode: the radio's; the profile values used (a mode, or "common"), and why
@@ -959,14 +976,21 @@ static void write_node(FILE *f, const struct pwr_node *n, double t_end, bool las
             p->mode ? mode_names[p->mode] : "common", n->mode_user < 0 ? "radio" : "--power-mode");
     fprintf(f, "      \"avg_current_ma\": %.6f,\n      \"charge_uc\": %.6f,\n      \"energy_mj\": %.6f,\n",
             avg_ma, tt.charge, tt.charge * p->supply_v / 1000);
+    if (n->start > 0)
+        fprintf(f, "      \"start_us\": %.3f,\n", n->start);
     fprintf(f, "      \"check\": {\"mcu_time_us\": %.3f, \"radio_time_us\": %.3f, \"run_time_us\": %.3f},\n",
             tt.mcu_t, tt.radio_t, t_end);
     if (pwr.has_cell) {
         i_batt = avg_ma * (pwr.cell_v > 0 ? p->supply_v / (pwr.cell_v * pwr.cell_eff) : 1);
         life_h = i_batt > 0 ? pwr.cell_mah / i_batt : INFINITY;
-        fprintf(f, "      \"battery\": {\"capacity_mah\": %g, \"cell_v\": %g, \"efficiency\": %g, "
-                "\"cell_current_ma\": %.6f, \"life_h\": %.3f, \"life_years\": %.4f},\n",
-                pwr.cell_mah, pwr.cell_v, pwr.cell_eff, i_batt, life_h, life_h / (24 * 365.25));
+        if (isfinite(life_h))
+            fprintf(f, "      \"battery\": {\"capacity_mah\": %g, \"cell_v\": %g, \"efficiency\": %g, "
+                    "\"cell_current_ma\": %.6f, \"life_h\": %.3f, \"life_years\": %.4f},\n",
+                    pwr.cell_mah, pwr.cell_v, pwr.cell_eff, i_batt, life_h, life_h / (24 * 365.25));
+        else    // no charge (a node powered up at or after the end): JSON has no infinity
+            fprintf(f, "      \"battery\": {\"capacity_mah\": %g, \"cell_v\": %g, \"efficiency\": %g, "
+                    "\"cell_current_ma\": %.6f, \"life_h\": null, \"life_years\": null},\n",
+                    pwr.cell_mah, pwr.cell_v, pwr.cell_eff, i_batt);
     }
     fprintf(f, "      \"mcu\": {\n        \"clock_mhz\": %g,\n        \"cycles\": %.0f,\n"
             "        \"wakes_while_active\": %llu,\n",
@@ -1066,14 +1090,18 @@ void pwr_finish(uint64_t t_end_us, uint64_t seed)
     fprintf(f, "  ]\n}\n");
     FATAL_ON(fclose(f), 1, "%s: %m", pwr.out_path);
     for (i = 0; i < pwr.num_nodes; i++) {
+        double span;
+
         n = pwr.nodes[pwr.ids[i]];
         node_totals(n, &tt);
-        INFO("power: node %d (values %s): %.4f mA average, MCU active %.3f%%, radio RX %.2f%% TX %.3f%%, %.1f wakes/s, %.1f empty ticks/s",
-             n->id, n->p->mode ? mode_names[n->p->mode] : "common", t_end > 0 ? tt.charge * 1000 / t_end : 0,
-             t_end > 0 ? 100 * n->mcu_time[MCU_ACTIVE] / t_end : 0,
-             t_end > 0 ? 100 * (n->r_time[SIM_RADIO_LISTEN] + n->r_time[SIM_RADIO_RECEIVE]) / t_end : 0,
-             t_end > 0 ? 100 * tt.tx_t / t_end : 0,
-             t_end > 0 ? n->wakes / (t_end / 1e6) : 0, t_end > 0 ? n->empty_ticks / (t_end / 1e6) : 0);
+        span = fmax(t_end - n->start, 0);
+        INFO("power: node %d (values %s): %.4f mA average, MCU active %.3f%%, radio RX %.2f%% TX %.3f%%, %.1f wakes/s, %.1f empty ticks/s%s",
+             n->id, n->p->mode ? mode_names[n->p->mode] : "common", span > 0 ? tt.charge * 1000 / span : 0,
+             span > 0 ? 100 * n->mcu_time[MCU_ACTIVE] / span : 0,
+             span > 0 ? 100 * (n->r_time[SIM_RADIO_LISTEN] + n->r_time[SIM_RADIO_RECEIVE]) / span : 0,
+             span > 0 ? 100 * tt.tx_t / span : 0,
+             span > 0 ? n->wakes / (span / 1e6) : 0, span > 0 ? n->empty_ticks / (span / 1e6) : 0,
+             n->start > 0 ? " (from its power-up)" : "");
     }
     INFO("power: report in %s", pwr.out_path);
 }

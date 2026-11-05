@@ -224,6 +224,55 @@ def run_case(server, work, profile, phy_mode, opts, expect, want_mode, want_valu
     return bad
 
 
+def run_power_up(server, work, up_us):
+    """A node powered up at up_us (--vtime-power-up) that idles until the end:
+    its ledger starts then (docs/POWER_MODEL.md §3.2, §7). Returns the
+    problems found."""
+    os.makedirs(work, exist_ok=True)
+    prof = os.path.join(work, "test.ini")
+    out = os.path.join(work, "power.json")
+    sock = tempfile.mktemp(prefix="wssim-power-", suffix=".sock", dir="/tmp")
+    with open(prof, "w") as f:
+        f.write(PROFILE)
+    log = open(os.path.join(work, "simserver.log"), "w")
+    p = subprocess.Popen([server, "--vtime=1", f"--vtime-end={END_US / 1e6}", f"--power={prof}",
+                          f"--power-out={out}", "--power-cell=1000", f"--vtime-power-up=0:{up_us / 1e6}", sock],
+                         stdout=log, stderr=subprocess.STDOUT)
+    for _ in range(100):
+        if os.path.exists(sock):
+            break
+        time.sleep(0.05)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    s.connect(sock)
+    s.send(HELLO.pack(b"xh", 0, 1, 0))
+    msg = s.recv(64)
+    if msg[:2] == b"xw":
+        start = WELCOME.unpack(msg[:WELCOME.size])[6]
+        assert start == up_us, (start, up_us)
+        s.send(IDLE.pack(b"xi", 0, 0, 0, NEVER))
+        msg = s.recv(64)
+    assert msg[:2] == b"xq", msg
+    s.close()
+    p.wait(10)
+    log.close()
+    if os.path.exists(sock):
+        os.unlink(sock)
+    n = json.load(open(out))['nodes'][0]
+    span = max(END_US - up_us, 0)
+    bad = []
+    for what, got, want in (("start_us", n.get("start_us"), up_us), ("run time", n['check']['run_time_us'], span),
+                            ("mcu sum", n['check']['mcu_time_us'], span), ("radio sum", n['check']['radio_time_us'], span),
+                            ("radio off", n['radio']['states']['off']['time_us'], span)):
+        if got is None or abs(got - want) > 1e-6:
+            bad.append(f"{what}: {got}, expected {want}")
+    charge = n['charge_uc']
+    if span and abs(n['avg_current_ma'] - charge * 1000 / span) > 1e-6:
+        bad.append(f"average {n['avg_current_ma']} not over the node's own time")
+    if not span and (charge or n['avg_current_ma'] or n['battery']['life_h'] is not None):
+        bad.append(f"after the end: charge {charge}, battery {n['battery']}")
+    return bad
+
+
 def main():
     server = sys.argv[1]
     work = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="test_power.")
@@ -233,6 +282,12 @@ def main():
         for b in bad:
             print(f"FAIL [{case[0]}]", b)
         print(f"  {case[0]}: {'FAILED' if bad else 'ok'}")
+        failed += bool(bad)
+    for name, up in (("powered up at 1.5 s", 1_500_000), ("powered up after the end", END_US + 1_000_000)):
+        bad = run_power_up(server, os.path.join(work, f"up{up}"), up)
+        for b in bad:
+            print(f"FAIL [{name}]", b)
+        print(f"  {name}: {'FAILED' if bad else 'ok'}")
         failed += bool(bad)
     # Profiles the parser must reject, with the message's start
     for name, profile, msg in [

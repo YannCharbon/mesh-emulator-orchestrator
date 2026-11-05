@@ -66,6 +66,7 @@
 #   POWER_UP="<i>:<s> ..." node i is powered up (welcomed) at virtual second s
 #                      instead of 0: until then it neither runs nor hears
 #                      (--vtime-power-up). With POWER, its ledger starts then
+#                      and its report covers its own time ("start_us")
 #   SPREAD=<s>         with SPREAD_NODES="<i> ...": each of these nodes is
 #                      powered up at its own offset in [0, s), drawn from
 #                      WSSIM_SEED and its ID (the same for the same seed);

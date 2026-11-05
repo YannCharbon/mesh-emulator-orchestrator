@@ -1476,6 +1476,8 @@ static int vt_run(struct ctxt *ctxt)
         FATAL_ON(!slot_of_node[node], 1, "--vtime-power-up: node %d is not connected (or named twice)", node);
         vt_ctls[i].slot = slot_of_node[node];
         slot_of_node[node] = 0;
+        if (pwr_enabled())
+            pwr_power_up(node, vt_ctls[i].t);   // its ledger starts then, even after the end
         if (vt_cca_shm) {
             vt_cca_shm[node * SIM_SHM_CCA_STRIDE] = 7;   // DRVSTATE_OFF (app_wshwsim/sl_rf_driver.c)
             vt_cca_shm[node * SIM_SHM_CCA_STRIDE + 3] = SIM_RADIO_OFF;

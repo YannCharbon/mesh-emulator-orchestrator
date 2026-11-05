@@ -51,8 +51,10 @@ from lfn_lib import Checks, lines, frames, udp, listen_interval_s
 out = sys.argv[1]
 dur, r_at, l_at, recover, join_max = (float(x) for x in sys.argv[2:])
 ck = Checks('test_lfn_restart')
-# An instance started later prints its first run (before its first wake) at
-# time 0: those lines belong to its start time
+# An instance started later runs first at its start time (the welcome's
+# start_us), so its lines carry that time; only what it prints before it
+# attaches to the conductor (its banner) is stamped 0: such lines belong to
+# its start time
 def inst_lines(path, start):
     for t, m in lines(path):
         yield (start if t < start else t), m
