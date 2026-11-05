@@ -44,6 +44,8 @@
 #     ends otherwise (no later use of its handle, no expiry) was dropped
 #     silently: a fault;
 #   - no stuck RX: the LFN received frames after its last drop;
+#   (drops in the run's last 10 s are counted, not judged: their frame's
+#   fate and the LFN's next receptions may fall after the run's end)
 #   - window closes during a frame: at least MIN_DEFERRED frames that started
 #     inside one of the LFN's windows ended after its scheduled close; none
 #     of them was left without a verdict (the close waited for the frame);
@@ -219,11 +221,22 @@ def first_use(h, t):
             break
         first = a
     return first
+# A drop in the run's last END_MARGIN_US cannot be judged: the frame's next
+# attempt or restart (MAC restarts up to a few s apart, the queue's expiry
+# 10 s) and the LFN's next receptions (a request every 5 s, an uplink every
+# 2 s, each needing a window) may fall after the run's end. Such drops are
+# counted apart, not taken as faults (seed 1 with clock drift: a drop at
+# 896.3 s of a 900 s run, its frame and the LFN's next frames past the end)
+END_MARGIN_US = 10_000_000
+end_us = us(dur) - END_MARGIN_US
 fate = collections.Counter()
 silent = []
 for fid in at_ack:
     t = drop_lfn[fid][3]
     h = handle_at.get(t)
+    if t > end_us:
+        fate['in the run\'s last 10 s'] += 1
+        continue
     later = lambda xs: [x for x in xs if t < x < t + REUSE_US]
     if h is not None and later(resent[h]):
         fate['sent again'] += 1
@@ -242,10 +255,10 @@ ck(len(at_ack) == len(left), f'MAC: {len(at_ack)} of {len(left)} drops at the MA
    'same microsecond)')
 ck(not silent, f'MAC: after each drop the MAC went on with the frame {dict(fate)}; dropped silently {silent[:3]}')
 
-# No stuck RX
-last = max((drop_lfn[f][3] for f in left if f in drop_lfn), default=0)
+# No stuck RX: after the last drop before the run's last 10 s (END_MARGIN_US)
+last = max((drop_lfn[f][3] for f in left if f in drop_lfn and drop_lfn[f][3] <= end_us), default=0)
 later = sum(1 for fid, r in mine_lfn.items() if r[2] == 'ok' and took_lfn.get(fid, 0) > last)
-ck(later > 0, f'LFN: {later} frames received after its last drop ({last / 1e6:.1f} s)')
+ck(later > 0, f'LFN: {later} frames received after its last drop before the run\'s last 10 s ({last / 1e6:.1f} s)')
 
 # Window closes during a frame
 deferred = []
