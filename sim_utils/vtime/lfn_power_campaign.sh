@@ -3,8 +3,13 @@
 # documents/pre-study/investigation/LFN_Capabilities_and_Power.md §6.3):
 # test_lfn_profiles.sh with the LFN power profile, the LFNs at +10 dBm, two
 # seeds per case, then lfn_power_breakdown.py and lfn_power_formula.py.
-# About 20 min of wall time with the cases run in parallel.
+# About 4 min of wall time with the cases run in parallel (the 72 h Eco run
+# with a 4 h listen interval is the longest).
 # usage: lfn_power_campaign.sh <bindir> <workdir(holds examples/)> <outdir>
+# Environment: SEEDS ("1 2": the seeds of every case but ECO4H, which runs
+# seed 1), SIM_OPTS (passed to test_lfn_profiles.sh: default
+# --drift-random=20; "--drift-random=20 --medium=legacy" for the legacy
+# radio medium, docs/MEDIUM.md).
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3; HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT" && OUT=$(realpath "$OUT")
@@ -16,7 +21,7 @@ run() { # name prof seed dur steady extra [env...]
   python3 "$HERE/lfn_power_breakdown.py" "$OUT/${n}_s$s" "$st" "$d" > "$OUT/${n}_s$s.txt"
   tail -n 1 "$OUT/${n}_s$s.txt" > "$OUT/${n}_s$s.json"
 }
-for s in 1 2; do
+for s in ${SEEDS:-1 2}; do
   run T5  test $s 14400 1800 "" &
   run T2  test $s 14400 1800 "-o lfn_listen_interval_ms=2000" &
   run T30 test $s 14400 1800 "-o lfn_listen_interval_ms=30000" &
