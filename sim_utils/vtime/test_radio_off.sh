@@ -20,7 +20,7 @@ PROFILE=${4:-$WORK/examples/power/efr32fg25-soc.ini}
 DUR=${DUR:-300}; OFF_AT=${OFF_AT:-150}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
-NODE_OPTS_1="-o rx_off_when_idle_after=$OFF_AT" POWER=$PROFILE POWER_LOG=1 \
+NODE_OPTS_1="-o rx_off_when_idle_after=$OFF_AT" POWER=$PROFILE POWER_LOG=1 FRAMES=1 \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT" "$DUR" > /dev/null || { echo "test_radio_off: run failed ($OUT)"; exit 1; }
 
 python3 - "$OUT" "$OFF_AT" "$DUR" <<'EOF'
@@ -36,6 +36,7 @@ def check(cond, what):
 
 rx_before = rx_after = lost = 0
 switched = None
+central = False
 for line in open(f'{out}/node1.log', errors='replace'):
     t, _, msg = line.partition(' ')
     try:
@@ -51,10 +52,27 @@ for line in open(f'{out}/node1.log', errors='replace'):
             rx_after += 1
     if 'rf rx lost: radio off' in msg:
         lost += 1
+    if 'rf medium: central' in msg:
+        central = True
+# With the central medium (docs/MEDIUM.md) the server delivers nothing to a
+# radio that is off, so the radio has nothing to drop: count instead the
+# frames its graph neighbours sent while it was off (frames.txt), none of
+# which it received (rx_after)
+if central and switched is not None:
+    nbr = set()
+    for l in open(f'{out}/topology.txt'):
+        for e in l.split():
+            a, b = e.split(':')[0].split(',')
+            if '1' in (a, b):
+                nbr.add(int(b if a == '1' else a))
+    for l in open(f'{out}/frames.txt'):
+        f = l.split()
+        if int(f[1]) in nbr and int(f[0]) / 1e6 > switched:
+            lost += 1
 check(switched is not None and abs(switched - off_at) < 1, f'node 1 switched to RX off when idle at {switched:.2f} s' if switched is not None else 'node 1 switched to RX off when idle')
 check(rx_before > 0, f'node 1 received {rx_before} frames before the switch')
 check(rx_after == 0, f'node 1 received {rx_after} frames after the switch')
-check(lost > 0, f'{lost} frames lost while node 1 was off')
+check(lost > 0, f'{lost} frames lost while node 1 was off' + (' (sent by its neighbours: central medium)' if central else ''))
 
 # Time per radio and MCU state after the switch, from the state log
 radio, mcu = {}, {}
