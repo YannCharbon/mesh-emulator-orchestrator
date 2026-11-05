@@ -195,6 +195,7 @@ static struct {
 static int8_t rf_cca_threshold_dbm = RF_CCA_THRESHOLD_DEFAULT_DBM;
 static unsigned long rf_cca_threshold_sets;
 static void rf_medium_report(void);
+static void rf_medium_drop_held(const char *why);
 
 /* Buffers for RX and TX */
 #define MAX_TXRX_BUFFERS 128
@@ -481,6 +482,10 @@ void set_shm_cca_state()
     memcpy(shm_ptr+pos, (uint8_t *)&driver_state, 1);
     memcpy(shm_ptr+pos+1, &channel, 2);
     memcpy(shm_ptr+pos+3, &hw_state, 1);
+    // Central medium: the radio left RX without a verdict (e.g. the MAC
+    // aborted to idle); the server sees it and sends none (outcome "left")
+    if (rf_medium_frame_id && driver_state != DRVSTATE_RX)
+        rf_medium_drop_held("radio left RX");
 #ifdef NS_PORT_SIM
     rf_power_report();
 #endif
@@ -1001,6 +1006,11 @@ static int _rf_check_and_change_channel(uint16_t new_channel){
     }
     if (new_channel != channel && new_channel != -1) {
         channel = new_channel;
+        // The central medium reads the channel in the shared memory at each
+        // frame start: keep it current (legacy: unchanged, the neighbours'
+        // CCA sees it at the next state change)
+        if (rf_medium)
+            set_shm_cca_state();
     }
     __PRINT(32, "Channel changed to %d", channel);
     return 0;
