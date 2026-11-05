@@ -13,7 +13,7 @@ Q_SYNC = 2.0           # uC extra per received sync frame
 Q_TIMER = 0.70         # uC per timer wake (emulator; kits 0.1)
 N_TIMER = 0.094        # timer wakes per s, idle
 Q_CHECK = 16.8e3       # uC per better-parent check (2 LPAS sweeps of 35 frames + 0.6 s window)
-Q_XCH = 450.0          # uC per request/echo exchange (uplink 290 + downlink increment 159)
+Q_XCH = 450.0          # uC per request/echo exchange (uplink 292 + downlink increment 159)
 cases = {  # T_u, T_b, N, sync_only, r_ppm, BR period, LFN period
     'T5': (5, 10, 5, False, 5, 1800, 2700), 'T2': (2, 10, 5, False, 5, 1800, 2700),
     'T30': (30, 10, 5, False, 5, 1800, 2700), 'TS': (5, 10, 5, True, 5, 1800, 2700),
