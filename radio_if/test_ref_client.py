@@ -757,6 +757,62 @@ def test_sniff_report_in_window():
     check("radio interface:" not in out, f"server log: {out[-1500:]}")
 
 
+def mop_lines(r, nid, typ):
+    """The MOP1 messages of this type in node nid's log, with their virtual µs."""
+    out = []
+    for ln in r.text(f"node{nid}.log").splitlines():
+        if " MOP1 " in ln:
+            m = json.loads(ln.split(" MOP1 ", 1)[1])
+            if m.get("type") == typ:
+                out.append((int(ln.split()[0]), m))
+    return out
+
+
+def test_mop_set():
+    """MOP 1.1 settings scheduled in virtual time (--mop-set-file). Node 1
+    sends at 2 ms in its window each second at 10 dBm; at 1.5 s its TX power
+    goes to 0 dBm and its window to 20 ms; a name it does not have, a value
+    above the maximum and a wrong type are answered per setting. With the
+    link values given at 10 dBm (--medium-tx-ref=10), node 2 receives node 1
+    at -70 dBm before and -80 dBm after; the power report has both TX levels.
+    The same seed and file give identical logs."""
+    path = os.path.join(ARGS.logdir, "mop_set.txt")
+    with open(path, "w") as f:
+        f.write("# virtual s, MOP set request\n")
+        f.write('1.5 MOP1 {"mop":1,"op":"set","seq":7,"req":"c-1","persist":true,"settings":['
+                '{"name":"tx_power_dbm","type":"int","value":0},{"name":"ref.window_ms","type":"num","value":20},'
+                '{"name":"ref.nothing","type":"int","value":1},{"name":"tx_power_dbm","type":"int","value":99},'
+                '{"name":"ref.window_ms","type":"str","value":"25"}]}\n')
+    nodes = {1: ["--tx", 2, "--mop-period-ms", 1000, "--mop-set-file", path], 2: []}
+    runs = [Run(f"mop_set{i}", nodes, [(1, 2, -70)], 4.5, opts=["--medium-tx-ref=10"]) for i in (1, 2)]
+    r = runs[0]
+    rx = [(t, float(kv["rx_dbm"])) for t, kv in r.ev(2, "rx_start")]
+    check([d for t, d in rx] == [-70.0, -80.0, -80.0, -80.0], f"node 2 received {rx}")
+    acks = mop_lines(r, 1, "ack")
+    check(len(acks) == 1, f"acks {acks}")
+    t, a = acks[0]
+    check(t == 2000000 and a["seq"] == 7 and a["req"] == "c-1", f"ack at {t}: {a}")   # node 1's first wake after 1.5 s
+    st = [(x["name"], x["status"], x.get("value"), x.get("reason")) for x in a["results"]]
+    check(st == [("tx_power_dbm", "applied", 0, None), ("ref.window_ms", "applied", 20.0, None), ("ref.nothing", "unknown", None, None),
+                 ("tx_power_dbm", "refused", 0, "above the maximum (30)"), ("ref.window_ms", "refused", 20.0, "type: num expected")],
+          f"results {st}")
+    check(all(x.get("persisted") is False for x in a["results"] if x["status"] == "applied"), "persisted")
+    reps = mop_lines(r, 1, "report")
+    before = {x["name"]: x["value"] for x in reps[0][1]["settings"]}
+    after = {x["name"]: x["value"] for x in reps[-1][1]["settings"]}
+    check(before == {"tx_power_dbm": 10, "ref.window_ms": 30.0} and after == {"tx_power_dbm": 0, "ref.window_ms": 20.0},
+          f"settings before {before}, after {after}")
+    ev = [m["text"] for t, m in mop_lines(r, 1, "event") if m["cat"] == "settings"]
+    check(len(ev) == 5 and "scheduled at 1.500 s, applied 500.0 ms later" in ev[0], f"events {ev}")
+    # the window that opened in the wake of the change keeps 30 ms; the next ones last 20 ms
+    closes = [t for t, kv in r.ev(1, "window_close")]
+    check([c % 1000000 for c in closes] == [30000, 30000, 20000, 20000], f"window closes {closes}")
+    levels = sorted(lv["dbm"] for lv in r.node_power(1)["radio"]["states"]["tx"]["levels"])
+    check(levels == [0, 10], f"TX levels {levels}")
+    for name in ("node1.log", "node2.log", "medium.log"):
+        check(runs[0].text(name) == runs[1].text(name), f"{name} differs between two runs")
+
+
 def main():
     global ARGS
     ap = argparse.ArgumentParser()

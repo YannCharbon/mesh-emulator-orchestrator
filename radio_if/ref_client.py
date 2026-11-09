@@ -29,7 +29,9 @@ Output: one line per event on stdout, "<virtual µs> <node> <event> k=v ...",
 read by test_ref_client.py. With --mop-period-ms, also "<virtual µs> <node>
 MOP1 {json}" lines: the node's state, links, counters and events in the Mesh
 Observation Protocol (MOP v1) of the mesh testbed controller, which then
-shows the node with its relations and events (class Mop).
+shows the node with its relations and events (class Mop). With
+--mop-set-file, MOP 1.1 "set" requests scheduled in virtual time change its
+settings during the run (class Mop, "Settings").
 
     ref_client.py --sock /tmp/sock --id 2 --tx 10 --window-ms 30
 """
@@ -223,7 +225,7 @@ class WindowNode:
         self.close_pending = False
         self.period = 0
         self.seq = 0
-        self.mop = Mop(self) if args.mop_period_us else None
+        self.mop = Mop(self) if args.mop_period_us or args.mop_set_file else None
 
     def log(self, event, **kv):
         print(f"{self.r.now} {self.r.node_id} {event}" + "".join(f" {k}={v}" for k, v in kv.items()), flush=True)
@@ -240,6 +242,25 @@ class WindowNode:
         self.log("start", seed=self.r.seed, drift_ppb=self.r.drift_ppb, start_us=self.r.start_us)
         self.period = 1                         # the first window one period after power-up
         self.timers["open"] = self.r.virtual_at(self.period * self.a.period_us + self.a.phase_us)
+
+    # --- settings (MOP 1.1, applied by Mop from --mop-set-file) ---
+    def settings(self):
+        """The node's settings as a MOP 1.1 report lists them."""
+        a = self.a
+        return [{"name": "tx_power_dbm", "type": "int", "value": a.tx_dbm, "min": -30, "max": 30, "unit": "dBm", "apply": "run",
+                 "desc": "TX power of the next frames"},
+                {"name": "ref.window_ms", "type": "num", "value": a.window_us / 1000, "min": 1, "max": a.period_us / 1000,
+                 "unit": "ms", "apply": "run", "desc": "receive window, from the next window"}]
+
+    def set_value(self, name, value):
+        """Applies one setting; (status, reason). The values were checked against settings() by Mop."""
+        if name == "tx_power_dbm":
+            self.a.tx_dbm = int(value)
+        elif name == "ref.window_ms":
+            self.a.window_us = int(round(float(value) * 1000))
+        else:
+            return "unknown", None
+        return "applied", None
 
     # --- timers ---
     def on_open(self):
@@ -367,7 +388,19 @@ class Mop:
     and per peer the frames received and lost with the last RSSI (links). A
     parent given with --mop-parent is reported as a configured relation, and
     --mop-root marks the node as the network's root: the demonstration
-    protocol has no routing of its own."""
+    protocol has no routing of its own.
+
+    Settings (MOP 1.1). The report lists the node's settings (settings()).
+    A client in a virtual-time run has no inbound channel from the controller,
+    and a change at a wall-clock moment would make the run depend on the
+    host's speed. So the changes are scheduled in virtual time: each line of
+    --mop-set-file is "<virtual s> <MOP set request>" (the request optionally
+    after "MOP1 "; a line starting with "#" is a comment). A request is
+    applied at the node's first wake at or after its time (no extra wake: the
+    run is unchanged until then), in the file's order for equal times; its
+    answer is printed as a MOP1 "ack" line with one result per setting,
+    followed by a "settings" event per setting and a report with the new
+    values. The same seed and file give the same run."""
 
     COUNTED = ("tx", "lp_tx", "rx_ok", "rx_lost", "rx_aborted", "cca_busy", "tx_skipped", "window_open", "sniff",
                "sniff_detect", "sniff_none", "anomaly")
@@ -379,6 +412,27 @@ class Mop:
         self.next_us = None
         self.state = "starting"
         self.ended = False
+        self.pending = self.load_sets(node.a.mop_set_file) if node.a.mop_set_file else []
+
+    @staticmethod
+    def load_sets(path):
+        """[(virtual µs, request)] from a --mop-set-file, by time (stable for equal times)."""
+        out = []
+        with open(path) as f:
+            for n, line in enumerate(f, 1):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                t, rest = line.split(None, 1)
+                rest = rest.strip()
+                if rest.startswith("MOP1 "):
+                    rest = rest[5:]
+                req = json.loads(rest)
+                if req.get("mop") != 1 or req.get("op") != "set":
+                    raise SystemExit(f"{path}:{n}: not a MOP set request")
+                out.append((int(round(float(t) * 1e6)), req))
+        out.sort(key=lambda x: x[0])
+        return out
 
     def _print(self, msg):
         print(f"{self.n.r.now} {self.n.r.node_id} MOP1 " + json.dumps(msg, separators=(",", ":")), flush=True)
@@ -408,7 +462,56 @@ class Mop:
                               "version": f"interface v{r.version}", "role": "sniff" if sniff else "window", "root": a.mop_root,
                               "state": self.state, "detail": detail, "uptime_s": (r.now - r.start_us) // 10**6},
                      "links": links, "relations": rel, "counters": dict(sorted(self.counters.items())),
-                     "values": {"channel": a.chan, "tx_dbm": a.tx_dbm, "rate_bps": a.rate, "drift_ppb": r.drift_ppb}})
+                     "values": {"channel": a.chan, "tx_dbm": a.tx_dbm, "rate_bps": a.rate, "drift_ppb": r.drift_ppb},
+                     "settings": self.n.settings()})
+
+    @staticmethod
+    def check(desc, typ, value):
+        """None when the value suits the setting, else the reason (MOP 1.1: an int is accepted for a num)."""
+        if typ != desc["type"] and not (desc["type"] == "num" and typ == "int"):
+            return f"type: {desc['type']} expected"
+        if desc["type"] == "int" and (isinstance(value, bool) or not isinstance(value, int)):
+            return "type: int expected"
+        if desc["type"] == "num" and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            return "type: num expected"
+        if "min" in desc and value < desc["min"]:
+            return f"below the minimum ({desc['min']})"
+        if "max" in desc and value > desc["max"]:
+            return f"above the maximum ({desc['max']})"
+        return None
+
+    def apply_set(self, t_us, req):
+        """One scheduled set request: each setting in turn, then the answer, events and a report."""
+        r = self.n.r
+        results = []
+        for item in req.get("settings", []):
+            name, typ, value = item.get("name"), item.get("type"), item.get("value")
+            desc = next((d for d in self.n.settings() if d["name"] == name), None)
+            if desc is None:
+                res = {"name": name, "status": "unknown"}
+            elif (why := self.check(desc, typ, value)) is not None:
+                res = {"name": name, "status": "refused", "reason": why, "value": desc["value"]}
+            else:
+                status, why = self.n.set_value(name, value)
+                res = {"name": name, "status": status}
+                if why:
+                    res["reason"] = why
+                res["value"] = next(d["value"] for d in self.n.settings() if d["name"] == name)
+                if req.get("persist"):
+                    res["persisted"] = False            # a process keeps nothing across runs
+            results.append(res)
+            self.n.log("set", name=name, status=res["status"], value=res.get("value"), scheduled_us=t_us)
+        msg = {"mop": 1, "type": "ack", "seq": req.get("seq", 0)}
+        if "req" in req:
+            msg["req"] = req["req"]
+        msg.update({"node": {"id": r.node_id, "state": self.state}, "status": "ok", "results": results})
+        self._print(msg)
+        late = (r.now - t_us) / 1000
+        for res in results:
+            text = (f"{res['name']} = {res.get('value')}: {res['status']}" + (f" ({res['reason']})" if "reason" in res else "")
+                    + f" (scheduled at {t_us / 1e6:.3f} s, applied {late:.1f} ms later)")
+            self.event("info" if res["status"] == "applied" else "warn", "settings", text)
+        self.report()
 
     def on_log(self, event, kv):
         if event in self.COUNTED:
@@ -417,7 +520,7 @@ class Mop:
             self.state = "operational"
             self.event("info", "radio", f"started: interface version {self.n.r.version}, clock drift {self.n.r.drift_ppb} ppb")
             self.report()
-            self.next_us = self.n.r.now + self.n.a.mop_period_us
+            self.next_us = self.n.r.now + self.n.a.mop_period_us if self.n.a.mop_period_us else None
         elif event in ("rx_start", "rx_ok", "rx_lost"):
             src = kv["src"]
             p = self.peers.get(src)
@@ -433,9 +536,12 @@ class Mop:
             self.event("warn", "anomaly", " ".join(f"{k}={v}" for k, v in kv.items()))
 
     def tick(self):
+        while self.pending and self.pending[0][0] <= self.n.r.now and not self.ended:
+            t_us, req = self.pending.pop(0)
+            self.apply_set(t_us, req)
         if self.next_us is not None and self.n.r.now >= self.next_us:
             self.report()
-            self.next_us = self.n.r.now + self.n.a.mop_period_us
+            self.next_us = self.n.r.now + self.n.a.mop_period_us if self.n.a.mop_period_us else None
 
     def final(self, why):
         # The last report keeps the node's state, as a log read after the run shows the other nodes
@@ -475,6 +581,22 @@ class SniffNode(WindowNode):
             self.on_lp()
         else:
             getattr(self, "on_" + name)()
+
+    def settings(self):
+        a = self.a
+        return [{"name": "tx_power_dbm", "type": "int", "value": a.tx_dbm, "min": -30, "max": 30, "unit": "dBm", "apply": "run",
+                 "desc": "TX power of the next frames"},
+                {"name": "ref.sniff_us", "type": "int", "value": a.sniff_us, "min": 100,
+                 "max": a.sniff_period_us or 10**6, "unit": "us", "apply": "run", "desc": "length of the next sniffs"}]
+
+    def set_value(self, name, value):
+        if name == "tx_power_dbm":
+            self.a.tx_dbm = int(value)
+        elif name == "ref.sniff_us":
+            self.a.sniff_us = int(value)
+        else:
+            return "unknown", None
+        return "applied", None
 
     # --- timers ---
     def on_sniff_timer(self):
@@ -569,6 +691,8 @@ def main():
     m.add_argument("--mop-period-ms", type=float, default=0, help="print MOP1 report lines this often (0: none)")
     m.add_argument("--mop-parent", type=int, default=None, help="report this node as a configured parent")
     m.add_argument("--mop-root", action="store_true", help="report this node as the root of the network")
+    m.add_argument("--mop-set-file", default=None,
+                   help="MOP 1.1 set requests scheduled in virtual time, one per line: '<virtual s> {request}'")
     g = ap.add_argument_group("preamble sampling (SniffNode, interface version 2)")
     g.add_argument("--sniff-period-ms", type=float, default=0, help="sniff every period (0: no sniffing)")
     g.add_argument("--sniff-us", type=int, default=1000, help="length of each sniff")
