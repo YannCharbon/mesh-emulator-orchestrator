@@ -13,7 +13,8 @@ path loss at 915 MHz:
 
     rssi = tx_dbm - PL(d)
 
-and a link (wssimserver -g A,B:RSSI, both directions) where rssi >= --min-rssi.
+and a link (A,B:RSSI, both directions, given to wssimserver with --group-file)
+where rssi >= --min-rssi.
 The gateway (node 0) is in the middle of floor 0. Node IDs are 0..N-1.
 
 Results go to DIR: server.log, topology.txt, nodes/<id>.txt (each client's
@@ -105,6 +106,8 @@ def main():
     p.add_argument("--client-opts", default="", help="more options for every client")
     p.add_argument("--server-opts", default="", help="more options for the server")
     p.add_argument("--topology-only", action="store_true")
+    p.add_argument("--group-args", action="store_true",
+                   help="topology as -g arguments instead of --group-file (limited to about 2000 nodes by ARG_MAX)")
     a = p.parse_args()
 
     n = a.nodes
@@ -141,8 +144,11 @@ def main():
     os.makedirs(nodes_dir)
     cmd = ["/usr/bin/time", "-f", "%e %U %S %M", "-o", os.path.join(a.out, "server_time.txt"),
            a.server, f"--vtime={n}", f"--vtime-end={a.duration}"]
-    for (x, y), r in sorted(edges.items()):
-        cmd += ["-g", f"{x},{y}:{r}"]
+    if a.group_args:
+        for (x, y), r in sorted(edges.items()):
+            cmd += ["-g", f"{x},{y}:{r}"]
+    else:
+        cmd += [f"--group-file={os.path.join(a.out, 'topology.txt')}"]
     if a.power:
         cmd += [f"--power={a.power}", f"--power-out={os.path.join(a.out, 'power.json')}"]
     if a.medium_log:

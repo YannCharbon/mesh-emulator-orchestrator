@@ -290,6 +290,8 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "\n");
     fprintf(stream, "Usage: wssimserver [OPTIONS] SOCKET_PATH\n");
     fprintf(stream, "  -g, --group=NODES[:RSSI]  link these nodes (e.g. 0-2, or 2,5:-67.0)\n");
+    fprintf(stream, "  --group-file=FILE         -g options from FILE, one per line (empty lines and # comments\n");
+    fprintf(stream, "                            skipped): for topologies too large for the command line\n");
     fprintf(stream, "  -l, --dump                print the topology and the RSSI map\n");
     fprintf(stream, "  -f, --fpath[=FILE]        with -l, also write the edges to FILE (/tmp/graph.txt)\n");
     fprintf(stream, "  --vtime=N                 virtual time: conduct N nodes (docs/VIRTUAL_TIME.md)\n");
@@ -368,6 +370,7 @@ enum {
     OPT_MEDIUM_LOCK_SNR,
     OPT_MEDIUM_CAPTURE_DB,
     OPT_MEDIUM_LOG,
+    OPT_GROUP_FILE,
     OPT_SNIFF_DETECT,
     OPT_SNIFF_DWELL,
     OPT_SNIFF_THRESHOLD,
@@ -545,6 +548,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "medium-lock-snr", required_argument, 0, OPT_MEDIUM_LOCK_SNR },
         { "medium-capture-db", required_argument, 0, OPT_MEDIUM_CAPTURE_DB },
         { "medium-log", required_argument, 0, OPT_MEDIUM_LOG },
+        { "group-file", required_argument, 0, OPT_GROUP_FILE },
         { "sniff-detect", required_argument, 0, OPT_SNIFF_DETECT },
         { "sniff-dwell-bits", required_argument, 0, OPT_SNIFF_DWELL },
         { "sniff-threshold", required_argument, 0, OPT_SNIFF_THRESHOLD },
@@ -563,11 +567,33 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         switch (opt) {
             case 'g':
                 FATAL_ON(bitmap_parse(optarg, mask, MAX_NODES / 64), 1, "Bad mask: %s", optarg);
-                if (!ctxt->groups)
-                    ctxt->groups = calloc(argc, sizeof(*ctxt->groups));
-                FATAL_ON(!ctxt->groups, 1, "calloc: %m");
+                ctxt->groups = realloc(ctxt->groups, (ctxt->num_groups + 1) * sizeof(*ctxt->groups));
+                FATAL_ON(!ctxt->groups, 1, "realloc: %m");
                 ctxt->groups[ctxt->num_groups++] = optarg;
                 break;
+            case OPT_GROUP_FILE: {
+                // One -g argument per line: large topologies exceed the
+                // command line's size limit (docs/SCALE.md)
+                FILE *gf = fopen(optarg, "r");
+                char *line = NULL;
+                size_t cap = 0;
+                ssize_t n;
+
+                FATAL_ON(!gf, 1, "--group-file: %s: %m", optarg);
+                while ((n = getline(&line, &cap, gf)) >= 0) {
+                    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' '))
+                        line[--n] = '\0';
+                    if (!n || line[0] == '#')
+                        continue;
+                    FATAL_ON(bitmap_parse(line, mask, MAX_NODES / 64), 1, "--group-file: bad mask: %s", line);
+                    ctxt->groups = realloc(ctxt->groups, (ctxt->num_groups + 1) * sizeof(*ctxt->groups));
+                    FATAL_ON(!ctxt->groups, 1, "realloc: %m");
+                    ctxt->groups[ctxt->num_groups++] = strdup(line);
+                }
+                free(line);
+                fclose(gf);
+                break;
+            }
             case 'f':
                if (optarg == NULL && optind < argc
                     && argv[optind][0] != '-')
