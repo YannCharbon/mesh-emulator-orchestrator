@@ -7,8 +7,12 @@
 #
 # Environment (all optional):
 #   WSSIM_SEED=<n>     the run's seed (default 1)
-#   TOPO=<file>        topology, one edge "a,b:rssi" per line ('#' comments);
-#                      node 0 is the border router, the node count is the
+#   TOPO=<file>        topology, one wssimserver -g argument per line, without
+#                      "-g": "a,b:rssi" (a link, both directions unless the
+#                      file also has "b,a:rssi"), "a,b" (0 dBm) or a group
+#                      "0-3:rssi"; blank lines and lines starting with '#'
+#                      skipped (sim_utils/vtime/README.md, "Topology files").
+#                      Node 0 is the border router, the node count is the
 #                      highest ID + 1. Default: dag_simple (15 nodes), the same
 #                      -g list as sim_utils/migration/headless_run.sh.
 #   SOCK=<path>        conductor socket (default: a new /tmp/wssim-vt-*.sock)
@@ -94,10 +98,12 @@
 #                      node of TOPO must then be in IF_NODES
 #
 # Output in <outdir>: simserver.log, br.log, node<i>.log (each line starts with
-# NSIM_EPOCH_S + virtual time, written by the simulation port), t0
-# (= NSIM_EPOCH_S), topology.txt, exit_codes.txt, log_wsbr (the BR's trace
-# file), storage/ (the stack's key storage, fresh for every run), examples
-# (a link to <workdir>/examples).
+# NSIM_EPOCH_S + virtual time, written by the simulation port), if<i>.log
+# (the clients' output, as they write it), t0 (= NSIM_EPOCH_S), topology.txt,
+# exit_codes.txt, run_info.txt, and with Nanostack programs only: log_wsbr (the
+# BR's trace file), storage/ (the stack's key storage, fresh for every run),
+# examples (a link to <workdir>/examples). A run of clients only (node 0 in
+# IF_NODES) needs no examples/ in <workdir>.
 #
 # The run ends when wssimserver exits. The script never uses pkill: on error
 # it kills only the processes it started. It fails (exit status 1) if any
@@ -107,9 +113,6 @@ set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3; DUR=$4
 BR_CONF=$WORK/examples/wsbrd${CONF:+-$CONF}.conf
 NODE_CONF=$WORK/examples/wsnode${CONF:+-$CONF}.conf
-for f in "$BR_CONF" "$NODE_CONF"; do
-	[ -f "$f" ] || { echo "run.sh: no $f" >&2; exit 1; }
-done
 if [ -n "${POWER:-}" ]; then
 	POWER=$(realpath "$POWER") && [ -f "$POWER" ] || { echo "run.sh: no power profile ${POWER:-}" >&2; exit 1; }
 fi
@@ -122,7 +125,12 @@ if [ -n "$(ls -A "$OUT")" ]; then
 	echo "run.sh: $OUT is not empty" >&2; exit 1
 fi
 if [ -n "${TOPO:-}" ]; then
-	grep -v '^\s*\(#\|$\)' "$TOPO" > "$OUT/topology.txt" || { echo "run.sh: empty topology $TOPO" >&2; exit 1; }
+	# As wssimserver --group-file: comments, blanks and a leading -g dropped
+	sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^--group=//' -e 's/^-g[[:space:]]*//' "$TOPO" |
+		grep -v '^$' > "$OUT/topology.txt" || { echo "run.sh: empty topology $TOPO" >&2; exit 1; }
+	if grep -n '[[:space:]]' "$OUT/topology.txt" >&2; then
+		echo "run.sh: $TOPO: one a,b:rssi per line (above: lines with spaces)" >&2; exit 1
+	fi
 else
 	tr ' ' '\n' <<< "$DAG_SIMPLE" > "$OUT/topology.txt"
 fi
@@ -150,6 +158,11 @@ if [ -n "${IFN[0]:-}" ]; then   # node 0 is a client: no Nanostack program in th
 	done < "$OUT/topology.txt"
 	NODES=0
 fi
+if (( NSBR + NODES > 0 )); then  # Nanostack programs: their configurations
+	for f in "$BR_CONF" "$NODE_CONF"; do
+		[ -f "$f" ] || { echo "run.sh: no $f" >&2; exit 1; }
+	done
+fi
 NIF=0
 for i in ${IF_NODES:-}; do
 	NIF=$((NIF + 1))
@@ -174,8 +187,10 @@ if [ "${KEEP_DBUS:-0}" != 1 ]; then
 	export DBUS_STARTER_BUS_TYPE=user                       # wsbrd: no system bus fallback
 	export DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/wssim-vt-no-dbus
 fi
-export WSBRD_LOG_FILE=$OUT/log_wsbr
-mkdir -p "$OUT/storage"
+if (( NSBR + NODES > 0 )); then  # Nanostack programs: the BR's trace file, the key storage
+	export WSBRD_LOG_FILE=$OUT/log_wsbr
+	mkdir -p "$OUT/storage"
+fi
 echo $NSIM_EPOCH_S > "$OUT/t0"
 cat > "$OUT/run_info.txt" <<EOF
 seed=$SEED nodes=$((NODES + NSBR + NIF)) if_nodes=${IF_NODES:-} vtime_end=$DUR sock=$SOCK tun=$TUN setarch=${SETARCH:-0} conf=${CONF:-default}
@@ -208,8 +223,9 @@ trap 'abort "interrupted"' INT TERM HUP
 # The programs run in <outdir>, with examples/ linked there (the configs name
 # their certificates relative to the working directory), and the key storage
 # is given relative to it: the stack prints the storage paths, so they must be
-# the same in every run for the determinism check.
-ln -s "$WORK/examples" "$OUT/examples"
+# the same in every run for the determinism check. Not for a run of clients
+# only.
+(( NSBR + NODES > 0 )) && ln -s "$WORK/examples" "$OUT/examples"
 cd "$OUT" || exit 1
 mac() { printf '01:02:03:04:05:06:%02X:%02X' $(($1 >> 8)) $(($1 & 0xFF)); }
 start() {   # start <log name> <program and args...>
