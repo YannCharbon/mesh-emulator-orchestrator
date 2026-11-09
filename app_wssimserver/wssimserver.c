@@ -851,7 +851,11 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         FATAL(1, "Expected argument: socket path");
     if (optind + 1 < argc)
         FATAL(1, "Too many arguments argument: %s", argv[optind + 1]);
-    FATAL_ON(strlen(argv[optind]) >= sizeof(ctxt->addr.sun_path), 1);
+    // A UNIX socket path is at most 107 bytes (sun_path, with its NUL)
+    FATAL_ON(strlen(argv[optind]) >= sizeof(ctxt->addr.sun_path), 1,
+             "socket path too long: %zu bytes, the limit of a UNIX socket path is %zu: %s\n"
+             "Give a shorter path, e.g. in /tmp (run.sh: SOCK=/tmp/<name>.sock; its default is short)",
+             strlen(argv[optind]), sizeof(ctxt->addr.sun_path) - 1, argv[optind]);
     strcpy(ctxt->addr.sun_path, argv[optind]);
 }
 

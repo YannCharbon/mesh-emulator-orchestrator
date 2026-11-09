@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "common/log.h"
 #include "ns_port/power.h"
@@ -460,8 +461,26 @@ static struct {
     .out_path = "power.json",
 };
 
+// A profile is read when the run starts (after every node's hello): check
+// now that it can be read, so that a wrong path stops the server before any
+// node connects.
+static void profile_check_path(const char *opt, const char *path)
+{
+    char cwd[512];
+    int err;
+
+    if (access(path, R_OK) == 0)
+        return;
+    err = errno;
+    if (path[0] == '/' || !getcwd(cwd, sizeof(cwd)))
+        FATAL(1, "%s: power profile %s: %s", opt, path, strerror(err));
+    FATAL(1, "%s: power profile %s: %s (a relative path is relative to the server's working directory, %s)",
+          opt, path, strerror(err), cwd);
+}
+
 void pwr_set_profile(const char *path)
 {
+    profile_check_path("--power", path);
     pwr.profile_path = path;
 }
 
@@ -469,6 +488,7 @@ void pwr_add_node_profile(const char *spec)
 {
     FATAL_ON(pwr.node_specs_n >= 64, 1, "--power-node: at most 64");
     FATAL_ON(!strchr(spec, ':'), 1, "--power-node: expected IDS:PROFILE, got %s", spec);
+    profile_check_path("--power-node", strchr(spec, ':') + 1);
     pwr.node_specs[pwr.node_specs_n++].spec = strdup(spec);
 }
 
@@ -534,11 +554,26 @@ static struct pwr_profile *profile_get(const char *path)
     p = profile_load(path);
     p->next = pwr.profiles;
     pwr.profiles = p;
-    INFO("power: profile %s (%s, %s): deep sleep from %llu us of idle", p->name, p->kind, path,
+    // profile.kind is the hardware's architecture, not the use of the
+    // profile: an LFN profile of a single-chip radio is "soc" too
+    INFO("power: profile %s, file %s: hardware kind %s (%s), deep sleep from %llu us of idle",
+         p->name, path, p->kind,
+         !strcmp(p->kind, "soc") ? "MCU and radio on one chip" : "MCU and a separate transceiver",
          (unsigned long long)p->rule.deep_min_us);
-    for (int m = 1; m < SIM_PHY_MODES; m++)
-        if (p->by_mode[m])
-            INFO("power: profile %s: values for PHY mode %s", p->name, mode_names[m]);
+    {
+        char modes[64] = "";
+        size_t len = 0;
+
+        for (int m = 1; m < SIM_PHY_MODES; m++)
+            if (p->by_mode[m])
+                len += snprintf(modes + len, sizeof(modes) - len, "%s%s", len ? ", " : "", mode_names[m]);
+        if (len)
+            INFO("power: profile %s: values of its own for PHY mode %s; a node in any other mode, "
+                 "or that reports none, takes its common values (each node's line at the end says which applied)",
+                 p->name, modes);
+        else
+            INFO("power: profile %s: common values only, whatever PHY mode a node reports", p->name);
+    }
     return p;
 }
 
@@ -1097,13 +1132,23 @@ void pwr_finish(uint64_t t_end_us, uint64_t seed)
     fprintf(f, "  ]\n}\n");
     FATAL_ON(fclose(f), 1, "%s: %m", pwr.out_path);
     for (i = 0; i < pwr.num_nodes; i++) {
+        char why[48];
         double span;
 
         n = pwr.nodes[pwr.ids[i]];
         node_totals(n, &tt);
         span = fmax(t_end - n->start, 0);
-        INFO("power: node %d (values %s): %.4f mA average, MCU active %.3f%%, radio RX %.2f%% TX %.3f%%, %.1f wakes/s, %.1f empty ticks/s%s",
-             n->id, n->p->mode ? mode_names[n->p->mode] : "common", span > 0 ? tt.charge * 1000 / span : 0,
+        // Which values applied, and why: the mode the radio reported, or
+        // --power-mode
+        if (n->mode_user >= 0)
+            snprintf(why, sizeof(why), "--power-mode=%s", n->mode_user ? mode_names[n->mode_user] : "common");
+        else if (n->mode_radio)
+            snprintf(why, sizeof(why), "PHY mode %s reported", mode_names[n->mode_radio]);
+        else
+            snprintf(why, sizeof(why), "no PHY mode reported");
+        INFO("power: node %d (profile %s, %s: %s values): %.4f mA average, MCU active %.3f%%, radio RX %.2f%% TX %.3f%%, %.1f wakes/s, %.1f empty ticks/s%s",
+             n->id, n->base->name, why, n->p->mode ? mode_names[n->p->mode] : "common",
+             span > 0 ? tt.charge * 1000 / span : 0,
              span > 0 ? 100 * n->mcu_time[MCU_ACTIVE] / span : 0,
              span > 0 ? 100 * (n->r_time[SIM_RADIO_LISTEN] + n->r_time[SIM_RADIO_RECEIVE]) / span : 0,
              span > 0 ? 100 * tt.tx_t / span : 0,
