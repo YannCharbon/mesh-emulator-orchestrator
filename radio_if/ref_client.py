@@ -424,8 +424,9 @@ class SniffNode(WindowNode):
                  t_us=res["t_us"], rssi_dbm=f"{res['rssi_dbm']:.1f}", sinr_db=f"{res['sinr_db']:.1f}")
         if res["locked"] == LOCKED:
             self.lock_next = True               # its "xx" is the next message
-        elif res["locked"] == NOT_LOCKED:
+        elif res["locked"] == NOT_LOCKED and self.held is None:
             self.set_state(OFF)                 # too late to receive it: the radio goes off
+        # RECEIVING: the frame is held already, its verdict will come
 
     def on_frame(self, hdr, psdu):
         if self.lock_next:
@@ -439,7 +440,9 @@ class SniffNode(WindowNode):
         super().on_frame(hdr, psdu)
 
     def leave_busy(self):
-        self.set_state(OFF)
+        # A frame that started during a sniff still in progress: back to the
+        # sniff, which goes on (a report of OFF would end it, §6.7)
+        self.set_state(LISTEN if self.sniffing is not None else OFF)
 
 
 def main():

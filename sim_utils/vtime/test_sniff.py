@@ -158,14 +158,16 @@ def test_sniff_edges():
     """A dwell must fit in both the window and the frame's preamble. The
     window is [3000, 4000). A preamble ending 319 us after the window opens:
     not detected; 320 us: detected at 3320. A frame starting 319 us before
-    the window closes: not detected; 320 us: detected at 4000. With
-    --sniff-detect=frame the whole frame counts: the first is detected."""
+    the window closes: not detected; 320 us: detected at 4000, and reported
+    as already received (locked = 2, without SNIFF_LOCK too): 2's radio was
+    in LISTEN at its start. With --sniff-detect=frame the whole frame counts:
+    the first is detected."""
     for start, opts, want in ((3000 - PRE_US + 319, [], None), (3000 - PRE_US + 320, [], 3320),
                               (4000 - 319, [], None), (4000 - 320, [], 4000),
                               (3000 - PRE_US + 319, ["--sniff-detect=frame"], 3320)):
         r = {1: Sniffer(1, {start: [("tx", {})]}), 2: Sniffer(2, {3000: [("sniff", 0, 1000)]})}
         d, out, rows, sn = sniff_run(r, [(1, 2, -60)], opts=opts)
-        exp = [(want, 1, 0, 1, want)] if want else [(4000, 0, 0, 0, 4000)]
+        exp = [(want, 1, 2 if start >= 3000 else 0, 1, want)] if want else [(4000, 0, 0, 0, 4000)]
         check(results(r[2]) == exp, f"frame at {start} {opts}: {r[2].results}")
 
 
@@ -402,12 +404,13 @@ def test_sniff_many_frames():
     dwell (25320). Each frame joining the sniff must not add a chain of check
     events: the same result as with the strong frame alone. 2's radio is in
     LISTEN, so it also locks onto the strong frame at its start (25000) and
-    gets its verdict at its end; no other wake."""
+    gets its verdict at its end (the sniff reports it with locked = 2); no
+    other wake."""
     acts = {k: Sniffer(k, {1000 + 1000 * k: [("tx", {})]}) for k in range(3, 23)}
     r = {1: Sniffer(1, {25000: [("tx", {})]}), 2: Sniffer(2, {500: [("sniff", 0, 30000)]}), **acts}
     d, out, rows, sn = sniff_run(r, [(1, 2, -60)] + [(k, 2, -125) for k in acts])
     x = r[2].results[0][1] if r[2].results else {}
-    check(results(r[2]) == [(25320, 1, 0, 21, 25320)] and x["src"] == 1, f"{r[2].results}")
+    check(results(r[2]) == [(25320, 1, SNIFF_RECEIVING, 21, 25320)] and x["src"] == 1, f"{r[2].results}")
     wakes = [t for t, n, f, o in d.log if n == 2]
     check(wakes == [0, 500, 25000, 25320, 25000 + AIRTIME], f"wakes of 2 {wakes}")
 

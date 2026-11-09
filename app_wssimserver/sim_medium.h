@@ -105,7 +105,15 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
 uint64_t med_lock_end(const struct med_lock *l);
 // The radio state the ledger records when a sniff ends now with nothing
 // detected: the request's end state, or SIM_RADIO_STATES (no change) if the
-// receiver holds a lock
+// receiver holds a lock, or its own frame is still on air
 uint8_t med_sniff_end_state(int node, uint64_t now);
+// The channel of node's sniff in progress, or -1
+int med_sniff_channel(int node);
+// The node's radio left its sniff (a radio report turned it off or away):
+// the sniff ends now, with no "xd" (outcome "left")
+void med_sniff_cancel(int node, uint64_t now);
+// The node stops receiving the frame it is locked onto, now ("left", no
+// verdict), as med_decide() does for a radio that left RECEIVE
+void med_rx_leave(int node, uint64_t now);
 
 #endif

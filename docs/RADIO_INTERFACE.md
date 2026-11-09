@@ -124,7 +124,7 @@ The `count` messages are separate packets; the client reads each of them with a 
 | 11 | 1 | fcs_len | bytes of checksum after the PSDU | the same |
 | 12 | 1 | phr_len | bytes of PHY header | the same |
 | 13 | 1 | tx_dbm | transmit power, `int8` | the same |
-| 14 | 1 | flags | 0 | `0x01` (`MEDIUM`): the medium locked this receiver onto the frame. `0x02` (`LONG_PREAMBLE`, version 2): the sender sent it with a long preamble (`"xl"`, §4.14) |
+| 14 | 1 | flags | 0 | `0x01` (`MEDIUM`): the medium locked this receiver onto the frame. `0x02` (`LONG_PREAMBLE`, version 2 only): the sender sent it with a long preamble (`"xl"`, §4.14); a version-1 client never gets this bit |
 | 15 | 1 | reserved | 0 | |
 | 16 | 4 | rate_bps | bit rate | the same |
 | 20 | 4 | frame_id | 0 | the run-wide identifier of the frame, from 1 |
@@ -185,10 +185,10 @@ The run is over. The client closes the connection and exits with status 0.
 | --- | --- | --- | --- |
 | 0 | 2 | magic | `"xn"` |
 | 2 | 2 | channel | the channel to sniff |
-| 4 | 4 | duration_us | the length of the sniff window, from now |
+| 4 | 4 | duration_us | the length of the sniff window, from now (0: the `"xd"` comes in a new wake at the same time) |
 | 8 | 4 | sniff_id | the client's own tag, echoed in the `"xd"` |
 | 12 | 1 | flags | `0x01` (`LOCK`): on a detection, lock the receiver onto the frame if it can still be received. Other bits: 0 |
-| 13 | 1 | end_state | the radio state (§4.8 numbering) at the window's end when nothing is detected; `OFF` if above 4 |
+| 13 | 1 | end_state | the radio state at the window's end when nothing is detected: 0 `OFF`, 1 `IDLE` or 2 `LISTEN` (§4.8 numbering); any other value means `OFF` |
 | 14 | 2 | reserved | |
 
 Not answered at once: one `"xd"` comes in a later wake (§6.7).
@@ -199,7 +199,7 @@ Not answered at once: one `"xd"` comes in a later wake (§6.7).
 | --- | --- | --- | --- |
 | 0 | 2 | magic | `"xd"` |
 | 2 | 1 | detected | 1: a frame was detected; 0: nothing in the window |
-| 3 | 1 | locked | 0: no lock (not asked, or the frame can no longer be received); 1 (`LOCKED`): the medium locked the receiver onto the frame now, and its `"xx"` is the next message of this wake; 2 (`RECEIVING`): the receiver was already locked onto that frame, whose `"xx"` came at its start |
+| 3 | 1 | locked | 0: no lock (`LOCK` not asked, or the frame can no longer be received); 1 (`LOCKED`): the medium locked the receiver onto the frame now, and its `"xx"` is the next message of this wake; 2 (`RECEIVING`): the receiver was already locked onto that frame, whose `"xx"` came at its start (with or without `LOCK`) |
 | 4 | 4 | sniff_id | the request's tag |
 | 8 | 4 | frame_id | the frame detected; 0 if none |
 | 12 | 2 | src | its sender's node ID; 0 if none |
@@ -217,7 +217,7 @@ Not answered at once: one `"xd"` comes in a later wake (§6.7).
 | 4 | 4 | preamble_us | the wake-up preamble on air before the frame's own SHR, in µs |
 | 8 | 28 + len | frame | a complete `"xx"` message as sent by the client (§4.6) |
 
-One message: the 8-byte header and the `"xx"` in a single `send()`. Receivers get the frame as an ordinary `"xx"` with the `LONG_PREAMBLE` flag.
+One message: the 8-byte header and the `"xx"` in a single `send()`. Receivers get the frame as an ordinary `"xx"` with the `LONG_PREAMBLE` flag (version-2 clients only). With `preamble_us` = 0 it is an ordinary frame, without the flag.
 
 ## 5. Sequencing in virtual time
 
@@ -322,19 +322,19 @@ Preamble sampling: a node turns its receiver on for a short window on one channe
 
 1. The receiver is on, on `C`, from `t_on` to `t1 = t + d`. `t_on` is `t`, or the end of the node's own frame if one is still on air (half duplex). Detection starts after the receiver's settling time (server option `--sniff-settle-us`, 0 by default), counted from `t_on`; the settling time counts as listening.
 2. The server answers with one `"xd"` (§4.13), in a wake of the node at `t_us`:
-   - at the **detection time**, the end of the first detection try that succeeds (`detected` = 1). A try observes a fixed number of bits of a frame's preamble (`--sniff-dwell-bits`, 16 by default), so a detection comes one try's duration or more after the preamble or the window starts: 320 µs at 50 kbit/s with the defaults;
+   - at the **detection time**, the end of the first detection try that succeeds (`detected` = 1). A try observes a fixed number of bits of a frame's preamble (`--sniff-dwell-bits`, 16 by default), so a detection comes one try's duration or more after the later of the preamble's start and the window's start (after the settling time): 320 µs at 50 kbit/s with the defaults;
    - or at `t1` with `detected` = 0.
 3. With `LOCK`, a detection locks the receiver onto the frame if its sync word is still ahead and it passes the lock threshold (`docs/MEDIUM.md` §10.3): `locked` = 1 and the frame's `"xx"` (flag `MEDIUM`, and `LONG_PREAMBLE` if it was sent with `"xl"`) is the next message of the same wake. Its verdict `"xv"` comes at the frame's end, as for any lock (§6.5), and capture by a stronger frame applies until the end of its SHR.
-4. A frame that **starts** on `C` during the window locks the receiver at its start, as in §6.5: the client gets its `"xx"` then, and the sniff reports it later with `locked` = 2.
+4. A frame that **starts** on `C` during the window locks the receiver at its start, as in §6.5: the client gets its `"xx"` then and reports `RECEIVE` (a report that keeps the sniff, below), and the sniff reports that frame later with `locked` = 2 if it detects it (with or without `LOCK`). If its verdict comes before the `"xd"`, the client reports `LISTEN` on `C` to go back to the sniff, which goes on, or `OFF` to end it (then no `"xd"` comes). If the window ends while the frame is still being received and the sniff did not detect it (a preamble shorter than one try, or a missed try), the `"xd"` has `detected` = 0 and the radio stays in `RECEIVE`.
 
-**Ordering in virtual time.** The `"xd"`, and the `"xx"` of a lock it made, are messages of a wake like frames and verdicts: they count in the `"xa"` count and come in the medium's order (§5.2), the `"xx"` right after its `"xd"`. A sniff that detects nothing costs the node one wake, at `t1`. A node has at most one sniff: a new `"xn"` replaces the one in progress, which then ends **without** `"xd"`. A frame the node sends during the window (`"xx"` or `"xl"`) also ends the sniff without `"xd"`, and so does the node's stop.
+**Ordering in virtual time.** The `"xd"`, and the `"xx"` of a lock it made, are messages of a wake like frames and verdicts: they count in the `"xa"` count and come in the medium's order (§5.2), the `"xx"` right after its `"xd"`. A sniff that detects nothing costs the node one wake, at `t1`. A node has at most one sniff: a new `"xn"` replaces the one in progress, which then ends **without** `"xd"`. A frame the node sends during the window (`"xx"` or `"xl"`), a radio report that leaves the sniff (below) and the node's stop also end it without `"xd"`.
 
 **Radio states during a sniff.** The server applies the states a sniff implies, in the power report and in the state the medium uses for the node, so the client does not report them:
 
 | When | State applied by the server |
 | --- | --- |
-| `t_on` | `LISTEN` on `C` |
-| `t1`, nothing detected | the request's `end_state`, on `C`; nothing if the receiver is locked onto a frame (case 4) |
+| `t_on` | `LISTEN` on `C`; nothing if the node's own frame lasts until `t1` or later |
+| `t1`, nothing detected | the request's `end_state`, on `C`; nothing if the receiver is locked onto a frame (case 4) or the node's own frame is still on air |
 | detection with `locked` = 1 | `RECEIVE`, on the frame's channel |
 
 The client reports every other change with `"xr"`, as in §6.1:
@@ -344,7 +344,11 @@ The client reports every other change with `"xr"`, as in §6.1:
 - after the verdict of a frame it received, its next state, as for any frame;
 - a report of the state the server applied is harmless (the power report ignores a report of the current state).
 
-A report during the window is applied (the medium and the power report use it) but does not end the sniff: the detection goes on, and the server applies the end state at `t1`. A client therefore reports nothing during a window except a transmission, which ends the sniff. A client that sends `"xn"` while its own frame is on air stays in `TX` until the frame's end, as §6.2 requires; the server then switches it to `LISTEN` on `C`, and the client reports nothing else at that end (or `LISTEN` on `C`).
+**Reports during the window.** Every report is applied (the medium and the power report use it). A report that leaves the sniff **ends it, without `"xd"`** (outcome `left` in the sniff log): `OFF` or `IDLE`, `TX` from another state, or `LISTEN` or `RECEIVE` on a channel other than `C`. A report of `LISTEN` or `RECEIVE` on `C` keeps the sniff: the detection goes on, and the server applies the end state at `t1`. So a client reports, during a window, only `RECEIVE` for a frame that starts in it (case 4), `LISTEN` on `C` after that frame's verdict, or a change that ends the sniff on purpose, after which it waits for no `"xd"`.
+
+**`"xn"` while holding a frame.** The sniff puts the receiver in `LISTEN`, which leaves the frame the client holds (§6.5): that frame is lost at once (medium outcome `left`) and no verdict comes. The sniff may then detect the same frame again if its preamble is still on air, and with `LOCK` lock onto it: its `"xx"` comes again, with the same `frame_id`, after the `"xd"`.
+
+**`"xn"` during the node's own frame.** The client stays in `TX` until the frame's end, as §6.2 requires; the server switches it to `LISTEN` on `C` at that end (`t_on`), and the client reports nothing else then (or `LISTEN` on `C`; any other report ends the sniff). If the frame lasts until `t1` or later, the receiver is never on: the `"xd"` comes at `t1` with `detected` = 0, the server applies no state, and the client reports its next state at its frame's end as usual.
 
 **Sending with a long preamble.** `"xl"` (§4.14) is a frame for every rule of §6.2: the client reports `TX` before it, the server refuses it otherwise or while the node's previous frame is on air, and the transmission ends at `t + preamble_us + airtime_us`, until which the client stays in `TX`. The power report charges the long preamble from the client's `TX` report, as the rest of the frame. Receivers that lock onto it get the frame's PSDU only; the preamble is not delivered.
 
@@ -451,7 +455,7 @@ loop:
 
 `radio_if/ref_client.py` (Python standard library only) implements this interface, version 2 (`RadioIf`; `--if-version=1` asks for version 1), and two small protocols on top of it: `WindowNode`, periodic receive windows on the node's own clock, the radio off between them, frames at given offsets in the window with CCA before each; and `SniffNode`, preamble sampling (§6.7): a sniff of `--sniff-us` every `--sniff-period-ms` with the lock flag, the radio off in between, and frames sent with a wake-up preamble (`--lp-tx`, `--lp-preamble-ms`).
 
-`radio_if/c_example/rif_node.c` is a second client, in C, of interface version 1 (it shows that version-1 clients keep working), written from this document alone (its message structures come from §4, with no header of this repository): a frame every period at a given offset on the node's own clock, CCA before each, the receiver on between frames (`--listen`) or turned on only for the CCA. It builds with `cc -O2 -o rif_node rif_node.c`.
+`radio_if/c_example/rif_node.c` is a second client, in C, written from this document alone (its message structures come from §4, with no header of this repository): a frame every period at a given offset on the node's own clock, CCA before each, the receiver on between frames (`--listen`) or turned on only for the CCA. It speaks version 1 by default (it shows that version-1 clients keep working) and version 2 with `--if-version 2`: then it can sniff (`--sniff-period-ms`, `--sniff-us`, `--sniff-phase-ms`, `--no-lock`; the radio off between sniffs) and send its frames with a wake-up preamble (`--lp-preamble-ms`). It builds with `cc -O2 -o rif_node rif_node.c`.
 
 `radio_if/test_ref_client.py` runs them against `wssimserver`:
 
@@ -469,14 +473,17 @@ loop:
 | `hello_refused` | The server refuses an unknown version (0 and 3), unknown flags, the interface without virtual time (also for a later instance, `--vtime-start`), and the legacy medium |
 | `sniff_lp` | A sender with a 105 ms wake-up preamble and two receivers sniffing 1 ms every 100 ms: each receiver detects each preamble one dwell into its first sniff inside it, is locked onto the frame and receives it; its other sniffs find the noise floor; the server applies the sniff states (the clients report none), and the power report has exactly the listening, receiving and TX times |
 | `sniff_frame_starts` | A frame with an ordinary preamble that starts inside a sniff locks the receiver at its start (the server put the client in `LISTEN`), and the sniff reports it with `locked` = 2 |
+| `c_sniff` | The C client in version 2: a C sender and a Python sender with a 105 ms wake-up preamble, a C and a Python receiver sniffing 1 ms every 100 ms; each receiver detects, locks onto and receives every frame through its sniffs, with exactly the listening, receiving and TX times in the power report; a version-1 C client that listens receives the same frames from their start, without the `LONG_PREAMBLE` flag |
 | `tx_rules` | Frames outside `TX` and overlapping frames are not sent and are counted; leaving `TX` while the frame is on air is counted |
 | `sniff_version` | A version-2 welcome has `SNIFF` and the server answers its `"xn"`; a version-1 welcome does not, and its `"xn"` and `"xl"` are dropped and counted; leaving `TX` after the frame's airtime but before the end of the long preamble plus the frame is counted |
+| `sniff_xn_while_receiving` | `"xn"` while holding a frame, after its preamble: the frame is lost (`left`), no verdict comes, the sniff ends with nothing detected and the frame's power as the energy; `"xn"` during the node's own frame that outlasts the window: the `"xd"` at the window's end, the radio left in `TX` until the frame's end, no rule broken |
+| `sniff_report_in_window` | During a sniff, a report of `OFF` and one of `LISTEN` on another channel end the sniff with no `"xd"` (`left`) and the radio hears nothing more; `LISTEN` and then `RECEIVE` on the sniff channel keep it: a frame that starts in the window is received and the sniff reports it with `locked` = 2 |
 
 ```bash
 python3 radio_if/test_ref_client.py build-vt/wssimserver      # about 3 s
 ```
 
-`radio_if/test_mixed.sh <bindir> <workdir> <outdir>` runs `dag_simple` (15 Nanostack nodes) with three clients (two C, one Python) near four of its routers, on one of the Wi-SUN nodes' channels, for 600 virtual seconds, and the same seed without the clients. It checks that every router joins as in the baseline, that the clients receive each other's frames and Wi-SUN frames and the Wi-SUN nodes the clients' frames (each client's log against the medium log), that collisions between the two kinds of node occur and are applied by the medium, that the power report covers every node with exact state sums and each client's TX time, and that the server logged no interface error (about 10 s).
+`radio_if/test_mixed.sh <bindir> <workdir> <outdir>` runs `dag_simple` (15 Nanostack nodes) with three clients (two C, one Python) near four of its routers, on one of the Wi-SUN nodes' channels, for 600 virtual seconds, and the same seed without the clients. It checks that every router joins as in the baseline, that the clients receive each other's frames and Wi-SUN frames and the Wi-SUN nodes the clients' frames (each client's log against the medium log), that collisions between the two kinds of node occur and are applied by the medium, that the power report covers every node with exact state sums and each client's TX time, and that the server logged no interface error (about 10 s). With `SNIFF=1` the clients sniff instead (two C clients in version 2 that sniff 1 ms every 100 ms and send with a 110 ms wake-up preamble, a Python client that sniffs 10 ms every 50 ms, a version-1 C client that listens all the time): the test checks the detections, locks and receptions through sniffs, Wi-SUN frames detected and received through sniffs, the version-1 client next to them, the collisions across the two kinds, the power report (TX times with the preambles, listening within the sniffs) and the server's sniff counts against the clients' logs.
 
 ## 13. Versioning
 

@@ -102,7 +102,7 @@ A radio sends `"xn"` (`struct sim_sniff`) during its run at time `t`: channel `C
 - at the **detection time** `td`, the end of the first dwell that detects a frame (§10.2): `detected = 1`, the frame's `frame_id` and sender, `t_us = td`, `rssi_dbm` = the frame's received power `P`, `sinr_db` = the lowest SINR over that dwell;
 - or at `t1` if nothing was detected: `detected = 0`, `t_us = t1`, `rssi_dbm` = the energy on `C` at the node at `t1` (noise plus the frames on air then that it hears, as `"xs"` would answer; on an empty channel, the noise floor −119.93 dBm).
 
-A new `"xn"` while a sniff is in progress replaces it (no `"xd"` for the old one). A frame sent by the node ends its sniff, with no `"xd"` (half duplex, §10.3). A stopped node's sniff ends with it.
+A new `"xn"` while a sniff is in progress replaces it (no `"xd"` for the old one). A frame sent by the node ends its sniff, with no `"xd"` (half duplex, §10.3). A stopped node's sniff ends with it. For a client of the stack-neutral radio interface, whose radio state the conductor knows from its reports, a report that leaves the sniff (`OFF`, `IDLE`, `TX` from another state, or a receiver on another channel) also ends it with no `"xd"` (outcome `left`), and an `"xn"` sent while it holds a frame loses that frame (outcome `left`) before the sniff starts ([RADIO_INTERFACE.md](RADIO_INTERFACE.md) §6.7).
 
 ### 10.2 Detection rules
 
@@ -127,7 +127,7 @@ Values of the default curve without interference (`P = N + SINR`, `N` = −119.9
 **The lock rule (§3) extended.** Until now a receiver could only lock onto a frame at the frame's start; a frame whose preamble started before the receiver was on was never received, however much preamble remained. Real receivers acquire such a frame if the preamble lasts long enough to synchronise and the SFD is still ahead. The rule here: with `SIM_SNIFF_LOCK` in the request, a detection of `F` at `td` **locks the receiver onto `F`** if
 
 1. the SFD is still ahead: `td ≤ pre_end(F)` (always true with `--sniff-detect=preamble`, whose dwells lie in the preamble; with `frame`, a detection in the payload does not lock);
-2. the receiver holds no lock (else `locked = 2` if it already receives `F`, 0 if another frame);
+2. the receiver holds no lock (else `locked = 2` if it already receives `F`, 0 if another frame). A detection of a frame the receiver already receives is reported with `locked = 2` without `SIM_SNIFF_LOCK` too;
 3. `F` passes the lock threshold at `td` against the frames then on air (§3, rule 2).
 
 The `"xd"` then has `locked = 1` and is followed, in the same wake, by `F`'s `"xx"` (`SIM_FRAME_MEDIUM`, its `frame_id`, `rx_dbm` = `P_F`, and `SIM_FRAME_LONG_PREAMBLE` if it came with `"xl"`); the verdict `"xv"` comes at `F`'s end as for any lock, and capture by a stronger frame during the rest of the SHR applies. The bits counted in the verdict (§2) are spread over `[max(td, t_bits), t_end)`, `t_bits` being the frame's start or the end of its `"xl"` preamble: interference during the preamble before the lock does not count, the detection rule covers it.
@@ -145,12 +145,12 @@ All in `app_wssimserver/sim_proto.h`, central mode only (the legacy medium drops
 | Message | From | Struct | Content |
 | --- | --- | --- | --- |
 | `"xl"` | a node, during its run | `struct sim_lp_frame` + a complete `"xx"` | `preamble_us`: preamble on air before the frame's own SHR. The frame is on air for `preamble_us` + its airtime (§2); its capture window is `preamble_us` + its SHR. The sender's TX end is the client's own. |
-| `"xn"` | a node, during its run | `struct sim_sniff` (16 bytes) | `channel`, `duration_us`, `sniff_id` (echoed), `flags` (`SIM_SNIFF_LOCK`), `end_state` (`enum sim_radio_state` after a window with nothing detected, for the ledger; OFF if out of range) |
+| `"xn"` | a node, during its run | `struct sim_sniff` (16 bytes) | `channel`, `duration_us`, `sniff_id` (echoed), `flags` (`SIM_SNIFF_LOCK`), `end_state` (`enum sim_radio_state` after a window with nothing detected, for the ledger: OFF, IDLE or LISTEN; any other value means OFF) |
 | `"xd"` | conductor, in the node's wake at `t_us` | `struct sim_sniff_result` (32 bytes) | `detected`, `locked` (0, `SIM_SNIFF_LOCKED` = 1, `SIM_SNIFF_RECEIVING` = 2), `sniff_id`, `frame_id`, `src`, `t_us`, `rssi_dbm`, `sinr_db` |
 
 `"xd"` and the `"xx"` of a lock it made count in the `"xa"` count, in queue order. A sniff with nothing on the channel costs the node one wake, at `t1`.
 
-**Power ledger** (with `--power`, [POWER_MODEL.md](POWER_MODEL.md)): the conductor records the states the sniff implies, so a client that sends no `"xr"` is still charged: LISTEN on `C` from `t_on` (the request, or the end of the node's own frame: its TX time is kept; the settling time counts as listening; nothing if its own frame fills the window); at `t1` with nothing detected, `end_state` (unless the receiver holds a lock, then it is receiving); RECEIVE from a lock the sniff made. Every other change is the client's to report with `"xr"`: after a detection without a lock the radio stays in LISTEN until the client reports otherwise, and after the verdict as for any frame. The ledger ignores a report of the state it already has, so a client that also reports these states is not charged twice. The sender of an `"xl"` reports its TX state with `"xr"` as for any frame and keeps it for `preamble_us` plus the frame's airtime: the conductor records nothing for it, so the long preamble's charge is the client's TX report.
+**Power ledger** (with `--power`, [POWER_MODEL.md](POWER_MODEL.md)): the conductor records the states the sniff implies, so a client that sends no `"xr"` is still charged: LISTEN on `C` from `t_on` (the request, or the end of the node's own frame: its TX time is kept; the settling time counts as listening; nothing if its own frame fills the window); at `t1` with nothing detected, `end_state` (unless the receiver holds a lock, then it is receiving, or its own frame is still on air, then it is sending and reports its next state at that frame's end); RECEIVE from a lock the sniff made. Every other change is the client's to report with `"xr"`: after a detection without a lock the radio stays in LISTEN until the client reports otherwise, and after the verdict as for any frame. The ledger ignores a report of the state it already has, so a client that also reports these states is not charged twice. The sender of an `"xl"` reports its TX state with `"xr"` as for any frame and keeps it for `preamble_us` plus the frame's airtime: the conductor records nothing for it, so the long preamble's charge is the client's TX report.
 
 ### 10.5 Settings and defaults
 
@@ -164,7 +164,7 @@ All are user settings. The FG25 datasheet gives no preamble-detection figure (no
 | `--sniff-curve=ber:N\|SINR:P,...` | `ber:16` | The medium's BER curve (§2) over 16 bits: 50 % at −115.0 dBm, 90 % at −111.3 dBm per try without interference. For comparison, FG25 packet sensitivity (10 % PER, 250 octets) in the 866 MHz band: −110.8 dBm in mode 1a, −108.8 dBm in mode 3 with FEC (datasheet Table 4.30, p. 92); a preamble detector is expected to work at or below packet sensitivity |
 | `--sniff-sfd-bits=N` | 16 | IEEE 802.15.4 SUN FSK SFD of 2 octets, as the emulated radio sends (`WSSIM_PHY_SFD` = 2 bytes) |
 | `--sniff-settle-us=N` | 0 | Receiver settling (RX warm-up, AGC, timing recovery) before detection can start, after the request or after the node's own frame. 0 keeps the medium's exact timing (§9); no datasheet value is used, to be set from kit measurements (§10.6) |
-| `--sniff-log=FILE` | none | One line per sniff: `t_req node sniff_id chan t0 t1 outcome t frame_id src rssi_dbm sinr_db locked`, outcome one of `detected`, `none`, `tx_abort`, `replaced`, `stopped` |
+| `--sniff-log=FILE` | none | One line per sniff: `t_req node sniff_id chan t0 t1 outcome t frame_id src rssi_dbm sinr_db locked`, outcome one of `detected`, `none`, `tx_abort`, `replaced`, `stopped`, `left` (a client of the radio interface reported a state that left the sniff) |
 
 The run's end prints the number of sniffs per outcome, the locks made by a sniff and the detection draws.
 

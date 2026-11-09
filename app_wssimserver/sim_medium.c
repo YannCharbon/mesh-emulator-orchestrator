@@ -117,8 +117,10 @@ static struct {
 // Separates the detection streams from the verdict streams
 #define SN_RNG_K 0x736e696666000001ULL
 
-enum sn_outcome { SN_DETECTED, SN_NONE, SN_TX_ABORT, SN_REPLACED, SN_STOPPED, SN_OUTCOMES };
-static const char *const sn_outcome_names[SN_OUTCOMES] = { "detected", "none", "tx_abort", "replaced", "stopped" };
+enum sn_outcome { SN_DETECTED, SN_NONE, SN_TX_ABORT, SN_REPLACED, SN_STOPPED, SN_LEFT, SN_OUTCOMES };
+static const char *const sn_outcome_names[SN_OUTCOMES] = {
+    "detected", "none", "tx_abort", "replaced", "stopped", "left"
+};
 
 // A frame on the sniff channel that the sniffing node hears: a candidate
 // for detection, and an interferer of the others
@@ -899,7 +901,8 @@ uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, ui
     x->id = req->sniff_id;
     x->chan = req->channel;
     x->flags = req->flags;
-    x->end_state = req->end_state < SIM_RADIO_STATES ? req->end_state : SIM_RADIO_OFF;
+    // Off, idle or listening; receiving and sending are not states to end in
+    x->end_state = req->end_state <= SIM_RADIO_LISTEN ? req->end_state : SIM_RADIO_OFF;
     x->t_req = now;
     x->t_on = now;
     x->t1 = now + req->duration_us;
@@ -990,11 +993,17 @@ uint64_t med_lock_end(const struct med_lock *l)
 uint8_t med_sniff_end_state(int node, uint64_t now)
 {
     const struct med_lock *l = med.locks[node];
+    const struct med_frame *f;
 
     // A receiver locked onto a frame (at its start, during the window) stays
     // in RX: the radio reports its next state itself
     if (l && l->active && l->t_end > now)
         return SIM_RADIO_STATES;
+    // Its own frame fills the window: the radio is still sending, and
+    // reports its next state at that frame's end itself
+    for (f = med.air; f; f = f->next)
+        if (f->src == node && f->t_end > now)
+            return SIM_RADIO_STATES;
     return sn.s[node] ? sn.s[node]->end_state : SIM_RADIO_OFF;
 }
 
@@ -1099,6 +1108,9 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
                     *len = f->len;
                     *rx_dbm = h->dbm;
                 }
+            } else if (l && l->active && l->frame_id == h->id && l->t_end > now) {
+                // Without the flag too: the receiver already receives it
+                res->locked = SIM_SNIFF_RECEIVING;
             }
             sn_end(node, SN_DETECTED, now, res);
             return true;
@@ -1125,6 +1137,27 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
         x->queued = *next;
     }
     return false;
+}
+
+int med_sniff_channel(int node)
+{
+    const struct sn_sniff *x = sn.s[node];
+
+    return x && x->active ? x->chan : -1;
+}
+
+void med_sniff_cancel(int node, uint64_t now)
+{
+    if (sn.s[node] && sn.s[node]->active)
+        sn_end(node, SN_LEFT, now, NULL);
+}
+
+void med_rx_leave(int node, uint64_t now)
+{
+    struct med_lock *l = med.locks[node];
+
+    if (l && l->active && l->t_end > now)
+        med_end_lock(l, MED_LEFT, now);
 }
 
 void med_finish(void)

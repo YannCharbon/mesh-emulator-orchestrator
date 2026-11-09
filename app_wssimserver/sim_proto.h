@@ -129,7 +129,9 @@ struct sim_lp_frame {
 // looking for a preamble. Sent during the node's run, not answered at once:
 // the conductor sends one "xd" when it detects a frame or at the window's
 // end. A new "xn" replaces a sniff in progress (no "xd" for the old one); a
-// frame the node sends ends it (no "xd").
+// frame the node sends ends it (no "xd"), and so does, for a client of the
+// radio interface, a radio report that leaves the sniff (docs/RADIO_INTERFACE.md
+// §6.7).
 #define SIM_SNIFF_LOCK 0x01     // on detection, lock the receiver onto the frame if it can still be received
 struct sim_sniff {
     char magic[2];              // "xn"
@@ -137,7 +139,7 @@ struct sim_sniff {
     uint32_t duration_us;
     uint32_t sniff_id;          // the node's own tag, echoed in "xd"
     uint8_t flags;              // SIM_SNIFF_*
-    uint8_t end_state;          // enum sim_radio_state at a window's end with nothing detected (power ledger)
+    uint8_t end_state;          // enum sim_radio_state at a window's end with nothing detected: OFF, IDLE or LISTEN (others: OFF)
     uint16_t reserved;
 };
 
@@ -145,8 +147,8 @@ struct sim_sniff {
 // locked: SIM_SNIFF_LOCKED, the medium locked the receiver onto the frame
 // now and its "xx" (SIM_FRAME_MEDIUM) follows in the same wake;
 // SIM_SNIFF_RECEIVING, the receiver was already locked onto it (its "xx"
-// came at its start); 0, no lock (SIM_SNIFF_LOCK not asked, or the frame can
-// no longer be received).
+// came at its start), with or without SIM_SNIFF_LOCK; 0, no lock
+// (SIM_SNIFF_LOCK not asked, or the frame can no longer be received).
 #define SIM_SNIFF_LOCKED 1
 #define SIM_SNIFF_RECEIVING 2
 struct sim_sniff_result {

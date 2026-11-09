@@ -346,15 +346,80 @@ def test_sniff_frame_starts():
     check(radio["receive"]["time_us"] == AIR and radio["listen"]["time_us"] == 14 * 1000 + 500, f"node 2: {radio}")
 
 
+def test_c_sniff():
+    """The C example client with interface version 2, written from the
+    document alone, next to the Python one. Node 1 (C) sends two frames with a
+    105 ms wake-up preamble ("xl") at 250 and 650 ms, its radio off in between
+    and on 1 ms before each frame for its CCA; node 5 (Python) sends one at
+    450 ms. Node 2 (C) and node 3 (Python) sniff 1 ms every 100 ms with the
+    lock flag (at 0 and 37 ms in the period), their radio off in between: each
+    detects every preamble one dwell into its first sniff inside it, is locked
+    onto the frame and receives it; the server applies the sniff states (the
+    clients report none). Node 4 (C, version 1) listens all the time: it locks
+    onto each frame at its start and receives it, without the LONG_PREAMBLE
+    flag, which version 1 does not have (it would stop on it)."""
+    pre = 105000
+    nodes = {1: ["@c", "--if-version", 2, "--lp-preamble-ms", pre / 1000, "--period-ms", 400, "--offset-ms", 250,
+                 "--frames", 2],
+             2: ["@c", "--if-version", 2, "--sniff-period-ms", 100, "--sniff-us", 1000, "--frames", 0],
+             3: ["--sniff-period-ms", 100, "--sniff-us", 1000, "--sniff-phase-ms", 37],
+             4: ["@c", "--listen", "--frames", 0],
+             5: ["--lp-tx", 450, "--lp-preamble-ms", pre / 1000]}
+    links = [(1, 2, -70), (1, 3, -75), (1, 4, -72), (5, 2, -70), (5, 3, -72), (5, 4, -74), (1, 5, -80)]
+    r = Run("c_sniff", nodes, links, 0.95)
+    starts = {1: [250000, 650000], 5: [450000]}
+    ends = {s: [t + pre + AIR for t in ts] for s, ts in starts.items()}
+    check(r.ev(1, "start")[0][1]["version"] == "2" and r.ev(1, "start")[0][1]["can_sniff"] == "1" and
+          r.ev(4, "start")[0][1]["version"] == "1" and r.ev(4, "start")[0][1]["can_sniff"] == "0",
+          "welcomes: version or SNIFF wrong")
+    check([(t, kv["airtime_us"]) for t, kv in r.ev(1, "tx")] == [(t, str(pre + AIR)) for t in starts[1]],
+          f"node 1: {r.events[1]}")
+    detect = {2: [300320, 500320, 700320], 3: [337320, 537320, 737320]}
+    src_of = {300320: 1, 500320: 5, 700320: 1, 337320: 1, 537320: 5, 737320: 1}
+    for nid in (2, 3):
+        d = r.ev(nid, "sniff_detect")
+        check([(t, int(kv["t_us"]), kv["locked"], int(kv["src"])) for t, kv in d] ==
+              [(t, t, "1", src_of[t]) for t in detect[nid]], f"node {nid} detections: {d}")
+        st = r.ev(nid, "rx_start")
+        check([t for t, kv in st] == detect[nid] and all(kv["via"] == "sniff" and kv["lp"] == "1" for t, kv in st),
+              f"node {nid}: {st}")
+        ok = r.ev(nid, "rx_ok")
+        check([(t, int(kv["src"])) for t, kv in ok] == [(ends[1][0], 1), (ends[5][0], 5), (ends[1][1], 1)] and
+              [kv["psdu"] for t, kv in ok] == ["C1S1", "L5S1", "C1S2"], f"node {nid}: {ok}")
+        none = r.ev(nid, "sniff_none")
+        check(len(r.ev(nid, "sniff")) == 10 and len(none) == 7 and
+              all(abs(float(kv["rssi_dbm"]) - NOISE_DBM) < 0.01 for t, kv in none), f"node {nid}: {r.events[nid]}")
+        check(not r.ev(nid, "anomaly") and not r.ev(nid, "rx_lost"), f"node {nid}: anomalies")
+        radio = r.node_power(nid)["radio"]["states"]
+        rx_us = sum(e - t for t, e in zip(detect[nid], sorted(ends[1] + ends[5])))
+        check(radio["receive"]["time_us"] == rx_us and radio["listen"]["time_us"] == 7 * 1000 + 3 * 320 and
+              radio["tx"]["time_us"] == 0, f"node {nid} radio: {radio}")
+        check(abs(r.node_power(nid)["check"]["radio_time_us"] - 0.95e6) < 1, f"node {nid}: state times")
+    # the version-1 listener: every frame from its start, flag LONG_PREAMBLE cleared
+    st = r.ev(4, "rx_start")
+    check([(t, kv["lp"], kv["via"]) for t, kv in st] == [(250000, "0", "listen"), (450000, "0", "listen"),
+                                                         (650000, "0", "listen")] and
+          [t for t, kv in r.ev(4, "rx_ok")] == sorted(ends[1] + ends[5]), f"node 4: {r.events[4]}")
+    p1 = r.node_power(1)["radio"]["states"]
+    check(abs(p1["tx"]["time_us"] - 2 * (pre + AIR)) < 1 and p1["cca"]["count"] == 2, f"node 1 radio: {p1}")
+    check(abs(r.node_power(5)["radio"]["states"]["tx"]["time_us"] - (pre + AIR)) < 1, "node 5 TX time")
+    oc = r.outcomes()
+    check(all(o in ("ok", "not_listening") for (s_, d_, o) in oc) and
+          sum(v for (s_, d_, o), v in oc.items() if o == "ok") == 9, f"medium {oc}")
+    check("20 sniffs requested, 20 sniff results delivered" in r.out and "radio interface:" not in r.out,
+          f"server log: {r.out[-1500:]}")
+
+
 # --- Interface rules, with raw messages ------------------------------------
 
-def raw_server(name, n, opts=()):
+def raw_server(name, n, opts=(), links=("1,2:-60",), end="0.01"):
     d = os.path.join(ARGS.logdir, name)
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
     sock = sock_path(name)
     lf = open(os.path.join(d, "server.log"), "w")
-    srv = subprocess.Popen([ARGS.bin, f"--vtime={n}", "--vtime-end=0.01", *opts, "-g", "1,2:-60", sock],
+    g = sum((["-g", x] for x in links), [])
+    srv = subprocess.Popen([ARGS.bin, f"--vtime={n}", f"--vtime-end={end}", *opts, *g, sock],
                            stdout=lf, stderr=subprocess.STDOUT)
     for _ in range(500):
         if os.path.exists(sock) or srv.poll() is not None:
@@ -492,6 +557,204 @@ def test_sniff_version():
         out = f.read()
     check("node 1: 2 sniff messages" in out and "1 frames sent," in out and
           "node 2: 1 radio reports leaving tx" in out, f"server log: {out[-1500:]}")
+
+
+class RawNode:
+    """A node driven message by message, for the interface's rules."""
+
+    def __init__(self, rc, sock, nid, version=2):
+        self.rc, self.nid = rc, nid
+        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        self.s.connect(sock)
+        self.s.settimeout(10)
+        self.s.send(rc.HELLO.pack(b"xh", nid, 3, version))
+
+    def welcome(self):
+        return self.rc.WELCOME.unpack(self.s.recv(64))
+
+    def send(self, *msgs):
+        for m in msgs:
+            self.s.send(m)
+
+    def report(self, state, chan=0, dbm=0):
+        self.s.send(self.rc.REPORT.pack(b"xr", state, dbm, 0, 0, chan))
+
+    def sniff(self, chan, us, sid, end_state, lock=True):
+        self.s.send(self.rc.SNIFF.pack(b"xn", chan, us, sid, self.rc.SNIFF_LOCK if lock else 0, end_state, 0))
+
+    def idle(self, t):
+        self.s.send(self.rc.IDLE.pack(b"xi", 0, 0, 0, t))
+
+    def wake(self):
+        """(now, [(magic, message)])"""
+        a = self.rc.ADVANCE.unpack(self.s.recv(64))
+        check(a[0] == b"xa", f"node {self.nid}: expected a wake, got {a}")
+        msgs = [self.s.recv(8192) for _ in range(a[1])]
+        return a[4], [(m[:2], m) for m in msgs]
+
+    def quit(self):
+        m = self.s.recv(64)
+        self.s.close()
+        return m[:2] == b"xq"
+
+
+def frame(rc, n, chan=0):
+    return rc.FRAME.pack(b"xx", n, chan, 0, 0, 8, 2, 2, 0, 0, 0, 50000, 0, 0.0) + b"p" * n
+
+
+def test_sniff_xn_while_receiving():
+    """§6.7: "xn" while holding a frame. Node 3 sends a 100-byte frame at 0
+    (17920 us on air); nodes 1 and 2, listening, get it at 0 and report
+    RECEIVE. Node 2 sends "xn" at once, inside the frame's preamble: the frame
+    it held is lost ("left"), and the sniff detects the same frame one dwell
+    later (320 us) and locks onto it again: its "xx" comes again with the same
+    frame ID, then its verdict. Node 1 sends "xn" (2000 us) at 5000 us, after
+    the preamble: the frame is lost ("left"), no verdict ever comes, and the
+    sniff, which cannot detect a frame past its preamble, ends at 7000 with
+    nothing detected and the frame's power as the channel's energy. Node 3
+    itself sends "xn" (5000 us) just after its frame: its own frame fills the
+    window, so its "xd" comes at 5000 with nothing detected and the server
+    leaves its radio in TX, which it leaves at the frame's end: its TX time is
+    the whole frame, with no rule broken."""
+    sys.path.insert(0, HERE)
+    import ref_client as rc
+    air = (8 + 2 + 100 + 2) * 8 * 10**6 // 50000
+    d_ = os.path.join(ARGS.logdir, "sniff_xn_rx")
+    mlog, pout = os.path.join(d_, "medium.log"), os.path.join(d_, "power.json")
+    srv, sock, log, lf = raw_server("sniff_xn_rx", 3, ["--medium-log=" + mlog, "--power=" + PROFILE,
+                                                       "--power-out=" + pout], ["3,1:-60", "3,2:-60"], "0.03")
+    n1, n2, n3 = RawNode(rc, sock, 1), RawNode(rc, sock, 2), RawNode(rc, sock, 3)
+    for n in (n1, n2):
+        n.welcome()
+        n.report(rc.LISTEN)
+        n.idle(rc.NEVER)
+    n3.welcome()
+    n3.report(rc.TX)
+    n3.send(frame(rc, 100))
+    n3.sniff(0, 5000, 30, rc.OFF)                      # during its own frame
+    n3.idle(air)
+    t, m = n1.wake()
+    check(t == 0 and [k for k, _ in m] == [b"xx"], f"node 1 at {t}: {m}")
+    n1.report(rc.RECEIVE)
+    n1.idle(5000)
+    t, m = n2.wake()
+    check(t == 0 and [k for k, _ in m] == [b"xx"], f"node 2 at {t}: {m}")
+    fid = rc.FRAME.unpack_from(m[0][1])[12]
+    n2.report(rc.RECEIVE)
+    n2.sniff(0, 2000, 20, rc.OFF)                      # holding the frame, in its preamble
+    n2.idle(rc.NEVER)
+    t, m = n2.wake()
+    d = rc.SNIFF_RESULT.unpack(m[0][1]) if m else None
+    check(t == 320 and [k for k, _ in m] == [b"xd", b"xx"] and d[1] == 1 and d[2] == rc.LOCKED and d[4] == fid and
+          rc.FRAME.unpack_from(m[1][1])[12] == fid, f"node 2 at {t}: {m}")
+    n2.idle(rc.NEVER)
+    t, m = n1.wake()
+    check(t == 5000 and not m, f"node 1 at {t}: {m}")
+    n1.sniff(0, 2000, 10, rc.OFF)                      # holding the frame, after its preamble
+    n1.idle(rc.NEVER)
+    t, m = n3.wake()
+    d = rc.SNIFF_RESULT.unpack(m[0][1]) if m else None
+    check(t == 5000 and d and d[1] == 0 and d[3] == 30 and d[7] == 5000, f"node 3 at {t}: {d}")
+    n3.idle(air)
+    t, m = n1.wake()
+    d = rc.SNIFF_RESULT.unpack(m[0][1]) if m else None
+    check(t == 7000 and len(m) == 1 and d[1] == 0 and d[3] == 10 and abs(d[8] + 60) < 0.01,
+          f"node 1 at {t}: {d}")
+    n1.idle(rc.NEVER)
+    t, m = n2.wake()
+    v = rc.VERDICT.unpack(m[0][1]) if m else None
+    check(t == air and v and v[1] == 1 and v[3] == fid, f"node 2 at {t}: {v}")
+    n2.report(rc.OFF)
+    n2.idle(rc.NEVER)
+    t, m = n3.wake()
+    check(t == air and not m, f"node 3 at {t}: {m}")
+    n3.report(rc.OFF)
+    n3.idle(rc.NEVER)
+    check(n1.quit() and n2.quit() and n3.quit(), "no end of run; node 1 got more than its sniff result")
+    srv.wait(10)
+    lf.close()
+    with open(log) as f:
+        out = f.read()
+    with open(mlog) as f:
+        med = sorted((x[1], x[2], x[4]) for x in (ln.split() for ln in f))
+    check(med == [("3", "1", "left"), ("3", "2", "left"), ("3", "2", "ok")], f"medium log {med}")
+    with open(pout) as f:
+        pw = {n["node"]: n["radio"]["states"] for n in json.load(f)["nodes"]}
+    check(pw[1]["receive"]["time_us"] == 5000 and pw[1]["listen"]["time_us"] == 2000 and
+          pw[2]["receive"]["time_us"] == air - 320 and pw[2]["listen"]["time_us"] == 320 and
+          pw[3]["tx"]["time_us"] == air and pw[3]["listen"]["time_us"] == 0, f"power {pw}")
+    check("radio interface:" not in out, f"server log: {out[-1500:]}")
+
+
+def test_sniff_report_in_window():
+    """§6.7: radio reports during a sniff window. Nodes 1, 3 and 4 sniff
+    channel 0 for 10 ms from 0 with the lock flag. At 2 ms node 1 reports OFF
+    and node 4 LISTEN on channel 1: their sniffs end with no "xd" (outcome
+    "left"); node 3 reports LISTEN on channel 0, which keeps its sniff. Node 2
+    sends a frame with a 20 ms wake-up preamble at 3 ms: node 3, listening,
+    locks onto it at its start and reports RECEIVE (a report during the
+    window that keeps the sniff); its sniff detects that frame one dwell later
+    (locked = 2) and its verdict comes at the frame's end. Nodes 1 and 4 hear
+    nothing more, and node 1's radio is charged listening for 2 ms only."""
+    sys.path.insert(0, HERE)
+    import ref_client as rc
+    d_ = os.path.join(ARGS.logdir, "sniff_report")
+    slog, mlog, pout = (os.path.join(d_, x) for x in ("sniff.log", "medium.log", "power.json"))
+    srv, sock, log, lf = raw_server("sniff_report", 4, ["--sniff-log=" + slog, "--medium-log=" + mlog,
+                                                        "--power=" + PROFILE, "--power-out=" + pout],
+                                    ["2,1:-60", "2,3:-60", "2,4:-60"], "0.05")
+    n = {i: RawNode(rc, sock, i) for i in (1, 2, 3, 4)}
+    pre, end = 20000, 3000 + 20000 + AIR
+    for i in (1, 2, 3, 4):
+        n[i].welcome()
+        if i == 2:
+            n[i].idle(3000)
+        else:
+            n[i].sniff(0, 10000, i, rc.LISTEN if i == 1 else rc.OFF)
+            n[i].idle(2000)
+    for i, (st, ch) in ((1, (rc.OFF, 0)), (3, (rc.LISTEN, 0)), (4, (rc.LISTEN, 1))):
+        t, m = n[i].wake()
+        check(t == 2000 and not m, f"node {i} at {t}: {m}")
+        n[i].report(st, ch)
+        n[i].idle(rc.NEVER)
+    t, m = n[2].wake()
+    n[2].report(rc.TX)
+    n[2].send(rc.LP_FRAME.pack(b"xl", 0, pre) + frame(rc, 16))
+    n[2].idle(end)
+    t, m = n[3].wake()
+    f = rc.FRAME.unpack_from(m[0][1]) if m else None
+    check(t == 3000 and len(m) == 1 and m[0][0] == b"xx" and f[9] == rc.FRAME_MEDIUM | rc.FRAME_LONG_PREAMBLE,
+          f"node 3 at {t}: {m}")
+    n[3].report(rc.RECEIVE)
+    n[3].idle(rc.NEVER)
+    t, m = n[3].wake()
+    d = rc.SNIFF_RESULT.unpack(m[0][1]) if m else None
+    check(t == 3320 and len(m) == 1 and d[1] == 1 and d[2] == rc.RECEIVING and d[3] == 3, f"node 3 at {t}: {d}")
+    n[3].idle(rc.NEVER)
+    t, m = n[2].wake()
+    n[2].report(rc.OFF)
+    n[2].idle(rc.NEVER)
+    t, m = n[3].wake()
+    v = rc.VERDICT.unpack(m[0][1]) if m else None
+    check(t == end and v and v[1] == 1, f"node 3 at {t}: {v}")
+    n[3].report(rc.OFF)
+    n[3].idle(rc.NEVER)
+    check(all(n[i].quit() for i in (1, 2, 3, 4)), "no end of run (or nodes 1, 4 woken)")
+    srv.wait(10)
+    lf.close()
+    with open(log) as f:
+        out = f.read()
+    with open(slog) as f:
+        sl = {int(x[1]): x[6] for x in (ln.split() for ln in f)}
+    check(sl == {1: "left", 3: "detected", 4: "left"}, f"sniff log {sl}")
+    with open(mlog) as f:
+        med = sorted((x[2], x[4]) for x in (ln.split() for ln in f))
+    check(med == [("1", "not_listening"), ("3", "ok"), ("4", "not_listening")], f"medium log {med}")
+    with open(pout) as f:
+        pw = {x["node"]: x["radio"]["states"] for x in json.load(f)["nodes"]}
+    check(pw[1]["listen"]["time_us"] == 2000 and pw[3]["receive"]["time_us"] == end - 3000 and
+          pw[3]["listen"]["time_us"] == 3000, f"power {pw}")
+    check("radio interface:" not in out, f"server log: {out[-1500:]}")
 
 
 def main():

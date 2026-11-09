@@ -1382,8 +1382,14 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
             // A sniff (§10): its receiver is on from now; checks queued
             const struct sim_sniff *req = (const struct sim_sniff *)buf;
             uint64_t check;
-            uint32_t serial = med_sniff_start(node, req, vt_now, &check);
+            uint32_t serial;
             uint16_t chan;
+
+            // A client of the radio interface that holds a frame leaves it:
+            // the sniff puts its receiver in LISTEN (RADIO_INTERFACE.md §6.7)
+            if (vt_radio_if(node))
+                med_rx_leave(node, vt_now);
+            serial = med_sniff_start(node, req, vt_now, &check);
 
             vt_sniffs_in++;
             vt_push_ev((struct vt_event){ .t = check, .node = node, .kind = VT_EV_SNIFF, .sniff = serial });
@@ -1401,6 +1407,7 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
                 return -1;
         } else if (len == sizeof(struct sim_radio_report) && !memcmp(buf, "xr", 2)) {
             const struct sim_radio_report *r = (const struct sim_radio_report *)buf;
+            int sniff_chan;
 
             if (vt_radio_if(node)) {
                 if (r->state >= SIM_RADIO_STATES) {
@@ -1412,6 +1419,15 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
                 // it sends. Applied, but warned about and counted.
                 if (vt_ri[node].state == SIM_RADIO_TX && r->state != SIM_RADIO_TX && vt_now < vt_ri[node].tx_end)
                     vt_ri_error(node, RI_ERR_TX_EARLY, "radio left tx before the end of its frame");
+                // A report that turns the receiver off, starts a TX or moves
+                // the receiver to another channel ends the sniff in progress,
+                // with no "xd" (RADIO_INTERFACE.md §6.7)
+                sniff_chan = med_central() ? med_sniff_channel(node) : -1;
+                if (sniff_chan >= 0 &&
+                    (r->state == SIM_RADIO_OFF || r->state == SIM_RADIO_IDLE ||
+                     (r->state == SIM_RADIO_TX && vt_ri[node].state != SIM_RADIO_TX) ||
+                     ((r->state == SIM_RADIO_LISTEN || r->state == SIM_RADIO_RECEIVE) && r->channel != sniff_chan)))
+                    med_sniff_cancel(node, vt_now);
                 vt_ri[node].state = r->state;
                 vt_shm_radio(node, r->state, r->channel);
             }
@@ -1553,6 +1569,9 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
             // The power at this receiver, in a copy: the frame is shared
             memcpy(out, msgs[i].frame->data, msgs[i].frame->len);
             ((struct sim_frame_hdr *)out)->rx_dbm = msgs[i].rx_dbm;
+            // A version-1 client of the radio interface knows only MEDIUM
+            if (vt_radio_if(node) && conns[slot_of_node[node]].radio_if < 2)
+                ((struct sim_frame_hdr *)out)->flags &= ~SIM_FRAME_LONG_PREAMBLE;
             delivered = hdr->frame_id;
             if (vt_send(node, out, msgs[i].frame->len))
                 ret = -1;
