@@ -495,6 +495,7 @@ static void usage(FILE *f)
             "LFN parent (role parent):\n"
             "  --tx-offset-us=<us>  --tx-lead-us=<us>  --tx-min-prep-us=<us>  --tx-ttl-intervals=<n>\n"
             "  --lto-offset-ms=<ms> --lto-interval-ms=<ms>  LTO-IE in the answer to the solicit (none)\n"
+            "  --pending-hold-us=<us>  LFN: window held after a frame with the pending bit (stack default; 0: ignored)\n"
             "Traffic:\n"
             "  --parent-tx-period-ms=<ms>    (3000)  --parent-tx-jitter-ms=<ms>  (1000)\n"
             "  --lfn-tx-period-ms=<ms>       (10000) --solicit-period-ms=<ms>    (2000)\n"
@@ -515,7 +516,7 @@ static void parse(int argc, char *argv[])
     enum {
         O_ROLE = 256, O_PEER, O_DATARATE, O_CHANNELS, O_UCDWELL, O_BCINT, O_BCDWELL, O_LISTEN, O_WINDOW, O_GUARD,
         O_CLOSERETRY, O_FIRSTSLOT, O_TXOFF, O_TXLEAD, O_TXPREP, O_TTL, O_PTX, O_PJIT, O_LTX, O_SOL, O_PAYLOAD, O_RETRIES,
-        O_LTOOFF, O_LTOIVL,
+        O_LTOOFF, O_LTOIVL, O_PHOLD,
     };
     static const struct option opts[] = {
         { "role", required_argument, 0, O_ROLE }, { "peer", required_argument, 0, O_PEER },
@@ -530,6 +531,7 @@ static void parse(int argc, char *argv[])
         { "lfn-tx-period-ms", required_argument, 0, O_LTX }, { "solicit-period-ms", required_argument, 0, O_SOL },
         { "payload", required_argument, 0, O_PAYLOAD }, { "max-frame-retries", required_argument, 0, O_RETRIES },
         { "lto-offset-ms", required_argument, 0, O_LTOOFF }, { "lto-interval-ms", required_argument, 0, O_LTOIVL },
+        { "pending-hold-us", required_argument, 0, O_PHOLD },
         { "help", no_argument, 0, 'h' },
         { 0 }
     };
@@ -581,6 +583,7 @@ static void parse(int argc, char *argv[])
             case O_RETRIES: FATAL_ON(v > 7, 1, "--max-frame-retries 0..7"); cfg.max_frame_retries = v; break;
             case O_LTOOFF: cfg.lto_offset_ms = v; break;
             case O_LTOIVL: cfg.lto_interval_ms = v; break;
+            case O_PHOLD: cfg.listen.pending_hold_us = v; break;   // 0: an LFN that ignores the pending bit
             case 'h': usage(stdout); exit(0);
             default: usage(stderr); exit(1);
         }
