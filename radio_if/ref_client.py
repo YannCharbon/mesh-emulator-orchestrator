@@ -359,7 +359,8 @@ class Mop:
     in a console or log line, the first word of the line being the virtual
     µs as in the other lines. A report at the start, then one at the first
     wake at least a period after the previous one (the reports add no wake
-    and change nothing in the run), and a last one at the end; events for
+    and change nothing in the run), and a last one at the end with the final
+    counters (same state, "the run has ended" in its detail); events for
     the start, the first frame from each peer, anomalies and the end.
 
     The report is derived from this node's own log lines: counters per event,
@@ -377,6 +378,7 @@ class Mop:
         self.peers = {}             # src -> {"ok", "lost", "rssi", "t"}
         self.next_us = None
         self.state = "starting"
+        self.ended = False
 
     def _print(self, msg):
         print(f"{self.n.r.now} {self.n.r.node_id} MOP1 " + json.dumps(msg, separators=(",", ":")), flush=True)
@@ -391,8 +393,8 @@ class Mop:
         detail = (f"sniff {a.sniff_us} us every {a.sniff_period_us // 1000} ms" if sniff and a.sniff_period_us
                   else "long-preamble sender" if sniff
                   else f"receive window {a.window_us // 1000} ms every {a.period_us // 1000} ms")
-        if self.state == "not-running":
-            detail = "end of the run"
+        if self.ended:
+            detail += "; the run has ended"
         links = []
         for src, p in sorted(self.peers.items()):
             n = p["ok"] + p["lost"]
@@ -436,7 +438,8 @@ class Mop:
             self.next_us = self.n.r.now + self.n.a.mop_period_us
 
     def final(self, why):
-        self.state = "not-running"
+        # The last report keeps the node's state, as a log read after the run shows the other nodes
+        self.ended = True
         self.event("info", "run", f"ended: {why}")
         self.report()
 
