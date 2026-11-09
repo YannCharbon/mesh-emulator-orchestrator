@@ -29,6 +29,8 @@
 >   (`docs/MEDIUM.md`).
 > - **Other stacks** (EM7): any program can be a node through the
 >   stack-neutral radio interface (`docs/RADIO_INTERFACE.md`).
+>   Developers of such a stack start with `docs/OTHER_STACKS.md`: emulator,
+>   web app and MTS bench, in order.
 > - **Scale**: runs of up to 4000 nodes; a 1000-node building for one virtual
 >   hour with a light load takes about 2 minutes of wall time (`docs/SCALE.md`).
 >
