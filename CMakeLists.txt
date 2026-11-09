@@ -17,18 +17,6 @@ check_include_file(backtrace.h BACKTRACE_FOUND)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-# Syntax "MbedTLS 2.18...<4" does not work :(
-find_package(MbedTLS REQUIRED)
-mark_as_advanced(MbedTLS_DIR)
-
-find_package(PkgConfig REQUIRED)
-# Note that old libpcap releases didn't provide pkg-config file and are not
-# detected by the line below. The user have to compile without support for
-# libpcap or manually defines the flags.
-pkg_check_modules(LIBPCAP              IMPORTED_TARGET libpcap)
-pkg_check_modules(LIBSYSTEMD           IMPORTED_TARGET libsystemd)
-pkg_check_modules(LIBNL_ROUTE REQUIRED IMPORTED_TARGET libnl-route-3.0)
-
 include(CheckSymbolExists)
 set(CMAKE_REQUIRED_LIBRARIES ${CMAKE_DL_LIBS})
 set(CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)
@@ -65,6 +53,60 @@ endif()
 set(CMAKE_BUILD_TYPE Debug)
 set(NANOSTACK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../nanostack-generic-standalone
     CACHE PATH "Path to the nanostack-generic-standalone repository")
+
+# wssimserver, the radio medium and conductor. It only borrows the logger from
+# the stack's Linux port and the simulation port's protocol headers (six
+# Apache-2.0 files of the stack checkout, compiled here, not as a library); it
+# is compiled without the port's HAVE_BACKTRACE, as it was before.
+function(wssim_add_server)
+    add_executable(wssimserver
+        ${NANOSTACK_ROOT}/port/posix/common/log.c
+        app_wssimserver/sim_medium.c
+        app_wssimserver/sim_power.c
+        app_wssimserver/wssimserver.c)
+    target_include_directories(wssimserver PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${NANOSTACK_ROOT}/include/
+        ${NANOSTACK_ROOT}/port/posix/
+        ${NANOSTACK_ROOT}/port/sim/
+    )
+    target_link_libraries(wssimserver PRIVATE m)
+    # The conductor and the medium are on the critical path of every wake
+    # (docs/SCALE.md): optimised even in this Debug build. No fast-math, so
+    # the medium's and the power ledger's floating-point results are those of
+    # -O0 (x86-64 SSE, no FMA contraction without -mfma).
+    target_compile_options(wssimserver PRIVATE -O2)
+    install(TARGETS wssimserver RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endfunction()
+
+# -DWSSIM_SERVER_ONLY=ON: configure and build wssimserver alone, for a stack
+# that is not Nanostack (docs/OTHER_STACKS.md §2): no mbedtls, libnl,
+# libsystemd or stack libraries. The stack checkout (NANOSTACK_DIR) is still
+# read for the six files above; nothing else of it is configured or built.
+# The server is the same as in the full build (same sources and flags).
+option(WSSIM_SERVER_ONLY "Build only wssimserver (no mbedtls, libnl or Nanostack libraries)" OFF)
+if(WSSIM_SERVER_ONLY)
+    if(NOT EXISTS ${NANOSTACK_DIR}/port/posix/common/log.c OR NOT EXISTS ${NANOSTACK_DIR}/port/sim/ns_port_sim.h)
+        message(FATAL_ERROR "WSSIM_SERVER_ONLY: no stack checkout in NANOSTACK_DIR (${NANOSTACK_DIR}); "
+                            "pass -DNANOSTACK_DIR=<nanostack-generic-standalone checkout>")
+    endif()
+    set(NANOSTACK_ROOT ${NANOSTACK_DIR})
+    wssim_add_server()
+    return()
+endif()
+
+# Syntax "MbedTLS 2.18...<4" does not work :(
+find_package(MbedTLS REQUIRED)
+mark_as_advanced(MbedTLS_DIR)
+
+find_package(PkgConfig REQUIRED)
+# Note that old libpcap releases didn't provide pkg-config file and are not
+# detected by the line below. The user have to compile without support for
+# libpcap or manually defines the flags.
+pkg_check_modules(LIBPCAP              IMPORTED_TARGET libpcap)
+pkg_check_modules(LIBSYSTEMD           IMPORTED_TARGET libsystemd)
+pkg_check_modules(LIBNL_ROUTE REQUIRED IMPORTED_TARGET libnl-route-3.0)
+
 # All TLS randomness comes from the port (ns_port_random_bytes(): /dev/urandom
 # on the POSIX port, the conductor's seed under virtual time). mbedTLS must be
 # built without its own platform entropy (README, "Compile mbedtls"), so the
@@ -343,26 +385,8 @@ if(COMPILE_SIMULATION_TOOLS)
     endif()
     target_link_libraries(wsbrd-inproc PRIVATE PkgConfig::LIBNL_ROUTE)
 
-    # wssimserver only borrows the logger from the stack's Linux port. It is
-    # compiled here, without the port's HAVE_BACKTRACE, as it was before.
-    add_executable(wssimserver
-        ${NANOSTACK_ROOT}/port/posix/common/log.c
-        app_wssimserver/sim_medium.c
-        app_wssimserver/sim_power.c
-        app_wssimserver/wssimserver.c)
-    target_include_directories(wssimserver PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${NANOSTACK_ROOT}/include/
-        ${NANOSTACK_ROOT}/port/posix/
-        ${NANOSTACK_ROOT}/port/sim/
-    )
-    target_link_libraries(wssimserver PRIVATE m)
-    # The conductor and the medium are on the critical path of every wake
-    # (docs/SCALE.md): optimised even in this Debug build. No fast-math, so
-    # the medium's and the power ledger's floating-point results are those of
-    # -O0 (x86-64 SSE, no FMA contraction without -mfma).
-    target_compile_options(wssimserver PRIVATE -O2)
-    install(TARGETS wssimserver RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    # The medium and conductor (wssim_add_server() above)
+    wssim_add_server()
 
 endif()
 

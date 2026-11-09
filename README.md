@@ -71,6 +71,26 @@ and then: `ninja`
 
 * FHSS mode is ON and channel hopping is working. CSMA-CA MAC mode disabled.
 
+### The server alone (stacks that are not Nanostack)
+
+`-DWSSIM_SERVER_ONLY=ON` configures and builds `wssimserver` only: no mbedtls,
+libnl, libsystemd or stack libraries. It still reads six Apache-2.0 files of
+the `nanostack-generic-standalone` checkout (the logger and the simulation
+port's protocol headers, shared with the nodes, so they are not copied here);
+nothing else of the stack is configured or built. The server is the same as in
+the full build. The radio-interface tests need only this server (and `cc` and
+Python 3):
+
+```bash
+cmake -S . -B build-srv -G Ninja -DWSSIM_SERVER_ONLY=ON -DNANOSTACK_DIR=<nanostack-generic-standalone checkout> \
+    -DCMAKE_C_FLAGS="-std=gnu17 -fpermissive"
+ninja -C build-srv
+python3 radio_if/test_ref_client.py build-srv/wssimserver
+```
+
+`sim_utils/vtime/run.sh` takes this directory as `<bindir>` for runs whose nodes
+are all clients of the radio interface (node 0 in `IF_NODES`).
+
 ## Run
 
 ### Script for running the simulations
