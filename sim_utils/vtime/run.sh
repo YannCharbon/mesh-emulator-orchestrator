@@ -89,6 +89,9 @@
 #                      if<i>.log. Their IDs may appear in TOPO but not among
 #                      the routers (they do not count in the router range
 #                      1..highest ID). E.g. IF_CMD="python3 radio_if/ref_client.py"
+#                      With node 0 in IF_NODES, the run has no Nanostack
+#                      program at all (no border router, no routers): every
+#                      node of TOPO must then be in IF_NODES
 #
 # Output in <outdir>: simserver.log, br.log, node<i>.log (each line starts with
 # NSIM_EPOCH_S + virtual time, written by the simulation port), t0
@@ -135,10 +138,22 @@ while read -r e; do
 	done
 done < "$OUT/topology.txt"
 NODES=$MAXID                    # routers 1..NODES; node 0 is the border router
+NSBR=1                          # 1: node 0 is the border router (wsbrd-inproc)
+if [ -n "${IFN[0]:-}" ]; then   # node 0 is a client: no Nanostack program in the run
+	NSBR=0
+	while read -r e; do
+		for id in $(cut -d: -f1 <<< "$e" | tr ',' ' '); do
+			for j in $(seq ${id%-*} ${id#*-}); do
+				[ -n "${IFN[$j]:-}" ] || { echo "run.sh: node 0 is in IF_NODES, so node $j of TOPO must be too" >&2; exit 1; }
+			done
+		done
+	done < "$OUT/topology.txt"
+	NODES=0
+fi
 NIF=0
 for i in ${IF_NODES:-}; do
 	NIF=$((NIF + 1))
-	(( i > NODES && i < 4096 )) || { echo "run.sh: IF_NODES: $i is the border router or a router (0..$NODES)" >&2; exit 1; }
+	(( (i > NODES || (i == 0 && NSBR == 0)) && i < 4096 )) || { echo "run.sh: IF_NODES: $i is the border router or a router (0..$NODES)" >&2; exit 1; }
 	c="IF_CMD_$i"
 	[ -n "${!c:-${IF_CMD:-}}" ] || { echo "run.sh: IF_NODES: no IF_CMD or IF_CMD_$i" >&2; exit 1; }
 done
@@ -163,7 +178,7 @@ export WSBRD_LOG_FILE=$OUT/log_wsbr
 mkdir -p "$OUT/storage"
 echo $NSIM_EPOCH_S > "$OUT/t0"
 cat > "$OUT/run_info.txt" <<EOF
-seed=$SEED nodes=$((NODES + 1 + NIF)) if_nodes=${IF_NODES:-} vtime_end=$DUR sock=$SOCK tun=$TUN setarch=${SETARCH:-0} conf=${CONF:-default}
+seed=$SEED nodes=$((NODES + NSBR + NIF)) if_nodes=${IF_NODES:-} vtime_end=$DUR sock=$SOCK tun=$TUN setarch=${SETARCH:-0} conf=${CONF:-default}
 phy_env=$(env | grep '^WSSIM_PHY_' | sort | tr '\n' ' ')
 bin=$BIN work=$WORK
 start_wall=$(date +%s.%N)
@@ -240,7 +255,7 @@ for k in ${LINK:-}; do CTL+=(--vtime-link="$k"); done
 for k in ${DROP:-}; do CTL+=(--vtime-drop="$k"); done
 [ "${FRAMES:-0}" = 1 ] && CTL+=(--vtime-frames="$OUT/frames.txt")
 [ ${#CTL[@]} -gt 0 ] && echo "events=${CTL[*]}" >> "$OUT/run_info.txt"
-start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1 + NIF)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" --dump "$SOCK"
+start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + NSBR + NIF)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" --dump "$SOCK"
 SIM_PID=$!
 for (( i = 0; i < 200; i++ )); do
 	[ -S "$SOCK" ] && break
@@ -249,7 +264,7 @@ for (( i = 0; i < 200; i++ )); do
 done
 [ -S "$SOCK" ] || abort "no socket $SOCK after 10 s"
 
-start br env ${BR_ENV:-} "$BIN/wsbrd-inproc" --eui64="$(mac 0)" -F "$BR_CONF" -u "$SOCK" -t "$TUN" \
+[ $NSBR = 1 ] && start br env ${BR_ENV:-} "$BIN/wsbrd-inproc" --eui64="$(mac 0)" -F "$BR_CONF" -u "$SOCK" -t "$TUN" \
 	-o storage_prefix=storage/br_ ${BR_OPTS:-}
 start_node() {   # start_node <i> <log name>
 	start "$2" env $(v="NODE_ENV_$1"; echo "${!v:-}") "$BIN/wsnode-inproc" --eui64="$(mac $1)" -F "$NODE_CONF" -u "$SOCK" \

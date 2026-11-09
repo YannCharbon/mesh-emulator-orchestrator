@@ -26,11 +26,15 @@ Three layers:
   neighbour samples the preamble at least once. No CCA before them.
 
 Output: one line per event on stdout, "<virtual µs> <node> <event> k=v ...",
-read by test_ref_client.py.
+read by test_ref_client.py. With --mop-period-ms, also "<virtual µs> <node>
+MOP1 {json}" lines: the node's state, links, counters and events in the Mesh
+Observation Protocol (MOP v1) of the mesh testbed controller, which then
+shows the node with its relations and events (class Mop).
 
     ref_client.py --sock /tmp/sock --id 2 --tx 10 --window-ms 30
 """
 import argparse
+import json
 import socket
 import struct
 import sys
@@ -219,9 +223,12 @@ class WindowNode:
         self.close_pending = False
         self.period = 0
         self.seq = 0
+        self.mop = Mop(self) if args.mop_period_us else None
 
     def log(self, event, **kv):
         print(f"{self.r.now} {self.r.node_id} {event}" + "".join(f" {k}={v}" for k, v in kv.items()), flush=True)
+        if self.mop is not None:
+            self.mop.on_log(event, kv)
 
     def set_state(self, state, cca=False):
         if state != self.state or cca:
@@ -324,6 +331,8 @@ class WindowNode:
         self.start()
         try:
             while True:
+                if self.mop is not None:
+                    self.mop.tick()
                 self.r.idle(min(self.timers.values()) if self.timers else NEVER)
                 msgs = self.r.wait()
                 # messages first, then the timers due now, by deadline then name
@@ -340,6 +349,99 @@ class WindowNode:
                     self.fire(name)
         except Closed as e:
             self.log("end", why=str(e).replace(" ", "_"))
+            if self.mop is not None:
+                self.mop.final(str(e))
+
+
+class Mop:
+    """The node's observation in MOP v1 text lines (--mop-period-ms): the
+    Mesh Observation Protocol of the mesh testbed controller, "MOP1 {json}"
+    in a console or log line, the first word of the line being the virtual
+    µs as in the other lines. A report at the start, then one at the first
+    wake at least a period after the previous one (the reports add no wake
+    and change nothing in the run), and a last one at the end with the final
+    counters (same state, "the run has ended" in its detail); events for
+    the start, the first frame from each peer, anomalies and the end.
+
+    The report is derived from this node's own log lines: counters per event,
+    and per peer the frames received and lost with the last RSSI (links). A
+    parent given with --mop-parent is reported as a configured relation, and
+    --mop-root marks the node as the network's root: the demonstration
+    protocol has no routing of its own."""
+
+    COUNTED = ("tx", "lp_tx", "rx_ok", "rx_lost", "rx_aborted", "cca_busy", "tx_skipped", "window_open", "sniff",
+               "sniff_detect", "sniff_none", "anomaly")
+
+    def __init__(self, node):
+        self.n = node
+        self.counters = {}
+        self.peers = {}             # src -> {"ok", "lost", "rssi", "t"}
+        self.next_us = None
+        self.state = "starting"
+        self.ended = False
+
+    def _print(self, msg):
+        print(f"{self.n.r.now} {self.n.r.node_id} MOP1 " + json.dumps(msg, separators=(",", ":")), flush=True)
+
+    def event(self, level, cat, text):
+        self._print({"mop": 1, "type": "event", "seq": 0, "t_ms": self.n.r.local_us() // 1000,
+                     "node": {"id": self.n.r.node_id}, "level": level, "cat": cat, "text": text})
+
+    def report(self):
+        r, a = self.n.r, self.n.a
+        sniff = isinstance(self.n, SniffNode)
+        detail = (f"sniff {a.sniff_us} us every {a.sniff_period_us // 1000} ms" if sniff and a.sniff_period_us
+                  else "long-preamble sender" if sniff
+                  else f"receive window {a.window_us // 1000} ms every {a.period_us // 1000} ms")
+        if self.ended:
+            detail += "; the run has ended"
+        links = []
+        for src, p in sorted(self.peers.items()):
+            n = p["ok"] + p["lost"]
+            links.append({"peer_id": src, "rssi_in": round(p["rssi"], 1), "quality": round(p["ok"] / n, 3) if n else 0,
+                          "age_s": round((r.now - p["t"]) / 1e6, 1), "attrs": {"rx_ok": str(p["ok"]), "rx_lost": str(p["lost"])}})
+        rel = []
+        if a.mop_parent is not None:
+            rel.append({"kind": "parent", "peer_id": a.mop_parent, "preferred": True, "attrs": {"source": "configured (--mop-parent)"}})
+        self._print({"mop": 1, "type": "report", "seq": 0, "t_ms": r.local_us() // 1000,
+                     "node": {"id": r.node_id, "name": f"ref-client {r.node_id}", "stack": "em7-ref-client",
+                              "version": f"interface v{r.version}", "role": "sniff" if sniff else "window", "root": a.mop_root,
+                              "state": self.state, "detail": detail, "uptime_s": (r.now - r.start_us) // 10**6},
+                     "links": links, "relations": rel, "counters": dict(sorted(self.counters.items())),
+                     "values": {"channel": a.chan, "tx_dbm": a.tx_dbm, "rate_bps": a.rate, "drift_ppb": r.drift_ppb}})
+
+    def on_log(self, event, kv):
+        if event in self.COUNTED:
+            self.counters[event] = self.counters.get(event, 0) + 1
+        if event == "start":
+            self.state = "operational"
+            self.event("info", "radio", f"started: interface version {self.n.r.version}, clock drift {self.n.r.drift_ppb} ppb")
+            self.report()
+            self.next_us = self.n.r.now + self.n.a.mop_period_us
+        elif event in ("rx_start", "rx_ok", "rx_lost"):
+            src = kv["src"]
+            p = self.peers.get(src)
+            if p is None:
+                p = self.peers[src] = {"ok": 0, "lost": 0, "rssi": 0.0, "t": self.n.r.now}
+                if event == "rx_start":
+                    self.event("info", "link", f"first frame from node {src} ({kv['rx_dbm']} dBm)")
+            if event == "rx_start":
+                p["rssi"], p["t"] = float(kv["rx_dbm"]), self.n.r.now
+            else:
+                p["ok" if event == "rx_ok" else "lost"] += 1
+        elif event == "anomaly":
+            self.event("warn", "anomaly", " ".join(f"{k}={v}" for k, v in kv.items()))
+
+    def tick(self):
+        if self.next_us is not None and self.n.r.now >= self.next_us:
+            self.report()
+            self.next_us = self.n.r.now + self.n.a.mop_period_us
+
+    def final(self, why):
+        # The last report keeps the node's state, as a log read after the run shows the other nodes
+        self.ended = True
+        self.event("info", "run", f"ended: {why}")
+        self.report()
 
 
 class SniffNode(WindowNode):
@@ -463,6 +565,10 @@ def main():
     ap.add_argument("--cca-dbm", type=float, default=-85, help="busy at or above this energy")
     ap.add_argument("--no-cca", dest="cca", action="store_false")
     ap.add_argument("--if-version", type=int, default=IF_VERSION, help="interface version to ask for")
+    m = ap.add_argument_group("observation (MOP v1 lines for the mesh testbed controller)")
+    m.add_argument("--mop-period-ms", type=float, default=0, help="print MOP1 report lines this often (0: none)")
+    m.add_argument("--mop-parent", type=int, default=None, help="report this node as a configured parent")
+    m.add_argument("--mop-root", action="store_true", help="report this node as the root of the network")
     g = ap.add_argument_group("preamble sampling (SniffNode, interface version 2)")
     g.add_argument("--sniff-period-ms", type=float, default=0, help="sniff every period (0: no sniffing)")
     g.add_argument("--sniff-us", type=int, default=1000, help="length of each sniff")
@@ -477,6 +583,7 @@ def main():
     a.sniff_period_us, a.sniff_phase_us = int(a.sniff_period_ms * 1000), int(a.sniff_phase_ms * 1000)
     a.lp_tx = [int(x * 1000) for x in a.lp_tx]
     a.lp_preamble_us = int(a.lp_preamble_ms * 1000)
+    a.mop_period_us = int(a.mop_period_ms * 1000)
     radio = RadioIf(a.sock, a.id, a.if_version)
     node = SniffNode(radio, a) if (a.sniff_period_us or a.lp_tx) else WindowNode(radio, a)
     node.run()
