@@ -22,10 +22,12 @@
 #   - CCA: the radios' queries add up to the server's; every busy answer
 #     ("CCA: CANNEL BUSY (E dBm, threshold T dBm)") has E >= T, and E is the
 #     sum of the noise and of the powers of a non-empty set of the radio's
-#     neighbours (a frame was on air); the MAC set the threshold (the
-#     automatic threshold, at most -60 dBm), and since every link is at -60
-#     dBm or stronger, the busy answers equal the server's queries that
-#     found a frame on air;
+#     neighbours (a frame was on air; one on the next channel counts 10 dB
+#     weaker, docs/MEDIUM.md §2.1); the MAC set the threshold (the
+#     automatic threshold, at most -60 dBm), and the busy answers are at most
+#     the server's queries that found a frame on air (before EM5 they were
+#     equal, every link being at -60 dBm or stronger; a frame on the next
+#     channel now adds 10 dB less, which can stay under the threshold);
 #   - collisions: interference outcomes at the border router before 400 s,
 #     captures only after 400 s, all of router 1's frames.
 #
@@ -126,18 +128,21 @@ for node, name in logs.items():
           '(received, noise, interference, captured, without verdict, refused, ignored)')
     # CCA: every busy answer is a frame on air, at or above the threshold
     powers = lambda t: [(-50 if t >= LINK_AT and {node, nb} == {0, 2} else -60) for nb in neighbours[node]]
+    # A neighbour's frame on the CCA's channel, or on the next channel 10 dB
+    # weaker (docs/MEDIUM.md §2.1, adjacent channel since EM5)
     def on_air(t, e):
         p = powers(t)
-        return any(abs(10 * math.log10(10 ** (NOISE / 10) + sum(10 ** (x / 10) for x in s)) - e) < 0.06
-                   for k in range(1, len(p) + 1) for s in itertools.combinations(p, k))
+        return any(abs(10 * math.log10(10 ** (NOISE / 10) + sum(10 ** ((x - a) / 10) for x, a in zip(s, adj))) - e) < 0.06
+                   for k in range(1, len(p) + 1) for s in itertools.combinations(p, k)
+                   for adj in itertools.product((0, 10), repeat=k))
     badb = [b for b in busy if b[1] < b[2] or not on_air(*b[:2])]
     check(len(busy) == cca[1] and not badb, f'{name}: {cca[1]} CCA busy, each a frame on air at or above the '
           f'threshold {badb[:3]}')
     check(cca[3] > 0 and -100 <= cca[2] <= -60, f'{name}: CCA threshold {cca[2]} dBm, set {cca[3]} times by the MAC')
     total_cca += cca[0]; total_busy += cca[1]
 check(total_cca == srv.get('cca'), f'CCA queries: radios {total_cca}, server {srv.get("cca")}')
-check(total_busy == srv.get('cca_energy') and total_busy > 0,
-      f'CCA busy: radios {total_busy}, server queries with a frame on air {srv.get("cca_energy")}')
+check(0 < total_busy <= srv.get('cca_energy', 0),
+      f'CCA busy: radios {total_busy}, at most the server queries with a frame on air {srv.get("cca_energy")}')
 # Collisions and captures at the border router
 br = [r for (fid, dst), r in rows.items() if dst == 0]
 intf = sum(1 for r in br if r[2] == 'interference' and r[0] < LINK_AT * 1e6)

@@ -26,7 +26,13 @@ struct med_lock;
 void med_set_mode(const char *arg);             // --medium=legacy|central
 void med_set_tx_ref(const char *arg);           // --medium-tx-ref=DBM
 void med_set_lock_snr(const char *arg);         // --medium-lock-snr=DB
-void med_set_capture_db(const char *arg);       // --medium-capture-db=DB
+void med_set_model(const char *arg);            // --medium-model=fg25|em4
+void med_set_capture_db(const char *arg);       // --medium-capture-db=[MODE:]DB
+void med_set_int_curve(const char *arg);        // --medium-int-curve=[MODE:]X0,B|noise
+void med_set_capture_early(const char *arg);    // --medium-capture-early-bits=[MODE:]N|shr
+void med_set_capture_sfd(const char *arg);      // --medium-capture-sfd=[MODE:]on|off
+void med_set_break_db(const char *arg);         // --medium-break-db=[MODE:]DB|off
+void med_set_adjacent_db(const char *arg);      // --medium-adjacent-db=[MODE:]DB|off
 void med_set_log(const char *path);             // --medium-log=FILE
 bool med_options_given(void);                   // any of the above
 bool med_tuning_given(void);                    // any of them but --medium
@@ -58,6 +64,11 @@ void med_tx_start(int node, uint64_t now);
 void med_delivered(int node, uint32_t frame_id);
 // The node was stopped (--vtime-kill): its lock ends ("left")
 void med_node_stopped(int node, uint64_t now);
+
+// After med_decide(): the lock whose sync search the frame just broke (§3),
+// or NULL. Its receiver must get its failed verdict now: queue a verdict
+// event at now for it (a second event; the one at its frame's end frees it).
+struct med_lock *med_take_broken(void);
 
 // A verdict event was popped at now: true if *v must be sent to the node.
 // The lock is freed either way.

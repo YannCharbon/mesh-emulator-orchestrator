@@ -352,8 +352,21 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --medium-tx-ref=DBM       central: link values are the received power when the sender\n");
     fprintf(stream, "                            transmits at DBM (default: whatever its TX power)\n");
     fprintf(stream, "  --medium-lock-snr=DB      central: lowest SINR at which a receiver locks onto a frame (0)\n");
-    fprintf(stream, "  --medium-capture-db=DB    central: a frame this much stronger, during the SHR of the frame\n");
-    fprintf(stream, "                            being received, captures the receiver (6)\n");
+    fprintf(stream, "  --medium-model=fg25|em4   central: reception model: the FG25 kit measurements (fg25, the\n");
+    fprintf(stream, "                            default) or the MVP's (em4: interference as noise, capture by\n");
+    fprintf(stream, "                            6 dB over the SHR, no adjacent channel); docs/MEDIUM.md §2.1\n");
+    fprintf(stream, "  Per PHY (MODE: 1a, 1b, 3 or other; without it, every PHY), over the model's values:\n");
+    fprintf(stream, "  --medium-int-curve=[MODE:]X0,B|noise  interference bit error rate 0.5 exp(-(SIR-X0)/B),\n");
+    fprintf(stream, "                            or noise: the noise curve of the SINR (fg25 3: -2.85,0.9)\n");
+    fprintf(stream, "  --medium-capture-db=[MODE:]DB  a frame this much stronger captures the receiver in the\n");
+    fprintf(stream, "                            capture windows (fg25: 3; em4: 6)\n");
+    fprintf(stream, "  --medium-capture-early-bits=[MODE:]N|shr  early capture window, bits from the SHR's\n");
+    fprintf(stream, "                            start, or the whole SHR (fg25: 1a 20, 3 37; em4: shr)\n");
+    fprintf(stream, "  --medium-capture-sfd=[MODE:]on|off  capture also during the SFD (fg25: 3 on, 1a off)\n");
+    fprintf(stream, "  --medium-break-db=[MODE:]DB|off  between the windows, a frame this much stronger\n");
+    fprintf(stream, "                            makes both lost (fg25: 2.5; em4: off)\n");
+    fprintf(stream, "  --medium-adjacent-db=[MODE:]DB|off  a frame on the next channel interferes this much\n");
+    fprintf(stream, "                            weaker (fg25: 10; em4: off)\n");
     fprintf(stream, "  --medium-log=FILE         central: one line per frame and receiver (t_end_us src dst\n");
     fprintf(stream, "                            frame_id outcome rx_dbm sinr_min_db)\n");
     fprintf(stream, "  Preamble sniffing (central medium, docs/MEDIUM.md §10):\n");
@@ -392,6 +405,12 @@ enum {
     OPT_MEDIUM_TX_REF,
     OPT_MEDIUM_LOCK_SNR,
     OPT_MEDIUM_CAPTURE_DB,
+    OPT_MEDIUM_MODEL,
+    OPT_MEDIUM_INT_CURVE,
+    OPT_MEDIUM_CAPTURE_EARLY,
+    OPT_MEDIUM_CAPTURE_SFD,
+    OPT_MEDIUM_BREAK_DB,
+    OPT_MEDIUM_ADJACENT_DB,
     OPT_MEDIUM_LOG,
     OPT_GROUP_FILE,
     OPT_SNIFF_DETECT,
@@ -571,6 +590,12 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "medium-tx-ref", required_argument, 0, OPT_MEDIUM_TX_REF },
         { "medium-lock-snr", required_argument, 0, OPT_MEDIUM_LOCK_SNR },
         { "medium-capture-db", required_argument, 0, OPT_MEDIUM_CAPTURE_DB },
+        { "medium-model", required_argument, 0, OPT_MEDIUM_MODEL },
+        { "medium-int-curve", required_argument, 0, OPT_MEDIUM_INT_CURVE },
+        { "medium-capture-early-bits", required_argument, 0, OPT_MEDIUM_CAPTURE_EARLY },
+        { "medium-capture-sfd", required_argument, 0, OPT_MEDIUM_CAPTURE_SFD },
+        { "medium-break-db", required_argument, 0, OPT_MEDIUM_BREAK_DB },
+        { "medium-adjacent-db", required_argument, 0, OPT_MEDIUM_ADJACENT_DB },
         { "medium-log", required_argument, 0, OPT_MEDIUM_LOG },
         { "group-file", required_argument, 0, OPT_GROUP_FILE },
         { "sniff-detect", required_argument, 0, OPT_SNIFF_DETECT },
@@ -742,6 +767,24 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             case OPT_MEDIUM_CAPTURE_DB:
                 med_set_capture_db(optarg);
                 break;
+            case OPT_MEDIUM_MODEL:
+                med_set_model(optarg);
+                break;
+            case OPT_MEDIUM_INT_CURVE:
+                med_set_int_curve(optarg);
+                break;
+            case OPT_MEDIUM_CAPTURE_EARLY:
+                med_set_capture_early(optarg);
+                break;
+            case OPT_MEDIUM_CAPTURE_SFD:
+                med_set_capture_sfd(optarg);
+                break;
+            case OPT_MEDIUM_BREAK_DB:
+                med_set_break_db(optarg);
+                break;
+            case OPT_MEDIUM_ADJACENT_DB:
+                med_set_adjacent_db(optarg);
+                break;
             case OPT_MEDIUM_LOG:
                 med_set_log(optarg);
                 break;
@@ -788,8 +831,9 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     if (ctxt->vtime_nodes)
         med_default_central();
     FATAL_ON(med_tuning_given() && !med_central(), 1,
-             "--medium-tx-ref, --medium-lock-snr, --medium-capture-db, --medium-log and --sniff-* need the "
-             "central medium (not --medium=legacy)");
+             "--medium-tx-ref, --medium-lock-snr, --medium-model, --medium-int-curve, --medium-capture-*, "
+             "--medium-break-db, --medium-adjacent-db, --medium-log and --sniff-* need the central medium "
+             "(not --medium=legacy)");
     // The ledger follows each node's radio and MCU without gaps (a node
     // powered up late: its ledger starts at its first wake)
     for (int i = 0; i < vt_ctls_n; i++)
@@ -1349,7 +1393,7 @@ static void vt_queue_frame_medium(struct ctxt *ctxt, int src, void *msg, int len
     struct sim_frame_hdr *hdr = msg;
     struct vt_frame *frame = NULL;
     struct med_frame *f;
-    struct med_lock *lock;
+    struct med_lock *lock, *broken;
     float rx_dbm;
     int i;
 
@@ -1367,6 +1411,10 @@ static void vt_queue_frame_medium(struct ctxt *ctxt, int src, void *msg, int len
     hdr->frame_id = med_frame_id(f);
     for (i = 0; i < med_num_rx(f); i++) {
         lock = med_decide(f, i, vt_now, &rx_dbm);
+        broken = med_take_broken();
+        if (broken)             // its receiver gets the failed verdict now (§3)
+            vt_push_ev((struct vt_event){ .t = vt_now, .node = med_rx_node(f, i), .kind = VT_EV_VERDICT,
+                                          .lock = broken });
         // A receiver that sniffs on this channel: a dwell to check (§10)
         check = med_sniff_frame(f, i, &serial);
         if (check != MED_SNIFF_NONE)

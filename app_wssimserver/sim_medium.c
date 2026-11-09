@@ -55,6 +55,9 @@ struct med_frame {
     uint32_t id;
     int src;
     uint16_t chan;
+    uint8_t phy;                // MED_PHY_*: the reception profile of its data rate (§2.1)
+    uint64_t own_shr_us;        // airtime of its own SHR, without an "xl" preamble: [t_bits, t_bits + own_shr_us)
+    uint64_t own_pre_us;        // the preamble part of it (the SFD follows)
     uint64_t t_start, t_end;
     uint64_t shr_us;            // airtime of the SHR (and of an "xl" preamble): the capture window
     uint64_t t_bits;            // where the counted bits start: t_start, or the end of an "xl" preamble
@@ -79,7 +82,13 @@ struct med_lock {
     int node, src;
     uint32_t frame_id;
     uint16_t chan;
+    uint8_t phy;
     uint64_t t_start, t_end, shr_us;
+    uint64_t t_shr;             // start of the frame's own SHR (after an "xl" preamble)
+    uint64_t own_shr_us, own_pre_us;
+    uint32_t rate_bps;
+    bool broken;                // a stronger frame broke the sync search: lost, verdict sent at once (§3)
+    int refs;                   // verdict events that hold it (2 once broken)
     uint64_t t_bits;            // the counted bits are spread over [t_bits, t_end)
     unsigned int bits;
     float dbm;
@@ -90,10 +99,66 @@ struct med_lock {
     struct med_intf *intf;
 };
 
+/* Reception profiles per PHY (§2.1): interference error rate, capture,
+ * adjacent channel. A frame takes the profile of its data rate: 50 kbit/s
+ * the mode-1a values, 150 kbit/s the mode-3 values, any other rate "other".
+ * Defaults (--medium-model=fg25): the FG25 kit measurements of 2026-11-09,
+ * firmware repo docs/COCHANNEL_RESULTS.md (section in each comment). */
+enum { MED_PHY_1A, MED_PHY_3, MED_PHY_OTHER, MED_PHYS };
+static const char *const phy_names[MED_PHYS] = { "1a", "3", "other" };
+#define MED_EARLY_SHR (-1)      // early capture window: the whole SHR (EM4)
+
+struct med_phy {
+    bool int_noise;             // interference as noise in the noise curve (EM4)
+    float int_x0, int_b;        // BER_int = min(0.5, 0.5 exp(-(SIR - x0) / b))
+    float capture_db;           // a frame this much stronger captures, inside the windows
+    int early_bits;             // early window, bits from the SHR's start (MED_EARLY_SHR: whole SHR)
+    bool sfd_capture;           // capture also while the received frame's SFD is on air
+    bool has_break;             // a stronger frame between the windows breaks the sync search
+    float break_db;
+    bool has_adj;               // the next channel interferes, adj_db weaker
+    float adj_db;
+};
+
+static const struct med_phy med_phy_fg25[MED_PHYS] = {
+    // EU mode 1a: §5 (x0 -2.40 dB, b 0.90 dB; early window about 400 µs,
+    // no capture around the SFD); capture margin, break margin, adjacent
+    // channel: the mode-3 values (§6; not measured in mode 1a)
+    [MED_PHY_1A] = { false, -2.40, 0.90, 3, 20, false, true, 2.5, true, 10 },
+    // EU mode 3: §4.1 (x0 -2.85 dB, b 0.90 dB), §4.2 (capture margin about
+    // 3 dB; early window to the 50 % transition at 250 µs = 37 bits;
+    // capture during the SFD, 650-700 µs; both lost in between from about
+    // 2.5 dB, §6 item 3), §4.4 (adjacent channel 10 dB weaker)
+    [MED_PHY_3]  = { false, -2.85, 0.90, 3, 37, true, true, 2.5, true, 10 },
+    // Other rates: not measured; the mode-3 values (§6 item 1: one curve for
+    // every FSK mode)
+    [MED_PHY_OTHER] = { false, -2.85, 0.90, 3, 37, true, true, 2.5, true, 10 },
+};
+
+// --medium-model=em4: the MVP before the calibration (interference in the
+// noise curve, capture by 6 dB over the whole SHR, no adjacent channel)
+static const struct med_phy med_phy_em4 = { true, 0, 2, 6, MED_EARLY_SHR, false, false, 0, false, 0 };
+
+// A per-PHY option, applied over the model's values at med_start()
+enum { PO_INT, PO_CAPTURE, PO_EARLY, PO_SFD, PO_BREAK, PO_ADJ };
+struct med_phy_opt {
+    unsigned int mask;          // the profiles it sets
+    int field;
+    bool on;
+    float a, b;
+};
+#define MED_PHY_OPTS_MAX 64
+
 static struct {
     bool given, tuning, central, mode_given;
     bool has_tx_ref;
-    float tx_ref, lock_snr, capture_db;
+    bool em4;                   // --medium-model=em4
+    float tx_ref, lock_snr;
+    struct med_phy phy[MED_PHYS];
+    struct med_phy_opt opts[MED_PHY_OPTS_MAX];
+    int n_opts;
+    uint64_t broken;            // sync searches broken (§3)
+    struct med_lock *last_broken; // broken by the last med_decide()
     const char *log_path;
     FILE *log;
     uint64_t seed;
@@ -109,7 +174,6 @@ static struct {
     uint64_t frames, cca_queries, cca_energy;
 } med = {
     .lock_snr = 0,
-    .capture_db = 6,
 };
 
 /* ---- Preamble sniffing: settings and state (§10) */
@@ -181,7 +245,7 @@ static float med_number(const char *opt, const char *arg, float min, float max)
     char *end;
     float v = strtof(arg, &end);
 
-    FATAL_ON(*end || !(v >= min && v <= max), 1, "%s: expected a number from %g to %g: %s", opt, min, max, arg);
+    FATAL_ON(end == arg || *end || !(v >= min && v <= max), 1, "%s: expected a number from %g to %g: %s", opt, min, max, arg);
     med.given = med.tuning = true;
     return v;
 }
@@ -208,9 +272,166 @@ void med_set_lock_snr(const char *arg)
     med.lock_snr = med_number("--medium-lock-snr", arg, -100, 100);
 }
 
+void med_set_model(const char *arg)
+{
+    if (!strcmp(arg, "fg25"))
+        med.em4 = false;
+    else if (!strcmp(arg, "em4"))
+        med.em4 = true;
+    else
+        FATAL(1, "--medium-model: expected fg25 or em4: %s", arg);
+    med.given = med.tuning = true;
+}
+
+// [MODE:]VALUE: the profiles MODE names (1a, 1b = 1a, 3, other), all without
+// MODE. Returns VALUE.
+static const char *med_phy_prefix(const char *opt, const char *arg, unsigned int *mask)
+{
+    static const struct { const char *name; int phy; } names[] = {
+        { "1a", MED_PHY_1A }, { "1b", MED_PHY_1A }, { "3", MED_PHY_3 }, { "other", MED_PHY_OTHER },
+    };
+    const char *colon = strchr(arg, ':');
+    size_t i;
+
+    *mask = (1u << MED_PHYS) - 1;
+    if (!colon)
+        return arg;
+    for (i = 0; i < sizeof(names) / sizeof(*names); i++)
+        if (strlen(names[i].name) == (size_t)(colon - arg) && !strncasecmp(arg, names[i].name, colon - arg)) {
+            *mask = 1u << names[i].phy;
+            return colon + 1;
+        }
+    FATAL(1, "%s: expected [1a|1b|3|other:]VALUE: %s", opt, arg);
+}
+
+static struct med_phy_opt *med_phy_opt(const char *opt, const char *arg, int field, const char **val)
+{
+    struct med_phy_opt *o;
+
+    FATAL_ON(med.n_opts >= MED_PHY_OPTS_MAX, 1, "%s: at most %d per-PHY medium options", opt, MED_PHY_OPTS_MAX);
+    o = &med.opts[med.n_opts++];
+    *val = med_phy_prefix(opt, arg, &o->mask);
+    o->field = field;
+    o->on = true;
+    med.given = med.tuning = true;
+    return o;
+}
+
 void med_set_capture_db(const char *arg)
 {
-    med.capture_db = med_number("--medium-capture-db", arg, -100, 100);
+    const char *v;
+    struct med_phy_opt *o = med_phy_opt("--medium-capture-db", arg, PO_CAPTURE, &v);
+
+    o->a = med_number("--medium-capture-db", v, -100, 100);
+}
+
+// --medium-int-curve=[MODE:]X0,B|noise
+void med_set_int_curve(const char *arg)
+{
+    const char *v;
+    struct med_phy_opt *o = med_phy_opt("--medium-int-curve", arg, PO_INT, &v);
+    char *end;
+
+    if (!strcmp(v, "noise")) {
+        o->on = false;
+        return;
+    }
+    o->a = strtof(v, &end);
+    FATAL_ON(end == v || *end != ',' || !isfinite(o->a) || o->a < -50 || o->a > 50, 1,
+             "--medium-int-curve: expected [MODE:]X0,B (dB) or [MODE:]noise: %s", arg);
+    v = end + 1;
+    o->b = strtof(v, &end);
+    FATAL_ON(end == v || *end || !(o->b > 0 && o->b <= 50), 1,
+             "--medium-int-curve: expected [MODE:]X0,B with B above 0 dB: %s", arg);
+}
+
+// --medium-capture-early-bits=[MODE:]N|shr
+void med_set_capture_early(const char *arg)
+{
+    const char *v;
+    struct med_phy_opt *o = med_phy_opt("--medium-capture-early-bits", arg, PO_EARLY, &v);
+
+    if (!strcmp(v, "shr")) {
+        o->on = false;
+        return;
+    }
+    o->a = med_number("--medium-capture-early-bits", v, 0, 100000);
+    FATAL_ON(o->a != (int)o->a, 1, "--medium-capture-early-bits: expected a whole number or shr: %s", arg);
+}
+
+// --medium-capture-sfd=[MODE:]on|off
+void med_set_capture_sfd(const char *arg)
+{
+    const char *v;
+    struct med_phy_opt *o = med_phy_opt("--medium-capture-sfd", arg, PO_SFD, &v);
+
+    if (!strcmp(v, "on"))
+        o->on = true;
+    else if (!strcmp(v, "off"))
+        o->on = false;
+    else
+        FATAL(1, "--medium-capture-sfd: expected [MODE:]on|off: %s", arg);
+}
+
+// --medium-break-db=[MODE:]DB|off, --medium-adjacent-db=[MODE:]DB|off
+static void med_set_db_or_off(const char *opt, const char *arg, int field)
+{
+    const char *v;
+    struct med_phy_opt *o = med_phy_opt(opt, arg, field, &v);
+
+    if (!strcmp(v, "off"))
+        o->on = false;
+    else
+        o->a = med_number(opt, v, -100, 200);
+}
+
+void med_set_break_db(const char *arg)
+{
+    med_set_db_or_off("--medium-break-db", arg, PO_BREAK);
+}
+
+void med_set_adjacent_db(const char *arg)
+{
+    med_set_db_or_off("--medium-adjacent-db", arg, PO_ADJ);
+}
+
+// The profiles: the model's values, then the per-PHY options in their order
+static void med_phy_setup(void)
+{
+    int p, i;
+
+    for (p = 0; p < MED_PHYS; p++)
+        med.phy[p] = med.em4 ? med_phy_em4 : med_phy_fg25[p];
+    for (i = 0; i < med.n_opts; i++) {
+        const struct med_phy_opt *o = &med.opts[i];
+
+        for (p = 0; p < MED_PHYS; p++) {
+            struct med_phy *x = &med.phy[p];
+
+            if (!(o->mask & (1u << p)))
+                continue;
+            switch (o->field) {
+            case PO_INT:
+                x->int_noise = !o->on;
+                if (o->on) {
+                    x->int_x0 = o->a;
+                    x->int_b = o->b;
+                }
+                break;
+            case PO_CAPTURE: x->capture_db = o->a; break;
+            case PO_EARLY:   x->early_bits = o->on ? (int)o->a : MED_EARLY_SHR; break;
+            case PO_SFD:     x->sfd_capture = o->on; break;
+            case PO_BREAK:   x->has_break = o->on; if (o->on) x->break_db = o->a; break;
+            case PO_ADJ:     x->has_adj = o->on; if (o->on) x->adj_db = o->a; break;
+            }
+        }
+    }
+}
+
+// The profile of a data rate (§2.1)
+static uint8_t med_phy_of(uint32_t rate_bps)
+{
+    return rate_bps == 50000 ? MED_PHY_1A : rate_bps == 150000 ? MED_PHY_3 : MED_PHY_OTHER;
 }
 
 void med_set_log(const char *path)
@@ -414,20 +635,38 @@ static void med_prune(uint64_t now)
     }
 }
 
-// Sum of the powers at node of the frames on air on chan, but skip
+// The part of g's power mw that falls on chan (§2.1): all of it on its own
+// channel, adj_db less on the next one (the profile of g's rate), none
+// further away
+static double med_coupled_mw(const struct med_frame *g, uint16_t chan, double mw)
+{
+    const struct med_phy *x = &med.phy[g->phy];
+
+    if (g->chan == chan)
+        return mw;
+    if (x->has_adj && (g->chan == chan + 1 || chan == g->chan + 1))
+        return mw * pow(10, -x->adj_db / 10);
+    return 0;
+}
+
+// Sum of the powers at node of the frames on air on chan (and on the
+// adjacent channels, attenuated), but skip
 static double med_energy_mw(int node, uint16_t chan, const struct med_frame *skip, int *count)
 {
     const struct med_rx *rx;
     const struct med_frame *g;
-    double sum = 0;
+    double sum = 0, mw;
 
     for (g = med.air; g; g = g->next) {
-        if (g == skip || g->chan != chan || g->src == node)
+        if (g == skip || g->src == node)
+            continue;
+        if (g->chan != chan && !med_coupled_mw(g, chan, 1))
             continue;
         rx = med_find_rx(g, node);
         if (!rx)
             continue;
-        sum += rx->mw;
+        mw = med_coupled_mw(g, chan, rx->mw);
+        sum += mw;
         if (count)
             (*count)++;
     }
@@ -462,6 +701,27 @@ static int cmp_u64(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
+// Bit error rate of a frame received at mw with intf of interference (§2):
+// the noise curve of the SNR and the interference curve of the SIR, the
+// larger of the two; or, with the interference curve "noise" (EM4), the
+// noise curve of the SINR
+static double med_ber(const struct med_phy *x, double mw, double intf)
+{
+    double ber, ber_i;
+
+    if (x->int_noise) {
+        ber = 0.5 * exp(-0.5 * mw_to_dbm(mw / (med.noise_mw + intf)));
+    } else {
+        ber = 0.5 * exp(-0.5 * mw_to_dbm(mw / med.noise_mw));
+        if (intf > 0) {
+            ber_i = 0.5 * exp(-(mw_to_dbm(mw / intf) - x->int_x0) / x->int_b);
+            if (ber_i > ber)
+                ber = ber_i;
+        }
+    }
+    return ber > 0.5 ? 0.5 : ber;
+}
+
 // The frame of l over [t_bits, upto) (upto at most t_end), cut into segments
 // wherever an interferer starts or ends (§2). Returns ln(P_success) of that
 // part, and the lowest segment SINR in *sinr_min. An empty range (a frame
@@ -473,6 +733,7 @@ static double med_segments(const struct med_lock *l, uint64_t upto, double *sinr
     uint64_t end = upto < l->t_end ? upto : l->t_end;
     uint64_t airtime = l->t_end - l->t_bits;
     uint64_t stack_b[16], *b = stack_b;
+    const struct med_phy *x = &med.phy[l->phy];
     double logp = 0, intf, sinr, ber, bits;
     int nb = 0, i, k;
 
@@ -504,9 +765,7 @@ static double med_segments(const struct med_lock *l, uint64_t upto, double *sinr
         sinr = mw_to_dbm(l->mw / (med.noise_mw + intf));
         if (sinr < *sinr_min)
             *sinr_min = sinr;
-        ber = 0.5 * exp(-0.5 * sinr);
-        if (ber > 0.5)
-            ber = 0.5;
+        ber = med_ber(x, l->mw, intf);
         bits = end > l->t_bits ? (double)l->bits * (b[k + 1] - b[k]) / airtime : l->bits;
         logp += bits * log1p(-ber);
     }
@@ -542,8 +801,26 @@ void med_start(uint64_t seed, const uint8_t *cca_shm, struct node_infos *links)
         sn.log = fopen(sn.log_path, "w");
         FATAL_ON(!sn.log, 1, "%s: %m", sn.log_path);
     }
-    INFO("medium: central, lock threshold %.1f dB, capture margin %.1f dB%s", med.lock_snr, med.capture_db,
+    med_phy_setup();
+    INFO("medium: central, model %s, lock threshold %.1f dB%s", med.em4 ? "em4" : "fg25", med.lock_snr,
          med.has_tx_ref ? "" : ", link values are the received power");
+    for (int p = 0; p < MED_PHYS; p++) {
+        const struct med_phy *x = &med.phy[p];
+        char early[16], intf[48], brk[16], adj[16];
+
+        if (x->early_bits == MED_EARLY_SHR)
+            snprintf(early, sizeof(early), "SHR");
+        else
+            snprintf(early, sizeof(early), "%d bits", x->early_bits);
+        if (x->int_noise)
+            snprintf(intf, sizeof(intf), "as noise");
+        else
+            snprintf(intf, sizeof(intf), "x0 %.2f dB, b %.2f dB", x->int_x0, x->int_b);
+        snprintf(brk, sizeof(brk), x->has_break ? "%.1f dB" : "off", x->break_db);
+        snprintf(adj, sizeof(adj), x->has_adj ? "%.1f dB" : "off", x->adj_db);
+        INFO("medium: PHY %s: interference %s, capture %.1f dB in the first %s%s, break %s, adjacent channel %s",
+             phy_names[p], intf, x->capture_db, early, x->sfd_capture ? " and the SFD" : "", brk, adj);
+    }
     if (med.has_tx_ref)
         INFO("medium: link values are the received power at %.1f dBm TX power", med.tx_ref);
 }
@@ -576,6 +853,9 @@ struct med_frame *med_frame_start_lp(int src, const struct sim_frame_hdr *hdr, u
     f->t_end = f->t_bits + bytes * 8 * 1000000 / hdr->rate_bps;
     f->shr_us = preamble_us + (uint64_t)hdr->shr_len * 8 * 1000000 / hdr->rate_bps;
     sfd_us = (uint64_t)sn.sfd_bits * 1000000 / hdr->rate_bps;
+    f->phy = med_phy_of(hdr->rate_bps);
+    f->own_shr_us = f->shr_us - preamble_us;
+    f->own_pre_us = f->own_shr_us > sfd_us ? f->own_shr_us - sfd_us : 0;
     f->pre_end = f->shr_us > sfd_us ? now + f->shr_us - sfd_us : now;
     f->bits = 8 * ((unsigned int)hdr->phr_len + hdr->len + hdr->fcs_len);
     f->rate_bps = hdr->rate_bps;
@@ -648,19 +928,54 @@ static struct med_lock *med_lock(struct med_frame *f, const struct med_rx *rx)
     l->t_end = f->t_end;
     l->t_bits = f->t_bits;
     l->shr_us = f->shr_us;
+    l->phy = f->phy;
+    l->t_shr = f->t_bits;
+    l->own_shr_us = f->own_shr_us;
+    l->own_pre_us = f->own_pre_us;
+    l->rate_bps = f->rate_bps;
+    l->refs = 1;
+    // With the measured interference curve, the counted bits are those after
+    // the SHR (PHR to FCS), as in the measurement (§2): interference during
+    // the SHR is the capture rules' business
+    if (!med.phy[f->phy].int_noise && f->t_bits + f->own_shr_us < f->t_end)
+        l->t_bits = f->t_bits + f->own_shr_us;
     l->bits = f->bits;
     l->dbm = rx->dbm;
     l->mw = rx->mw;
     l->active = true;
     for (g = med.air; g; g = g->next) {
-        if (g == f || g->chan != f->chan || g->src == rx->node)
+        if (g == f || g->src == rx->node || !med_coupled_mw(g, f->chan, 1))
             continue;
         irx = med_find_rx(g, rx->node);
         if (irx)
-            med_add_intf(l, g->t_start, g->t_end, irx->mw);
+            med_add_intf(l, g->t_start, g->t_end, med_coupled_mw(g, f->chan, irx->mw));
     }
     med.locks[rx->node] = l;
     return l;
+}
+
+// Where the receiver of l is in its search for l's sync word at now (§3):
+// capture by a stronger frame possible (the early window, a long "xl"
+// preamble, the SFD where the profile says so), searching (a stronger frame
+// breaks the search), or synchronised (no capture)
+enum { MED_SYNC_CAPTURE, MED_SYNC_SEARCH, MED_SYNC_LOCKED };
+static int med_sync_phase(const struct med_lock *l, uint64_t now)
+{
+    const struct med_phy *x = &med.phy[l->phy];
+    uint64_t d;
+
+    if (now < l->t_shr)
+        return MED_SYNC_CAPTURE;        // in an "xl" preamble
+    d = now - l->t_shr;
+    if (d >= l->own_shr_us)
+        return MED_SYNC_LOCKED;
+    if (x->early_bits == MED_EARLY_SHR)
+        return MED_SYNC_CAPTURE;
+    if (d < (uint64_t)x->early_bits * 1000000 / l->rate_bps)
+        return MED_SYNC_CAPTURE;
+    if (x->sfd_capture && d >= l->own_pre_us)
+        return MED_SYNC_CAPTURE;
+    return MED_SYNC_SEARCH;
 }
 
 struct med_lock *med_decide(struct med_frame *f, int i, uint64_t now, float *rx_dbm)
@@ -681,14 +996,37 @@ struct med_lock *med_decide(struct med_frame *f, int i, uint64_t now, float *rx_
     }
     snr = rx->dbm - mw_to_dbm(med.noise_mw + med_energy_mw(rx->node, f->chan, f, NULL));
     if (l && l->chan == f->chan) {
-        if (now - l->t_start < l->shr_us && rx->dbm >= l->dbm + med.capture_db) {
-            med_end_lock(l, MED_CAPTURED, now);
-            return med_lock(f, rx);
+        const struct med_phy *x = &med.phy[l->phy];
+
+        switch (med_sync_phase(l, now)) {
+        case MED_SYNC_CAPTURE:
+            if (rx->dbm >= l->dbm + x->capture_db) {
+                med_end_lock(l, MED_CAPTURED, now);
+                return med_lock(f, rx);
+            }
+            break;
+        case MED_SYNC_SEARCH:
+            if (x->has_break && rx->dbm >= l->dbm + x->break_db) {
+                // Neither frame is received: the receiver lost the first
+                // sync word and finds no second one (§3)
+                med_add_intf(l, f->t_start, f->t_end, rx->mw);
+                med_end_lock(l, MED_INTERFERENCE, now);
+                l->broken = true;
+                l->refs++;
+                med.broken++;
+                med.last_broken = l;
+                med_log(f->t_end, f->src, rx->node, f->id, MED_BUSY, rx->dbm, snr);
+                return NULL;
+            }
+            break;
         }
         med_add_intf(l, f->t_start, f->t_end, rx->mw);
         med_log(f->t_end, f->src, rx->node, f->id, MED_BUSY, rx->dbm, snr);
         return NULL;
     }
+    // A frame on an adjacent channel interferes with the one received
+    if (l && l->active && med_coupled_mw(f, l->chan, 1))
+        med_add_intf(l, f->t_start, f->t_end, med_coupled_mw(f, l->chan, rx->mw));
     if (l || (state != SIM_RADIO_LISTEN && state != SIM_RADIO_RECEIVE) || med_chan(rx->node) != f->chan) {
         med_log(f->t_end, f->src, rx->node, f->id, MED_NOT_LISTENING, rx->dbm, snr);
         return NULL;
@@ -735,8 +1073,18 @@ void med_lock_free(struct med_lock *l)
 {
     if (med.locks[l->node] == l)
         med.locks[l->node] = NULL;
+    if (--l->refs > 0)
+        return;
     free(l->intf);
     free(l);
+}
+
+struct med_lock *med_take_broken(void)
+{
+    struct med_lock *l = med.last_broken;
+
+    med.last_broken = NULL;
+    return l;
 }
 
 bool med_verdict(struct med_lock *l, uint64_t now, struct sim_verdict *v)
@@ -745,6 +1093,20 @@ bool med_verdict(struct med_lock *l, uint64_t now, struct sim_verdict *v)
     bool ok;
     int outcome;
 
+    if (l->broken && l->refs == 2) {
+        // The verdict of a broken sync search, at once (its outcome is
+        // logged): lost by interference. The event at the frame's end frees it.
+        memset(v, 0, sizeof(*v));
+        memcpy(v->magic, "xv", 2);
+        v->ok = false;
+        v->cause = SIM_RX_INTERFERENCE;
+        v->frame_id = l->frame_id;
+        v->rx_dbm = l->dbm;
+        med_segments(l, now, &sinr);
+        v->sinr_db = sinr;
+        l->refs--;
+        return true;
+    }
     if (!l->active) {
         med_lock_free(l);
         return false;
@@ -1174,6 +1536,8 @@ void med_finish(void)
     INFO("medium: %llu frames, outcomes at receivers:", (unsigned long long)med.frames);
     for (i = 0; i < MED_OUTCOMES; i++)
         INFO("medium:   %-14s %llu", outcome_names[i], (unsigned long long)med.outcomes[i]);
+    INFO("medium: %llu sync searches broken by a stronger frame (lost by interference)",
+         (unsigned long long)med.broken);
     INFO("medium: %llu CCA queries, %llu with a frame on air", (unsigned long long)med.cca_queries,
          (unsigned long long)med.cca_energy);
     if (sn.next_serial) {
