@@ -177,6 +177,55 @@ def test_determinism():
         check(a[0].text(name) == a[1].text(name), f"{name} differs between two runs with seed 7")
 
 
+def test_asymmetric_link():
+    """A link given in both directions with different values is asymmetric
+    (docs/MEDIUM.md §1): node 1 hears node 2 at -85 dBm, node 2 hears node 1
+    at -70 dBm. A link given once (1-3) is the same both ways."""
+    nodes = {1: ["--tx", 2], 2: ["--tx", 10], 3: []}
+    r = Run("asymmetric", nodes, [(1, 2, -70), (2, 1, -85), (1, 3, -72)], 1.5)
+    dbm = {(int(src), int(dst)): float(rx) for t, src, dst, fid, outcome, rx, *_ in r.medium}
+    want = {(1, 2): -70.0, (2, 1): -85.0, (1, 3): -72.0}
+    check(all(dbm.get(k) == v for k, v in want.items()), f"received powers {dbm}")
+    check("asymmetric link: 2 -> 1 -85.0 dBm, 1 -> 2 -70.0 dBm" in r.out and
+          "1 asymmetric links" in r.out, f"server log: {r.out[:1500]}")
+
+
+def test_welcome_cca_us():
+    """The welcome of a client gives its profile's CCA duration (cca_us,
+    docs/RADIO_INTERFACE.md §4.3): the common value (160 µs in the FG25
+    profile), the mode-3 value with --power-mode=3 (53 µs), 0 without power."""
+    sys.path.insert(0, HERE)
+    import ref_client as rc
+    for name, opts, want in (("cca_common", (f"--power={PROFILE}",), {1: 160, 2: 160}),
+                             ("cca_mode", (f"--power={PROFILE}", "--power-mode=2:3"), {1: 160, 2: 53}),
+                             ("cca_none", (), {1: 0, 2: 0})):
+        d = os.path.join(ARGS.logdir, name)
+        srv, sock, log, lf = raw_server(name, 2, opts=(*opts, f"--power-out={os.path.join(d, 'power.json')}")
+                                        if opts else ())
+        got = {}
+        try:
+            nodes = {}
+            for nid in (1, 2):
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+                s.connect(sock)
+                s.send(rc.HELLO.pack(b"xh", nid, 3, 2))
+                nodes[nid] = s
+            for nid, s in nodes.items():
+                s.settimeout(10)
+                w = rc.WELCOME.unpack(s.recv(64))
+                got[nid] = w[5]
+                s.send(rc.IDLE.pack(b"xi", 0, 0, 0, rc.NEVER))
+            for s in nodes.values():
+                s.recv(64)          # "xq"
+                s.close()
+            srv.wait(10)
+        finally:
+            if srv.poll() is None:
+                srv.kill()
+            lf.close()
+        check(got == want, f"{name}: welcome cca_us {got}, expected {want}")
+
+
 def test_collision():
     """Hidden terminals: 2 and 3 do not hear each other and both send at 10 ms
     to 1. 1 locks onto 2's frame (same µs: lower ID first), 3's frame is

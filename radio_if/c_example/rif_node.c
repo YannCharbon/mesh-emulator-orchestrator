@@ -73,7 +73,7 @@ struct __attribute__((packed)) msg_welcome {        /* §4.3 */
     uint32_t flags;
     uint64_t seed;
     int32_t drift_ppb;
-    uint32_t reserved;
+    uint32_t cca_us;                                /* 0 without power recording */
     uint64_t start_us;
 };
 

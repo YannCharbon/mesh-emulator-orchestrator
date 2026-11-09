@@ -43,7 +43,7 @@ IF_VERSION = 2                           # the newest version this client implem
 
 # Message layouts (docs/RADIO_INTERFACE.md §4): little-endian, no padding
 HELLO = struct.Struct("<2sHHH")          # magic, node_id, flags, version
-WELCOME = struct.Struct("<2sHIQiIQ")     # magic, version, flags, seed, drift_ppb, reserved, start_us
+WELCOME = struct.Struct("<2sHIQiIQ")     # magic, version, flags, seed, drift_ppb, cca_us, start_us
 ADVANCE = struct.Struct("<2sHHHQ")       # magic, count, reserved, reserved, now_us
 IDLE = struct.Struct("<2sHHHQ")          # magic, reserved x3, next_us
 WAKE = struct.Struct("<2sH6H")           # magic, events, timers[6]
@@ -94,7 +94,7 @@ class RadioIf:
         msg = self._recv()
         if msg[:2] != b"xw" or len(msg) != WELCOME.size:
             raise RuntimeError(f"expected a welcome, got {msg[:2]!r} ({len(msg)} bytes)")
-        _, self.version, self.flags, self.seed, self.drift_ppb, _, self.start_us = WELCOME.unpack(msg)
+        _, self.version, self.flags, self.seed, self.drift_ppb, self.cca_us, self.start_us = WELCOME.unpack(msg)
         if self.version != version:
             raise RuntimeError(f"welcome for interface version {self.version}, expected {version}")
         self.now = self.start_us
