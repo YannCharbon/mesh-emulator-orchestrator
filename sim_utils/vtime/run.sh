@@ -82,6 +82,13 @@
 #                      frame and its MAC retries; --vtime-drop)
 #   FRAMES=1           write every frame sent to <outdir>/frames.txt (time us,
 #                      sender, channel, PSDU in hex; --vtime-frames)
+#   IF_NODES="<i> ..." nodes that are clients of the stack-neutral radio
+#                      interface (docs/RADIO_INTERFACE.md) instead of
+#                      wsnode-inproc: each runs IF_CMD_<i> (default IF_CMD)
+#                      --sock <socket> --id <i> IF_OPTS_<i>, logging to
+#                      if<i>.log. Their IDs may appear in TOPO but not among
+#                      the routers (they do not count in the router range
+#                      1..highest ID). E.g. IF_CMD="python3 radio_if/ref_client.py"
 #
 # Output in <outdir>: simserver.log, br.log, node<i>.log (each line starts with
 # NSIM_EPOCH_S + virtual time, written by the simulation port), t0
@@ -118,13 +125,23 @@ else
 fi
 TPG=()
 MAXID=0
+declare -A IFN      # clients of the radio interface
+for i in ${IF_NODES:-}; do IFN[$i]=1; done
 while read -r e; do
 	TPG+=(-g "$e")
 	for id in $(cut -d: -f1 <<< "$e" | tr ',-' '  '); do
+		[ -n "${IFN[$id]:-}" ] && continue
 		(( id > MAXID )) && MAXID=$id
 	done
 done < "$OUT/topology.txt"
 NODES=$MAXID                    # routers 1..NODES; node 0 is the border router
+NIF=0
+for i in ${IF_NODES:-}; do
+	NIF=$((NIF + 1))
+	(( i > NODES && i < 4096 )) || { echo "run.sh: IF_NODES: $i is the border router or a router (0..$NODES)" >&2; exit 1; }
+	c="IF_CMD_$i"
+	[ -n "${!c:-${IF_CMD:-}}" ] || { echo "run.sh: IF_NODES: no IF_CMD or IF_CMD_$i" >&2; exit 1; }
+done
 SEED=${WSSIM_SEED:-1}
 export WSSIM_SEED=$SEED
 SOCK=${SOCK:-$(mktemp -u --suffix=.sock /tmp/wssim-vt-XXXXXXXX)}
@@ -146,7 +163,7 @@ export WSBRD_LOG_FILE=$OUT/log_wsbr
 mkdir -p "$OUT/storage"
 echo $NSIM_EPOCH_S > "$OUT/t0"
 cat > "$OUT/run_info.txt" <<EOF
-seed=$SEED nodes=$((NODES + 1)) vtime_end=$DUR sock=$SOCK tun=$TUN setarch=${SETARCH:-0} conf=${CONF:-default}
+seed=$SEED nodes=$((NODES + 1 + NIF)) if_nodes=${IF_NODES:-} vtime_end=$DUR sock=$SOCK tun=$TUN setarch=${SETARCH:-0} conf=${CONF:-default}
 phy_env=$(env | grep '^WSSIM_PHY_' | sort | tr '\n' ' ')
 bin=$BIN work=$WORK
 start_wall=$(date +%s.%N)
@@ -223,7 +240,7 @@ for k in ${LINK:-}; do CTL+=(--vtime-link="$k"); done
 for k in ${DROP:-}; do CTL+=(--vtime-drop="$k"); done
 [ "${FRAMES:-0}" = 1 ] && CTL+=(--vtime-frames="$OUT/frames.txt")
 [ ${#CTL[@]} -gt 0 ] && echo "events=${CTL[*]}" >> "$OUT/run_info.txt"
-start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" --dump "$SOCK"
+start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + 1 + NIF)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" --dump "$SOCK"
 SIM_PID=$!
 for (( i = 0; i < 200; i++ )); do
 	[ -S "$SOCK" ] && break
@@ -240,6 +257,10 @@ start_node() {   # start_node <i> <log name>
 }
 for (( i = 1; i <= NODES; i++ )); do
 	start_node $i node$i
+done
+for i in ${IF_NODES:-}; do
+	c="IF_CMD_$i"; o="IF_OPTS_$i"
+	start "if$i" ${!c:-$IF_CMD} --sock "$SOCK" --id "$i" ${!o:-}
 done
 # Later instances connect once the first instance of their node has: the
 # conductor takes a node's first hello as its first instance.

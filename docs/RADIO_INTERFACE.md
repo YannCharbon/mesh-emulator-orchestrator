@@ -2,7 +2,7 @@
 
 This document specifies how a program connects to the emulator as a radio node, sends and receives frames through the emulated radio medium, keeps time and sleeps. It is written for developers who implement a client in their own stack, in any language, from this document alone: no emulator code, no Nanostack code and no header of this repository is needed.
 
-**Interface version 1.** The server side is `wssimserver` in virtual-time mode (`--vtime`) with the central radio medium (the default in that mode). A reference client in Python is in `radio_if/` (§12); it is an example, and this document is normative.
+**Interface version 1.** The server side is `wssimserver` in virtual-time mode (`--vtime`) with the central radio medium (the default in that mode). A reference client in Python and an example client in C are in `radio_if/` (§12); they are examples, and this document is normative.
 
 ## 1. Model
 
@@ -53,7 +53,7 @@ The client never waits for anything other than the server. It must not sleep, po
 | Power | dBm: `int8` for transmit power, `float32` for received power, energy and SINR (dB) |
 | Bit rate | bit/s, unsigned 32-bit |
 | Lengths | bytes |
-| Clock drift | parts per billion (ppb), signed 32-bit |
+| Clock drift | parts per billion (ppb), signed 32-bit, between −10⁸ and +10⁸ (the server's `--drift` takes −100 000 to +100 000 ppm) |
 | Node ID | 0 to 4095, unique in a run |
 | Channel | an unsigned 16-bit number chosen by the client; the medium only compares channel numbers for equality |
 
@@ -213,7 +213,7 @@ The client reports **every change of its radio's state** with `"xr"`, at the tim
 
 - **The radio starts `OFF`** at each start (welcome) of a node.
 - A channel change is a report with the new channel; the state may stay the same.
-- Report `RECEIVE` in the wake that delivers a locked frame (§6.5), and leave it when the verdict comes.
+- Report `RECEIVE` in the wake that delivers a locked frame (§6.5), and leave it when the verdict comes. The medium gives the verdict only to a node whose reported state is `RECEIVE` at the frame's end: a client that stays in `LISTEN` gets no verdict, and the frame is lost (outcome `left`).
 - A report applies from the current time. A frame already on air when the node starts listening is not received (the receiver missed its preamble), but it does count as interference and as CCA energy.
 
 ### 6.2 Transmitting
@@ -227,7 +227,9 @@ To send a frame at time `t` ("timed TX"), the client sets a deadline at `t` and,
    `airtime_us = (shr_len + phr_len + len + fcs_len) × 8 × 1 000 000 / rate_bps`, with integer division, the formula the medium uses;
 4. at the end, reports the next state (`LISTEN`, `IDLE` or `OFF`).
 
-Rules, checked by the server: a frame is sent only while the node's reported state is `TX`, and not before the end of the node's previous frame. A frame that breaks a rule is **not sent**; the server logs a warning and counts it in its end-of-run summary. The medium never delays or refuses a frame for any other reason: there is no automatic CSMA, backoff or acknowledgement. The sender receives no confirmation; its frame ends at its own computed end.
+Rules, checked by the server: a frame is sent only while the node's reported state is `TX`, and not before the end of the node's previous frame. A frame that breaks a rule is **not sent**; the server logs a warning and counts it in its end-of-run summary. A frame always stays on air until its computed end: the node must stay in `TX` until then. A report that leaves `TX` earlier is applied (the node may then hear frames while its own is on air, and the power report charges the new state), but the server warns about it and counts it.
+
+The medium uses the frame's own `chan` and `tx_dbm`; the power report uses the `tx_dbm` of the `TX` report. The server does not compare them: report the channel and power the frame is sent with. The medium never delays or refuses a frame for any other reason: there is no automatic CSMA, backoff or acknowledgement. The sender receives no confirmation; its frame ends at its own computed end.
 
 ### 6.3 Clock, timers and start time
 
@@ -236,7 +238,7 @@ Rules, checked by the server: a frame is sent only while the node's reported sta
 
   `local(v) = e + floor(e × drift_ppb / 10⁹)`, with `e = v − start_us`.
 
-  A timer of `d` µs on the node's clock, started at virtual time `v0`, fires at the first virtual time `v` with `local(v) ≥ local(v0) + d`. The deadlines in `"xi"` are always **virtual** times: a client that models drift converts its local deadlines to virtual time with this formula. With `drift_ppb` = 0 and `start_us` = 0 the node's clock is virtual time. A client that does not model drift may ignore `drift_ppb`, and the run then behaves as if `--drift` were 0 for that node.
+  A timer of `d` µs on the node's clock, started at virtual time `v0`, fires at the first virtual time `v` with `local(v) ≥ local(v0) + d`. The deadlines in `"xi"` are always **virtual** times: a client that models drift converts its local deadlines to virtual time with this formula. With `drift_ppb` = 0 and `start_us` = 0 the node's clock is virtual time. The product `e × drift_ppb` exceeds 64 bits for long runs at large drifts (at 100 ppm, after about 2.9 years of virtual time): compute it in 128 bits, or check the bound. A client that does not model drift may ignore `drift_ppb`, and the run then behaves as if `--drift` were 0 for that node.
 - **Late power-up and restart.** With `--vtime-power-up=ID:SECONDS` the node connects with the others but is welcomed at that time: until then it does not run, and its radio is off. With `--vtime-start=ID:SECONDS` a second process with the same node ID connects at the start of the run and is welcomed at that time, after the server has stopped the first one. In both cases the welcome's `start_us` is that time, and the node's clock starts at 0 there.
 
 ### 6.4 Randomness
@@ -247,7 +249,7 @@ The welcome's `seed` is the run's base seed (`WSSIM_SEED`). For reproducible run
 
 1. The client reports `LISTEN` on a channel. Its receive window is open from that time ("timed RX window").
 2. When a frame starts on that channel at a node that hears its sender, the medium decides whether the node **locks** onto it (§8). If it does, the node gets the frame (`"xx"` with flag `MEDIUM`) in a wake at the frame's **start**, with the received power in `rx_dbm`. Frames the node does not lock onto are never delivered.
-3. The client reports `RECEIVE` in that wake and holds the frame.
+3. The client reports `RECEIVE` in that wake and holds the frame. Without that report the frame is lost and no verdict comes (§6.1).
 4. At the frame's **end** the node gets the verdict `"xv"` for that `frame_id`. If `ok` is 1 the protocol receives the PSDU; if it is 0 the frame is dropped, as a failed checksum would be. The client then reports its next state.
 
 Exceptions while a frame is held:
@@ -260,7 +262,9 @@ A receive window that closes while a frame is being received normally waits for 
 
 ### 6.6 Clear-channel assessment
 
-The client sends `"xs"` with a channel and receives the energy at its antenna on that channel at the current time: the noise floor (−119.93 dBm) plus every frame on air on that channel from the node's neighbours, in dBm. The node's own frame is excluded. The client compares the energy with its own threshold; the server has no threshold. A CCA takes no virtual time. For the power report, the client then sends `"xr"` with its current state and the `CCA` event, and the server charges the profile's CCA duration at the end of the listening before it.
+The client sends `"xs"` with a channel and receives the energy at its antenna on that channel at the current time: the noise floor (−119.93 dBm) plus every frame on air on that channel from the node's neighbours, in dBm. The node's own frame is excluded. The client compares the energy with its own threshold; the server has no threshold. A CCA takes no virtual time. For the power report, the client then sends `"xr"` with its current state and the `CCA` event, and the server charges the profile's CCA duration (`cca_us`) at the end of the listening before it.
+
+A CCA needs the receiver on: report `LISTEN` on the channel at least the CCA duration before the query (a radio needs that time anyway). The server answers a query whatever the reported state, and the power report cuts the CCA to the length of the interval before it, so a receiver turned on in the same wake as the query charges no CCA time.
 
 ### 6.7 Preamble and energy sniff (reserved)
 
@@ -304,6 +308,7 @@ Links are directional and given in dBm. A link without a value (`-g A,B` alone) 
 | A node disconnects during the run | stops the run; exit status 1 |
 | Frame whose length differs from its header's `len`, or whose airtime cannot be computed (`rate_bps` = 0) | drops the frame; warning |
 | Frame while the node's reported state is not `TX`, or before the end of its previous frame | does not send it; warning (at the 1st, 2nd, 4th, 8th… occurrence) and a count per node at the end |
+| `"xr"` that leaves `TX` before the end of the node's frame | applies it; warning and count, as above |
 | `"xr"` with an unknown state | ignores it; warning and count |
 | `"xi"` of the wrong size | stops the run; exit status 1 |
 | Any other unknown message | drops it; warning |
@@ -329,7 +334,7 @@ Useful server options (all in `wssimserver --help`): `--vtime-end`, `-g` (topolo
 
 The server's log ends with the virtual time reached, the wake and frame counts, the medium's outcome counts and, with `--power`, one line per node. The medium log (`--medium-log`) has one line per frame and receiver: `t_end_us src dst frame_id outcome rx_dbm sinr_min_db`, with outcome `ok`, `noise`, `interference`, `captured`, `below_lock`, `busy`, `not_listening`, `tx_abort` or `left`.
 
-Clients of this interface and Nanostack nodes (`wsnode-inproc`, `wsbrd-inproc`) can share a run, since they share the medium; each hears the other's frames as foreign bytes. This combination is not tested.
+Clients of this interface and Nanostack nodes (`wsnode-inproc`, `wsbrd-inproc`) can share a run, since they share the medium: each locks onto the other's frames, which collide with its own, and receives them as foreign bytes. A client must therefore accept any PSDU, of any length up to 4096 bytes. `sim_utils/vtime/run.sh` starts such runs with `IF_NODES` (the clients' IDs) and `IF_CMD` (the command, given `--sock` and `--id`); `radio_if/test_mixed.sh` is the test (§12).
 
 ## 11. A minimal client
 
@@ -350,6 +355,7 @@ loop:
     for each timer due at now, by deadline:
         window opens:  state = LISTEN; send "xr" {LISTEN, chan}
         window closes: if state != RECEIVE: state = OFF; send "xr" {OFF, chan}
+        rx_on:         state = LISTEN; send "xr" {LISTEN, chan}   # at least cca_us before transmit
         transmit:      e = CCA "xs" {chan}; send "xr" {state, CCA event}
                        if e < threshold: send "xr" {TX, chan, dBm}; send "xx" {...}
                                          timer tx_end = now + airtime
@@ -358,7 +364,11 @@ loop:
 
 ## 12. The reference client and its tests
 
-`radio_if/ref_client.py` (Python standard library only) implements this interface (`RadioIf`) and a small protocol on top of it (`WindowNode`): periodic receive windows on the node's own clock, the radio off between them, frames at given offsets in the window with CCA before each. `radio_if/test_ref_client.py` runs it against `wssimserver`:
+`radio_if/ref_client.py` (Python standard library only) implements this interface (`RadioIf`) and a small protocol on top of it (`WindowNode`): periodic receive windows on the node's own clock, the radio off between them, frames at given offsets in the window with CCA before each.
+
+`radio_if/c_example/rif_node.c` is a second client, in C, written from this document alone (its message structures come from §4, with no header of this repository): a frame every period at a given offset on the node's own clock, CCA before each, the receiver on between frames (`--listen`) or turned on only for the CCA. It builds with `cc -O2 -o rif_node rif_node.c`.
+
+`radio_if/test_ref_client.py` runs them against `wssimserver`:
 
 | Test | What it shows |
 | --- | --- |
@@ -370,12 +380,15 @@ loop:
 | `cca_busy` | With CCA, the second node finds the first frame on air (−60 dBm), does not send, and receives it |
 | `window_closed` | Frames sent while the receiver's radio is off are not heard (`not_listening`) |
 | `drift_power_up` | A node 100 ppm fast and powered up at 0.5 s opens its windows at the virtual times the clock formula gives and still receives |
-| `hello_refused` | The server refuses an unknown version, unknown flags, the interface without virtual time, and the legacy medium |
-| `tx_rules` | Frames outside `TX` and overlapping frames are not sent and are counted |
+| `c_client` | The C client and the Python client in one run exchange every frame; a C node with its radio off between frames has its CCAs charged inside its short listens |
+| `hello_refused` | The server refuses an unknown version, unknown flags, the interface without virtual time (also for a later instance, `--vtime-start`), and the legacy medium |
+| `tx_rules` | Frames outside `TX` and overlapping frames are not sent and are counted; leaving `TX` while the frame is on air is counted |
 
 ```bash
-python3 radio_if/test_ref_client.py build-vt/wssimserver      # about 1 s
+python3 radio_if/test_ref_client.py build-vt/wssimserver      # about 2 s
 ```
+
+`radio_if/test_mixed.sh <bindir> <workdir> <outdir>` runs `dag_simple` (15 Nanostack nodes) with three clients (two C, one Python) near four of its routers, on one of the Wi-SUN nodes' channels, for 600 virtual seconds, and the same seed without the clients. It checks that every router joins as in the baseline, that the clients receive each other's frames and Wi-SUN frames and the Wi-SUN nodes the clients' frames (each client's log against the medium log), that collisions between the two kinds of node occur and are applied by the medium, that the power report covers every node with exact state sums and each client's TX time, and that the server logged no interface error (about 10 s).
 
 ## 13. Versioning
 
@@ -390,5 +403,6 @@ python3 radio_if/test_ref_client.py build-vt/wssimserver      # about 1 s
 - **The receive timestamp** is the frame's start (the time of the wake that delivers it); a radio that timestamps the end of the sync word adds `shr_len × 8 × 10⁶ / rate_bps` itself.
 - **MCU active time chosen by the client.** The power report models it from cycle counts (§7); code still runs in zero virtual time, so a slow MCU does not delay the protocol.
 - **Peripherals that keep the MCU out of deep sleep** (a UART, for example) cannot be reported yet.
+- **Changes during a reception:** the medium checks the node's state at the frame's end only. A channel change reported while in `RECEIVE` does not lose the frame, nor does a short excursion out of `RECEIVE` reported back before the end (unless another frame reaches the node meanwhile); a client that follows §6.5 does neither.
 - **One radio per node.**
 - **Preamble and energy sniff** (§6.7).
