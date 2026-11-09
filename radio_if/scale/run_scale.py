@@ -5,17 +5,10 @@ wssimserver in virtual time with the central medium (docs/SCALE.md).
 usage: run_scale.py --server build-vt/wssimserver --client <rif_load> --nodes N
                     --duration SECONDS --out DIR [options]
 
-The topology is a building of --floors floors, each a grid of nodes spaced
---spacing m (floors --floor-height m apart). Received power from a log-distance
-path loss at 915 MHz:
-
-    PL(d) = 31.7 + 10 n log10(d) + wall_db_per_m * d_horizontal + floor_db * |floors apart|
-
-    rssi = tx_dbm - PL(d)
-
-and a link (A,B:RSSI, both directions, given to wssimserver with --group-file)
-where rssi >= --min-rssi.
-The gateway (node 0) is in the middle of floor 0. Node IDs are 0..N-1.
+The topology is the building of gen_building.py (same options: --floors,
+--spacing, --floor-height, --tx-dbm, --pl-exp, --wall-db-per-m, --floor-db,
+--min-rssi), given to wssimserver with --group-file. The gateway (node 0) is
+in the middle of floor 0. Node IDs are 0..N-1.
 
 Results go to DIR: server.log, topology.txt, nodes/<id>.txt (each client's
 output), result.json (wall time, CPU, memory, flood coverage and latency),
@@ -23,53 +16,8 @@ and a one-line summary on stdout.
 """
 import argparse, collections, json, math, os, random, re, resource, shutil, signal, statistics, subprocess, sys, tempfile, time
 
-
-def building(n, floors, spacing, floor_height):
-    per_floor = math.ceil(n / floors)
-    cols = math.ceil(math.sqrt(per_floor * 2))      # floors twice as long as wide
-    rows = math.ceil(per_floor / cols)
-    pos = []
-    for i in range(n):
-        f, k = divmod(i, per_floor)
-        r, c = divmod(k, cols)
-        pos.append((c * spacing, r * spacing, f * floor_height, f))
-    # gateway in the middle of floor 0: swap node 0 with the node nearest the centre
-    cx, cy = (cols - 1) * spacing / 2, (rows - 1) * spacing / 2
-    j = min(range(min(per_floor, n)), key=lambda i: (pos[i][0] - cx) ** 2 + (pos[i][1] - cy) ** 2)
-    pos[0], pos[j] = pos[j], pos[0]
-    return pos, rows, cols
-
-
-def links(pos, a):
-    edges = {}
-    n = len(pos)
-    for i in range(n):
-        xi, yi, zi, fi = pos[i]
-        for j in range(i + 1, n):
-            xj, yj, zj, fj = pos[j]
-            dh = math.hypot(xi - xj, yi - yj)
-            d = max(1.0, math.sqrt(dh * dh + (zi - zj) ** 2))
-            pl = 31.7 + 10 * a.pl_exp * math.log10(d) + a.wall_db_per_m * dh + a.floor_db * abs(fi - fj)
-            rssi = a.tx_dbm - pl
-            if rssi >= a.min_rssi:
-                edges[(i, j)] = round(rssi, 1)
-    return edges
-
-
-def hops_from(n, edges, src):
-    adj = collections.defaultdict(list)
-    for a, b in edges:
-        adj[a].append(b)
-        adj[b].append(a)
-    dist = {src: 0}
-    dq = collections.deque([src])
-    while dq:
-        x = dq.popleft()
-        for y in adj[x]:
-            if y not in dist:
-                dist[y] = dist[x] + 1
-                dq.append(y)
-    return dist
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gen_building     # noqa: E402  the building (radio_if/scale/gen_building.py)
 
 
 def proc_mem_kb(pid):
@@ -92,14 +40,7 @@ def main():
     p.add_argument("--duration", type=float, required=True, help="virtual seconds")
     p.add_argument("--out", required=True)
     p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--floors", type=int, default=0, help="default: about 200 nodes per floor")
-    p.add_argument("--spacing", type=float, default=8.0)
-    p.add_argument("--floor-height", type=float, default=3.5)
-    p.add_argument("--tx-dbm", type=float, default=14.0)
-    p.add_argument("--pl-exp", type=float, default=3.0)
-    p.add_argument("--wall-db-per-m", type=float, default=1.8)
-    p.add_argument("--floor-db", type=float, default=18.0)
-    p.add_argument("--min-rssi", type=float, default=-100.0)
+    gen_building.add_args(p)     # --floors, --spacing, ... (gen_building.py)
     p.add_argument("--alarms", type=int, default=2, help="alarms originated by random nodes during the run")
     p.add_argument("--power", help="power profile (--power of wssimserver)")
     p.add_argument("--medium-log", action="store_true")
@@ -111,24 +52,10 @@ def main():
     a = p.parse_args()
 
     n = a.nodes
-    if n < 2 or n > 4096:
-        sys.exit("--nodes: 2 to 4096")
-    floors = a.floors or max(1, round(n / 200))
     os.makedirs(a.out, exist_ok=True)
-    pos, rows, cols = building(n, floors, a.spacing, a.floor_height)
-    edges = links(pos, a)
-    deg = collections.Counter()
-    for x, y in edges:
-        deg[x] += 1
-        deg[y] += 1
-    hops = hops_from(n, edges, 0)
-    topo = {"nodes": n, "floors": floors, "grid": f"{rows}x{cols}", "links": len(edges),
-            "degree_mean": round(2 * len(edges) / n, 1), "degree_min": min(deg[i] for i in range(n)),
-            "degree_max": max(deg[i] for i in range(n)), "reachable": len(hops),
-            "hops_max": max(hops.values())}
+    edges, pos, topo = gen_building.generate(n, a)
     with open(os.path.join(a.out, "topology.txt"), "w") as f:
-        for (x, y), r in sorted(edges.items()):
-            f.write(f"{x},{y}:{r}\n")
+        gen_building.write_topology(f, edges)
     print("topology:", json.dumps(topo), file=sys.stderr)
     if a.topology_only:
         return
