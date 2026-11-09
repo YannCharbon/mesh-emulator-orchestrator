@@ -516,6 +516,8 @@ loop:
 python3 radio_if/test_ref_client.py build-vt/wssimserver      # about 3 s
 ```
 
+The logs go to a new temporary directory (`radio_if_*` in `$TMPDIR`, by default `/tmp`), removed when every test passes and kept on a failure (the last line gives its path); `--logdir DIR` keeps them in `DIR`.
+
 `radio_if/test_mixed.sh <bindir> <workdir> <outdir>` runs `dag_simple` (15 Nanostack nodes) with three clients (two C, one Python) near four of its routers, on one of the Wi-SUN nodes' channels, for 600 virtual seconds, and the same seed without the clients. It checks that every router joins as in the baseline, that the clients receive each other's frames and Wi-SUN frames and the Wi-SUN nodes the clients' frames (each client's log against the medium log), that collisions between the two kinds of node occur and are applied by the medium, that the power report covers every node with exact state sums and each client's TX time, and that the server logged no interface error (about 10 s). With `SNIFF=1` the clients sniff instead (two C clients in version 2 that sniff 1 ms every 100 ms and send with a 110 ms wake-up preamble, a Python client that sniffs 10 ms every 50 ms, a version-1 C client that listens all the time): the test checks the detections, locks and receptions through sniffs, Wi-SUN frames detected and received through sniffs, the version-1 client next to them, the collisions across the two kinds, the power report (TX times with the preambles, listening within the sniffs) and the server's sniff counts against the clients' logs.
 
 ## 13. Versioning

@@ -2,7 +2,7 @@
 
 This guide is the starting point for developers of a mesh stack that is not built on Nanostack and lives in its own repository. It explains how to test that stack in the emulator, observe it in the web application (`mesh-testbed-controller`) and then run it on the MTS bench. It gives the order of the work and the commands, and it links to the specifications for the details; it does not repeat them.
 
-Every command in this guide was run once on 2026-11-09, on emulator `main` at `1a6082a`, controller `9297149` and bootloader `12ea43af`, except those that need the bench, which are marked. The server-only build (§2), `run.sh` with relative client paths and large topologies (§3), and the web-app steps of §4 (on a test instance of controller `1c346d6`) were run again after the fixes of the same day; the plan of §4 with a relative topology file, on the emulator and on the simulated bench, was run again on controller `4cdfe18`. Paths are relative to the emulator checkout unless stated otherwise; `<root>` is the checkout of `mesh-emulator-rework`, which holds the emulator, the controller, the bootloader and the stack as sibling directories.
+Every command in this guide was run once on 2026-11-09, on emulator `main` at `1a6082a`, controller `9297149` and bootloader `12ea43af`, except those that need the bench, which are marked. The server-only build (§2), `run.sh` with relative client paths and large topologies (§3), and the web-app steps of §4 (on a test instance of controller `1c346d6`) were run again after the fixes of the same day; the plan of §4 with a relative topology file, on the emulator and on the simulated bench, was run again on controller `4cdfe18`. After the second dry run (an 80-node client written from this guide alone), the commands of §2 and §3 were run again on emulator `b6a9397`: the server-only build, `test_ref_client.py`, the hand test, and `run.sh` with the 80-node client, a relative per-node profile in `POWER_OPTS` and the medium and sniff logs (results identical to the dry run's except the paths), and the error cases of §7 (a missing profile, a socket path that is too long, a server that fails during a run). The web-app steps of §4 were not run again for these fixes, which do not touch the controller. Paths are relative to the emulator checkout unless stated otherwise; `<root>` is the checkout of `mesh-emulator-rework`, which holds the emulator, the controller, the bootloader and the stack as sibling directories.
 
 ## 1. What the environment offers, and its limits
 
@@ -38,7 +38,7 @@ ninja -C build-srv
 python3 radio_if/test_ref_client.py build-srv/wssimserver     # the server's interface tests, about 2 s
 ```
 
-The server is the same as in the full virtual-time build (`build-vt`, emulator [README](../README.md), "Compile mbedtls"), which is needed only to run Nanostack nodes next to the clients. The commands below use `build-srv`; `build-vt` works the same way.
+The server is the same as in the full virtual-time build (`build-vt`, emulator [README](../README.md), "Compile mbedtls"), which is needed to run Nanostack nodes next to the clients. The commands below use `build-srv`; `build-vt` works the same way. The web app (§4) runs the programs of `Emulator:BuildDir`, by default `build-vt` in the emulator checkout: with only `build-srv`, either build `build-vt` as well or start the web app with `--Emulator:BuildDir=build-srv`, which serves configurations of clients only; a configuration with Nanostack nodes needs `build-vt`. The plan names a missing or incomplete build.
 
 **What to implement first,** in this order, each section of [RADIO_INTERFACE.md](RADIO_INTERFACE.md) being the reference:
 
@@ -66,6 +66,8 @@ for n in 1 2 3; do my_client --sock $SOCK --id $n > if$n.log 2>&1 & done
 wait
 ```
 
+A UNIX socket path is at most 107 bytes: keep the socket in `/tmp` with a short name, not in a deep working directory. The server refuses a longer path with its length and the limit, and `run.sh` does the same for `SOCK` (its default, `/tmp/wssim-vt-*.sock`, is short). Servers before `be5f339` stopped with `fatal error: "strlen(argv[optind]) >= sizeof(ctxt->addr.sun_path)"` instead.
+
 Then check:
 
 - the end of `simserver.log`: the virtual time reached, wakes and frames, the medium's outcomes, one power line per node, and no interface warning (the warnings and their causes are in [RADIO_INTERFACE.md](RADIO_INTERFACE.md) §9);
@@ -92,10 +94,14 @@ TOPO=topo48.txt IF_NODES="$(seq -s ' ' 0 47)" IF_CMD=../mystack/build/my_client 
 ```
 
 - `IF_CMD` is the client's command, given `--sock <socket> --id <i>`; `IF_OPTS_<i>` and `IF_CMD_<i>` give one node its own arguments or program. The programs run in the output directory. In `IF_CMD`, `IF_CMD_<i>` and `IF_OPTS_<i>`, a word that contains a `/` and names an existing file or directory relative to the directory `run.sh` is called from is made absolute (`../mystack/build/my_client`, `./my_client`, `python3 radio_if/ref_client.py`, a schedule file `sched/3.txt`); a bare name (`my_client`) is looked up on `PATH`, as by the shell. A file that the client creates is relative to the output directory unless its path is absolute.
-- `SIM_OPTS` passes any server option (`wssimserver --help`): the medium and sniff logs, clock drift (`--drift-random=20`), cut links and link changes in virtual time (`CUT`, `LINK`), late power-up (`POWER_UP`, `SPREAD`).
+- `SIM_OPTS` passes any server option (`wssimserver --help`): the medium and sniff logs, clock drift (`--drift-random=20`), cut links and link changes in virtual time (`CUT`, `LINK`), late power-up (`POWER_UP`, `SPREAD`). `POWER_OPTS` passes the power options (`--power-node`, `--power-mode`, `--power-cell`).
+- Paths in `POWER_OPTS` and `SIM_OPTS`: the files the server reads (`--power-node=IDS:PROFILE`, `--power`, `--group-file`) are relative to the directory `run.sh` is called from, as `POWER` and `TOPO`, and `run.sh` stops at once if one does not exist; the files the server writes (`--medium-log`, `--sniff-log`, `--power-log`, `--vtime-frames`) are relative to the output directory, so each run keeps its own.
+- When the server fails, `run.sh` prints the end of `simserver.log`, which holds its error; the clients' non-zero exit statuses that follow are its consequence.
 - The output directory must be new or empty.
 
-**Choice of power profile** ([RADIO_INTERFACE.md](RADIO_INTERFACE.md) §7, "Which profile and `phy_mode`"): `examples/power/efr32fg25-lfn.ini` for battery nodes that open short receive windows or sniff and sleep in between; `examples/power/efr32fg25-soc.ini` for nodes whose receiver is on most of the time. Report the `phy_mode` number that matches the client's bit rate and modulation index, or 0; with 0 the profile's common values (EU mode 1a, 50 kbit/s) apply. Every value is a user setting: copy a profile and edit it for another radio, or give one per node with `POWER_OPTS="--power-node=IDS:PROFILE"`.
+**Choice of power profile** ([RADIO_INTERFACE.md](RADIO_INTERFACE.md) §7, "Which profile and `phy_mode`"): `examples/power/efr32fg25-lfn.ini` for battery nodes that open short receive windows or sniff and sleep in between; `examples/power/efr32fg25-soc.ini` for nodes whose receiver is on most of the time. Report the `phy_mode` number that matches the client's bit rate and modulation index, or 0; with 0 the profile's common values (EU mode 1a, 50 kbit/s) apply. Every value is a user setting: copy a profile and edit it for another radio, or give one per node with `POWER_OPTS="--power-node=IDS:PROFILE"`, for example a gateway that listens all the time next to battery nodes: `POWER=examples/power/efr32fg25-lfn.ini POWER_OPTS="--power-node=0:examples/power/efr32fg25-soc.ini"`. `simserver.log` names each profile's hardware kind (`soc` means MCU and radio on one chip, for both FG25 profiles) and, at the end, each node's profile, the PHY mode it reported and whether that mode's own values or the common values were used.
+
+**A node that receives many frames should listen, not sniff.** A sniff detects and locks onto at most one frame, and frames that arrive while the radio is off between sniffs are lost (`not_listening`). In the dry run, a gateway that sniffed received one frame per sniff of the many sent to it. Keep the receiver of a gateway or of a busy parent in `LISTEN` and give it the SoC profile; sniff on battery nodes that receive little.
 
 **Seeds and repeatability.** One seed per run (`WSSIM_SEED`). To check that the client is deterministic, run the same seed twice into two directories and compare:
 
@@ -110,7 +116,7 @@ Size campaigns to what they must show: a few seeds of a reasonable length, not m
 
 | File | Content |
 | --- | --- |
-| `simserver.log` | Settings of the medium and of sniffing, then at the end: virtual time reached, wakes, frames sent and delivered, outcomes at receivers, CCA queries, sniff outcomes, one power line per node; warnings about the interface |
+| `simserver.log` | Settings of the medium and of sniffing, the power profiles (hardware kind, modes with values of their own), then at the end: virtual time reached, wakes, frames sent and delivered, outcomes at receivers, CCA queries, sniff outcomes, one power line per node; warnings about the interface |
 | `medium.log` | One line per frame and receiver with its outcome (`ok`, `noise`, `interference`, `captured`, `below_lock`, `busy`, `not_listening`, `tx_abort`, `left`): [MEDIUM.md](MEDIUM.md) §7 |
 | `sniff.log` | One line per sniff: request, window, outcome (`detected`, `none`, …), frame, power, SINR, lock: [MEDIUM.md](MEDIUM.md) §10.5 |
 | `power.json` | Per node: average current, charge, time and charge per MCU and radio state, wakes, the sum check: [POWER_MODEL.md](POWER_MODEL.md) §7. `python3 sim_utils/power_summary.py <run directory>` prints a table |
@@ -131,7 +137,7 @@ Plan the memory as the client's resident size × N ([SCALE.md](SCALE.md) §3–�
 
 The web app reads each client's `MOP1` lines and shows the nodes, their states, parents and links, counters and events ([STACK_NEUTRAL_MODEL.md](../../mesh-testbed-controller/docs/STACK_NEUTRAL_MODEL.md), "The emulator" and "Nodes of other stacks: clients of the radio interface"). Installation of .NET and the settings are in the controller's [README](../../mesh-testbed-controller/README.md).
 
-**Start an instance for the emulator only,** with the test profile, its own port and its own data directory. The test profile switches the real bench off whatever the other options say, keeps the configurations, event log, exports and runs under the data directory, uses no TUN device, and builds the program in `<data dir>/build` ([README](../../mesh-testbed-controller/README.md), "Extra instances"). Switching the simulated bench off makes the emulator the instance's only environment; without `--Environments:MtsSimulated=false`, the simulated bench is shown first, and the emulator is chosen in the environment selector at the top of the Configuration page:
+**Start an instance for the emulator only,** with the test profile, its own port and its own data directory. The test profile switches the real bench off whatever the other options say, keeps the configurations, event log, exports and runs under the data directory, uses no TUN device, and builds the program in `<data dir>/build` ([README](../../mesh-testbed-controller/README.md), "Extra instances"). The emulator runs use the programs of `Emulator:BuildDir`, by default the full virtual-time build `build-vt` of the emulator checkout (§2); add `--Emulator:BuildDir=build-srv` to use the server-only build for configurations of clients only. Switching the simulated bench off makes the emulator the instance's only environment; without `--Environments:MtsSimulated=false`, the simulated bench is shown first, and the emulator is chosen in the environment selector at the top of the Configuration page:
 
 ```bash
 cd <root>/mesh-testbed-controller
@@ -241,9 +247,15 @@ The simulated bench of the controller (`--Environments:MtsSimulated=true`, with 
 | `run.sh` takes minutes before the run starts, or fails with "Argument list too long" | An emulator checkout from before 2026-11-09: `run.sh` then passed each link as `-g`. Update it; `run.sh` now uses `--group-file` (§3) |
 | `--group-file: ...topology.txt:N: ...` in `simserver.log` | Line N of the topology (as cleaned in the output directory's `topology.txt`) is malformed: one `A,B:RSSI` per line, IDs 0 to 4095 ([sim_utils/vtime/README.md](../sim_utils/vtime/README.md), "Topology files") |
 | `run.sh: ... is not empty` | Each run needs a new output directory |
+| `run.sh: --power-node: no file ...` | The profile path in `POWER_OPTS` is relative to the directory `run.sh` is called from, as `POWER` (§3). Emulator checkouts before `4e8706b` passed it unchanged to the server, which runs in the output directory: every client then exited with status 1 and `run.sh` printed only "non-zero exit status"; the cause was at the end of `simserver.log` (`power profile ...: No such file or directory`) |
+| `socket path too long` or `run.sh: SOCK is ... bytes long` | A UNIX socket path is at most 107 bytes: use `SOCK=/tmp/<name>.sock` or leave `SOCK` unset (§2) |
+| `run.sh: wssimserver failed ...` | The server's error follows, from the end of `simserver.log`: a bad option, an unreadable file, an interface error. The clients' exit statuses are a consequence |
 | The server closes the connection right after the hello | Wrong size or version, an ID used twice or above 4095, more clients than `--vtime=N`, or a server without `--vtime`: the warning is in `simserver.log` ([RADIO_INTERFACE.md](RADIO_INTERFACE.md) §9) |
 | The run stops when one client exits | A client that disconnects during the run stops it; read that client's log |
 | Frames lost where they should arrive: `not_listening` | The receiver's reported state was `OFF` or the channel differed when the frame started |
+| A sniffing gateway or parent receives only some of the frames sent to it | A sniff locks onto at most one frame, and the radio is off between sniffs: let a node that receives many frames listen all the time, with the SoC profile (§3) |
+| `simserver.log` names the profile kind `soc` for an LFN profile, or "values ... for PHY mode 3" while the clients report mode 1a | `soc` is the hardware's architecture (MCU and radio on one chip), not the use of the profile. The mode-3 line lists the modes that have values of their own; a node in mode 1a takes the common values. Each node's line at the end names the values it used (since `be5f339`) |
+| `/tmp/radio_if_*` directories pile up | Left by `test_ref_client.py` before `b6a9397`; it now removes its directory when every test passes, keeps it on a failure and prints its path. The old ones can be deleted |
 | Every overlapping frame lost | A link without a value is 0 dBm and destroys any frame it overlaps: give link values |
 | A link behaves differently in each direction | A line `B,A:RSSI` sets the reverse direction; the server warns when a later line changes a value ([MEDIUM.md](MEDIUM.md) §2) |
 | Two runs with the same seed differ | The client reads the wall clock or another random source, or iterates over something unordered; compare the node logs to find the first difference |
