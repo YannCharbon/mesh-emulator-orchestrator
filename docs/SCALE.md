@@ -19,7 +19,7 @@ taskset -c 2,3 python3 radio_if/scale/run_scale.py --server build-vt/wssimserver
 
 `run_scale.py` does the following:
 
-1. It generates the building and writes `topology.txt`.
+1. It generates the building with `gen_building.py` (below) and writes `topology.txt`.
 2. It starts `wssimserver --vtime=N` with `--group-file=topology.txt`, under `/usr/bin/time`, and then starts the N clients.
 3. It samples the memory of the server and of the clients every 2 s.
 4. It writes `result.json` and prints a one-line summary.
@@ -40,14 +40,37 @@ taskset -c 2,3 python3 radio_if/scale/run_scale.py --server build-vt/wssimserver
 | `--alarms K` | number of alarm floods |
 | `--client-opts`, `--server-opts` | options passed to every client or to the server |
 | `--seed` | the run's seed (`WSSIM_SEED`) |
+| `--floors`, `--spacing`, ... | the building, as `gen_building.py` (below) |
 
 **Topology.** The building has `--floors` floors (by default about 200 nodes per floor). Each floor is a grid with `--spacing` 8 m between nodes, and floors are 3.5 m apart. Node 0, the gateway, is in the middle of floor 0. Received power is computed as follows:
 
-- `rssi = tx_dbm − (31.7 + 10·n·log10(d) + w·d_horizontal + f·floors_apart)`
+- `rssi = tx_dbm − (31.7 + 10·n·log10(d) + w·d_horizontal + f·floors_apart)`, with `d` the 3-D distance (at least 1 m);
 - defaults: `tx_dbm` 14 dBm, `n` = 3.0, `w` = 1.8 dB/m for internal walls, `f` = 18 dB per floor;
-- there is a link (both directions) where `rssi ≥ −100 dBm`.
+- there is a link (both directions, the same value) where `rssi ≥ −100 dBm`.
 
 At 1000 nodes this gives a mean of 38 neighbours (15–52) and up to 6 hops from the gateway. Links weaker than −100 dBm are left out, including as interferers.
+
+**The building generator on its own.** `radio_if/scale/gen_building.py` makes this topology for any run, not only the scale scenario; use it rather than writing another one:
+
+```bash
+python3 radio_if/scale/gen_building.py --nodes 48 -o topo48.txt --positions topo48.pos
+# topology: {"nodes": 48, "floors": 1, "grid": "5x10", "links": 375, ...}   (on stderr)
+WSSIM_SEED=1 build-vt/wssimserver --vtime=48 --group-file=topo48.txt ... /tmp/sock    # by hand, or:
+TOPO=topo48.txt IF_NODES="$(seq -s ' ' 0 47)" IF_CMD=my_client sim_utils/vtime/run.sh build-vt . out 300
+```
+
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `--nodes N` | number of nodes, IDs 0 to N−1 (2 to 4096) | required |
+| `--floors F` | floors; nodes fill floor 0 first, row by row | N/200 rounded, at least 1 |
+| `--spacing M` | metres between neighbours on a floor; each floor is a grid about twice as long as wide | 8 |
+| `--floor-height M` | metres between floors | 3.5 |
+| `--tx-dbm`, `--pl-exp`, `--wall-db-per-m`, `--floor-db` | `tx_dbm`, `n`, `w`, `f` of the formula above | 14, 3.0, 1.8, 18 |
+| `--min-rssi DBM` | no link below this | −100 |
+| `-o FILE` | the topology (default: stdout) | |
+| `--positions FILE` | also each node's position: `ID X Y Z FLOOR` in metres, after a `#` header line | |
+
+The output has one line per link, `A,B:RSSI` with `A < B`, RSSI rounded to 0.1 dB, sorted: a `wssimserver --group-file` and a `TOPO=` file of `run.sh` (`sim_utils/vtime/README.md`, "Topology files"). Each link is given once, so it holds in both directions (`docs/MEDIUM.md` §2). The summary on stderr gives the number of links, the degree (mean, minimum, maximum) and the hops from node 0 (BFS over the links). The generator draws nothing at random: the same options give the same file. `run_scale.py` takes the same options and calls it.
 
 **Load client** (`radio_if/scale/rif_load.c`, interface version 1). It is a load generator shaped like an alarm mesh, not a protocol:
 
@@ -66,7 +89,7 @@ Random numbers come from the seed and the node ID, so runs are reproducible. Eac
 
 ## 3. Figures
 
-The figures below are with the final server (§5), the power report on (`efr32fg25-lfn.ini`), no medium log, seed 1 and `taskset -c 2,3`. The PC was shared with other jobs (load average 4–9), and repeated runs vary by about ±10 %.
+The figures below are with the final server (§5), the power report on (`efr32fg25-lfn.ini`, the profile of duty-cycled nodes: `docs/RADIO_INTERFACE.md` §7), no medium log, seed 1 and `taskset -c 2,3`. The PC was shared with other jobs (load average 4–9), and repeated runs vary by about ±10 %.
 
 | Nodes | Load | Virtual s | Wall s per virtual s | Wakes | Wall µs per wake | Server user / sys CPU s | Clients CPU s | Server RSS | Clients PSS |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -98,6 +121,7 @@ For other loads, the wall time is roughly (wakes per node per virtual second) ×
 | --- | --- | --- |
 | Nodes per run | 4096 (IDs 0–4095) | `SIM_MAX_NODES`, `sim_proto.h`; the server's static tables (graph bitmap 2 MB, link table 64 MB of sparse shared memory) are sized for it |
 | Connections | `RLIMIT_NOFILE` hard limit (524 288 here); the server raises its soft limit itself | `increase_limit_fd()` |
+| Server log | one "node N connected" line per node; the per-connection "Connect fd" lines only with `-v` (since 2026-11-09). `--dump` prints the topology and RSSI matrices, N² entries each: `run.sh` adds it only up to 200 nodes (`DUMP=1` or `0` to choose), `run_scale.py` never | |
 | Processes | one per node; `ulimit -u` here is 299 236 | |
 | Command line | about 2000 nodes of a building with `-g` per link (ARG_MAX 2 MB, `E2BIG` at 4000); use `--group-file` | `run_scale.py` uses it |
 | Memory | server: 12 MB at 1000 nodes and 42 MB at 4000; load client: about 115 kB PSS each | |

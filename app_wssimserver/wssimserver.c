@@ -133,7 +133,7 @@ static int bitmap_parse(char *str, uint64_t *out, int size)
     return 0;
 }
 
-// RSSI of the links from the -g options (docs/MEDIUM.md §1, docs/RADIO_INTERFACE.md §8).
+// RSSI of the links from the -g options (docs/MEDIUM.md §2, docs/RADIO_INTERFACE.md §8).
 // The map is directional: sim_link(map, rx, tx) is the power at rx of tx's
 // frames. "A,B:RSSI" (exactly two IDs) is the link A -> B; it also sets B -> A
 // unless a "B,A:RSSI" option gives that direction itself, before or after it:
@@ -310,7 +310,7 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "                            receiver. A,B:RSSI is the link A->B, and also B->A unless an\n");
     fprintf(stream, "                            option B,A:RSSI gives it (asymmetric link); a range or a list\n");
     fprintf(stream, "                            of other than two IDs sets every pair, both directions; the\n");
-    fprintf(stream, "                            later option wins (warning). docs/MEDIUM.md section 1\n");
+    fprintf(stream, "                            later option wins (warning). docs/MEDIUM.md section 2\n");
     fprintf(stream, "  --group-file=FILE         -g options from FILE, one per line, with or without \"-g\"\n");
     fprintf(stream, "                            (blank lines and # comments skipped): for topologies too\n");
     fprintf(stream, "                            large for the command line\n");

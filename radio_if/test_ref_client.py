@@ -179,7 +179,7 @@ def test_determinism():
 
 def test_asymmetric_link():
     """A link given in both directions with different values is asymmetric
-    (docs/MEDIUM.md §1): node 1 hears node 2 at -85 dBm, node 2 hears node 1
+    (docs/MEDIUM.md §2): node 1 hears node 2 at -85 dBm, node 2 hears node 1
     at -70 dBm. A link given once (1-3) is the same both ways."""
     nodes = {1: ["--tx", 2], 2: ["--tx", 10], 3: []}
     r = Run("asymmetric", nodes, [(1, 2, -70), (2, 1, -85), (1, 3, -72)], 1.5)

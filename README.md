@@ -14,13 +14,26 @@
 > this repo uses its POSIX port's run loop and offers in-process nodes
 > (`wsnode-inproc`, `wsbrd-inproc`); see the stack's `docs/ARCHITECTURE.md`.
 >
-> Status (2026-10-27): the first emulator fixes (workspace item EM1) are in:
-> node IDs that no longer depend on the start order, one socket message per
-> frame, correct RSSI indexing up to 4096 nodes, a corrected loss formula with
-> a seeded generator per node, and a clean shutdown. See "Node IDs, frames and
-> losses" below. Sleep/energy states, virtual time and the central medium are
-> still to come. They are tracked in `documents/pre-study/STATUS.md` of
-> [`mesh-emulator-rework`](https://github.com/YannCharbon/mesh-emulator-rework).
+> Status (2026-11-09), tracked in `documents/pre-study/STATUS.md` of
+> [`mesh-emulator-rework`](https://github.com/YannCharbon/mesh-emulator-rework):
+>
+> - **Node IDs, frames, losses** (EM1): IDs from the MAC, any start order, a
+>   seeded loss generator per node, a clean shutdown ("Node IDs, frames and
+>   losses" below).
+> - **Power** (EM2): a charge ledger per node from a user-set profile, with
+>   measured EFR32FG25 profiles (`docs/POWER_MODEL.md`).
+> - **Virtual time** (EM3): reproducible runs, much faster than real time,
+>   with in-process nodes ("Virtual time" below, `docs/VIRTUAL_TIME.md`).
+> - **Central radio medium** (EM4): the server decides reception, collisions,
+>   capture and CCA energy; the default in virtual time; preamble sniffing
+>   (`docs/MEDIUM.md`).
+> - **Other stacks** (EM7): any program can be a node through the
+>   stack-neutral radio interface (`docs/RADIO_INTERFACE.md`).
+> - **Scale**: runs of up to 4000 nodes; a 1000-node building for one virtual
+>   hour with a light load takes about 2 minutes of wall time (`docs/SCALE.md`).
+>
+> Wall-clock mode (`run.sh`, `wshwsim`, the GUI) keeps the behaviour of the
+> original simulator.
 
 ## Compile mbedtls
 
@@ -111,7 +124,7 @@ But the result of `-g 0-2 -g 1-3` will be:
      3
 ```
 
-The `-g` option also supports providing an RSSI value for a specified edge. The format `-g 2,5:-67.0` will create an edge from node 2 to 5 with an RSSI of -67.0 [dBm], and `-g 0-3:-70` gives every pair of nodes 0 to 3 that RSSI. By default, if no value is provided, the RSSI value is `0 [dBm]` to guarantee a very good link quality.
+The `-g` option also supports providing an RSSI value, the received power in dBm. `-g 2,5:-67.0` links nodes 2 and 5 at -67.0 dBm **in both directions**, unless a second option `-g 5,2:RSSI` gives the direction from 5 to 2 its own value (an asymmetric link: `-g 2,5:-67 -g 5,2:-75` is -67 dBm at node 5 and -75 dBm at node 2). `-g 0-3:-70` gives every pair of nodes 0 to 3 that RSSI, both directions. Options apply in order and the later one wins; the server warns when a later option changes a value an earlier one set. By default, if no value is provided, the RSSI value is `0 [dBm]` to guarantee a very good link quality. Before 2026-11-09 the second option overwrote both directions. `--group-file=FILE` reads the options from a file, one per line (`sim_utils/vtime/README.md`, "Topology files"); `-l` prints the RSSI map, one row per receiver. The full rules: `docs/MEDIUM.md` §2.
 
 The RSSI is used within the simulator to calculate a frame transmission error rate at PHY layer. The bit error rate is based on the non-coherent 2-FSK BER formula, and a frame is lost if any of its bits is:
 
