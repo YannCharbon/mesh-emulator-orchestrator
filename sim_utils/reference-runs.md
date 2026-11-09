@@ -7,7 +7,219 @@ repository's `.gitignore`); this file is the committed copy of
 `reference-runs/README.md`. Everything else is reproducible from its commits,
 seed and options: virtual-time runs are deterministic.
 
-## dag_simple_b1b9cc5
+## dag_simple_8c5677e (current)
+
+| | |
+| --- | --- |
+| What | FAN 1.0 `dag_simple` (15 nodes, no LFN), seeds 1–10, 300 virtual seconds each, virtual time, no clock drift, legacy medium (`--medium=legacy`), no TUN device (`TUN=none`), `SETARCH=1` |
+| Stack | `nanostack-generic-standalone` 8c5677e (GS12: a MAC retry after a missing ACK waits for the FHSS hold, then a random backoff in IEEE 802.15.4 SUN units; the stack's `docs/MAC_RETRY.md`) |
+| Emulator | `mesh-emulator-orchestrator` ac0b007 (in-tree `build-vt`) |
+| Made with | `sim_utils/migration/nonreg_dag_simple.sh build-vt $(pwd) none <out>` (emulator branch `gs12`: reference `none` makes the runs without comparing them; the options are those of every comparison) |
+| Size | 274 MB, 783 files (`seed1`–`seed10`, `seed<N>.run` the runs' outputs, `results.txt`, `SHA256SUMS`) |
+| Compare | `sim_utils/migration/nonreg_dag_simple.sh build-vt $(pwd) /home/yann/mesh-emulator-rework/reference-runs/dag_simple_8c5677e`, as for the previous runs below; exit status 1 on any difference |
+| Regenerate | check out the two commits above, build `build-vt` (`docs/VIRTUAL_TIME.md` §2), then the command above; the logs must match the checksums below |
+
+Why new runs: GS12 changes the timing of every MAC retry of an FFN, so the
+FAN 1.0 logs differ from the previous reference from the first retry on (all
+10 seeds). A build of stack 8c5677e with `-DNANOSTACK_MAC_RETRY_SUN_BACKOFF=OFF`
+still gives logs identical to `dag_simple_b1b9cc5` (10 of 10 seeds), so the
+change is the retry backoff alone.
+
+**Statistically equivalent to `dag_simple_b1b9cc5`** on the join milestones
+(10 seeds each, every router pooled, first 295 s, Mann-Whitney U test):
+
+| Milestone | Routers that reached it (old / new) | Median, s (old / new) | p |
+| --- | --- | --- | --- |
+| parent selected | 138 / 135 | 92.2 / 94.0 | 0.90 |
+| authentication done | 136 / 135 | 96.7 / 97.8 | 0.75 |
+| operational | 135 / 132 | 103.2 / 106.0 | 0.69 |
+| ready (`ARM_NWK_BOOTSTRAP_READY`) | 129 / 127 | 146.9 / 149.5 | 0.57 |
+
+Routers ready by 295 s per seed: old 12–14 (median 13), new 12–14 (median
+13). `sim_utils/migration/analyze.py` gives the per-node tables and the
+message-type histograms: the frequent message types differ by at most 7 %
+in count per run; 5 rare ones (under one per run) appear in one group only.
+
+### Checksums
+
+`SHA256SUMS` in the run's directory lists every file (sha256 of the list
+itself: `7eae876e95cd6d77beacf5f69347b40e5ec9de7b046c7caf261802d0d344ffb1`; `sha256sum -c SHA256SUMS` from that directory). The files
+`compare_logs.py` reads:
+
+```
+5cc190b3e61373c608296c08425f0eca905581bc273ec2b376de75b8f2338969  ./seed1/br.log
+9deed1c6f25cfbed5efd38104aa808016fe39c73b1ff264dc6378eddf7eb3de4  ./seed1/exit_codes.txt
+55ac436dc57cea6a5f727ccb61dda9f899e818a639ad5b0b999494a3039f4da2  ./seed1/log_wsbr
+2574aafe877d7c4b2b7fdcd9026afb967604925e2111a207305846f7707d811b  ./seed1/node1.log
+d3c3373472e0a6bc91a0db8471c75ddeeb058910d90c530d60d2d8838d7fa92f  ./seed1/node2.log
+0e1df4cd53ad7af9ace5ec16c547d88f66918ba4d59735b1aa84b9222f1ca41c  ./seed1/node3.log
+fb062f14bd07106685538d2ddca11aaa95d2b6ed91eb87571741bf7973f3830c  ./seed1/node4.log
+7d8e6aeaee51b66a7b5d307f63bae7ab4e323358a42a2559024b6370dfa0783a  ./seed1/node5.log
+35d99e10cba12b26ad97c3438222ccd43f45e43eb49435102a9dc4dc86611228  ./seed1/node6.log
+e7dd51c3e29ee87c59ec0decba9d3510f37777f72d17499a25001e2e1e28e8da  ./seed1/node7.log
+9350fb901c31e945239123e2cb68a79684e49e1fb370af1a746f5f5e22a6eb92  ./seed1/node8.log
+22aeea9f0e09a30d99ebe9682a825a63ba96d239668ea04b6058000484378459  ./seed1/node9.log
+ed470c3b385ff6b116e464c9d3a1d29c153a7ae6e519618d4cd344ae715bab5a  ./seed1/node10.log
+16d449adb65e4067e42000cf83291d49bfabf3d73148ecf04dd7d0ab5eacc058  ./seed1/node11.log
+4986cb43fdca748f64a131a9ace9745676bc57319f7347db0f9fd5405776d858  ./seed1/node12.log
+01251cac9a42eb6d2595c2f4d7365c90cca74ce5de8e4f052623641fe0cb36d9  ./seed1/node13.log
+85a44cc30e352fda7ee3d170cd60c2e395624819372fa360d4df3eec05b87058  ./seed1/node14.log
+3511c0540babcab9466d72bac3d67e9a97e73150e8d1591bd3b0c9262e69a319  ./seed2/br.log
+9deed1c6f25cfbed5efd38104aa808016fe39c73b1ff264dc6378eddf7eb3de4  ./seed2/exit_codes.txt
+bb2be27f09d4b36629a2457d6523277d9224725b6a188b88bc59ff4d3798b1ba  ./seed2/log_wsbr
+bcdde6c5a26872458255dab7f1d5e34cb577f7f15b4e178284d5124692d20485  ./seed2/node1.log
+eb1b7d4aa903ee74fc4a747527b1fe349225b6ce35340b895d5aa32adb3011ce  ./seed2/node2.log
+40067f9179605eaeb4cdaba4467e24ad567ca3695c93c0e030be37a9ede4c09a  ./seed2/node3.log
+2c658e777cbbc4331a72fda1dd258b49116f78bb9193f92b1cc5913f8c38b3df  ./seed2/node4.log
+852a40f72d449d70e9e74a70a7d943ac79d691ab1dc66a3f60ef19e5cb480c48  ./seed2/node5.log
+784a2c27dca80e02928bf46221aa091ca0b0356f98927904a30a302006f1212f  ./seed2/node6.log
+2f5793ccae8d731185c8c389c80ab43966c6bac59dce02535fc96c4471d61aeb  ./seed2/node7.log
+83f70ad2f1250639c737e2064e0ea629bfd053eb615383ed8e5198e6bf5a2092  ./seed2/node8.log
+08350f24f0c18621aa0aedfe4547e6eb3cef53681663f0db82189df4f452b746  ./seed2/node9.log
+b870fbd7eb99485249d99fc490d9e8f05291561d6d2e4c1492cef833e6f7b4f3  ./seed2/node10.log
+960953889c6aad2054ec17b8bbe462b53c2d637519d1c5df0beb83609e7e7df2  ./seed2/node11.log
+ae0369242102945c9f48579377d8c4c436f59106231647c6c0d30adaf74a6923  ./seed2/node12.log
+6d3e94fa79e5c4d71bc5f1173ea31cc25f241511a76a57e15ca0f88d8440e466  ./seed2/node13.log
+f542abaf8258102e5d851f3c8ab2589d773ee9d51b6675f2c3d77dd2afef7082  ./seed2/node14.log
+8b17a4cac02634b446b32f53687222dc6bef5650fbe893d96e17ed4d978e648c  ./seed3/br.log
+9deed1c6f25cfbed5efd38104aa808016fe39c73b1ff264dc6378eddf7eb3de4  ./seed3/exit_codes.txt
+d49b893427dcec42733c2d1138bb132bb18548acb478d82839a44fb6c13a914a  ./seed3/log_wsbr
+6134b3dd7505b37ccf888a451fe7ca66d688027e7ae5f14dfe90372cc6c7b8f3  ./seed3/node1.log
+434c1b59321d561ea91580f4091b818d232b3795e82ad14d5c3ae82f5ea2b935  ./seed3/node2.log
+232285df01c53ade73352b2655967b3eff3a513c4715d3e7e1559527a4ff6628  ./seed3/node3.log
+867d24b7471d1a40701192a0108107354888bdfff87251f4f5a549d3495c84d3  ./seed3/node4.log
+cee09967eddfda466ee8ed38942001f98e12cf069f4993c376b1bd611279131e  ./seed3/node5.log
+aba7250f71b960a6e6195492901d501a168e19ad7cfcf742bb4a688a4a163496  ./seed3/node6.log
+ae071460ec32c0b3071f9635276a54ad1b5186972f43a0ee0df522130d31346c  ./seed3/node7.log
+5e3677be33dba0819e46ec11aad054a6949fc62aa5cf7b31acedb0334e98c2ee  ./seed3/node8.log
+2c0586887d957ff62e3f8de9698676b9c712bf3aa58d8a9497c7c585f32a1c3b  ./seed3/node9.log
+57b1dfa1096f72d893932965d9d2d496ef53200e760f8bab112623bf1f02cace  ./seed3/node10.log
+4ccbef295bb7d0442a66d1812b1d75b1f5a058909915c2226b355629a2141c0b  ./seed3/node11.log
+4eb5f78d8922b8114938fa8d5b19b58593dcc9c2abef421eef36f535cf4f249f  ./seed3/node12.log
+d0e524c6ecba8ff897e0f552b2ec8bc889f32e4c4dee9d4e72fd5feb8b68af21  ./seed3/node13.log
+eb22ae0efdaee407f3f671709aec8d81dc1eb691f4dcb1dcf56e45f5f40faa9f  ./seed3/node14.log
+be0423284699ef2639144d35d6a67bb53ce1bd22dd6eea73e87d0ce7ebce7587  ./seed4/br.log
+9deed1c6f25cfbed5efd38104aa808016fe39c73b1ff264dc6378eddf7eb3de4  ./seed4/exit_codes.txt
+c258848942b3d6e4d9a6af03393fbd9edf8a1f8dd04628078b44c0fba248081a  ./seed4/log_wsbr
+7acbf4b7e7663f09a9543abd34bfcc965eb3397d8b65cc140f7c53b3f5d31ec9  ./seed4/node1.log
+a6753e6df3b377a52d53f4d72b75189cd1533da6d99cac91d431e73e4340eac5  ./seed4/node2.log
+71ea5dcfb7018d21b9fffa1a904183898edc36a640a3d77bcf874c25601889a0  ./seed4/node3.log
+dbdbd86318aba709d0d5c616875b220a520ba0232093ca333c29c6622ac3a8fe  ./seed4/node4.log
+29597a0f3d962d49b061d69d75afc1ea56db9f21dcb26b91bf976f1106754a09  ./seed4/node5.log
+224101b0b3d0f122b784e49125e697d353a0701d02d0dacd5da128944481ae9e  ./seed4/node6.log
+b78797f124dd82c517df916664e29d66b93b59f1257661a8a03b2e66feffb592  ./seed4/node7.log
+6f6f077879a5369af674644286871f3f849f8ed64d07d70a7c98ffed1677fa81  ./seed4/node8.log
+d507f69ceeeb99da4bb6ff540c5909d1e8e69456c966606d9defafc432126b67  ./seed4/node9.log
+49cd2d2e5887da9a03d35a9c5f596f8ede2aa4f7572e353d1d3705e39338cfbb  ./seed4/node10.log
+551cf87dd136b977360033b430844f6815b705fdbb936fe5089f98d9ea23ba59  ./seed4/node11.log
+ed57c14a07af85d4820cf90da4a53f69dd3893dd383d9e5fb387b61667fe6a7b  ./seed4/node12.log
+c9a345f3901ace5ee8bce141da883c94fb4808a831603a4f4a9fdb58707dfc20  ./seed4/node13.log
+f4a90e3b3533572f82fc035272920b71aea2e4a9311afda7c95f5b8c8b2c1de5  ./seed4/node14.log
+3aa923d9b2b504d86c5b711598ef754658834a541b3a4d05120d802be1193ba5  ./seed5/br.log
+9deed1c6f25cfbed5efd38104aa808016fe39c73b1ff264dc6378eddf7eb3de4  ./seed5/exit_codes.txt
+6cc84be9f85bb19419aede19bcd179338752a0f3f8a8bc90c3dc6a64315f142a  ./seed5/log_wsbr
+1a784e3115e62575449a51f227ba8f46738d8c9b8e4317385dbda4c193275c40  ./seed5/node1.log
+9996006e0253bcd31e22f7f02a81b9a45086eca628632dcaa8e844625afa7b2c  ./seed5/node2.log
+5546e74f081eafe4d70731a59baffc428986f0658f75e4ecda6c74ca0135f01c  ./seed5/node3.log
+912fde8bc100597e849d2d376352670986a9793c5a58eed6b7286063df0c7110  ./seed5/node4.log
+89e85238f98a71264a296423f84649227b1894b20702f8eeecabe5ba1f9eda03  ./seed5/node5.log
+ef850e9c312e1cb1f77812fd31d8f22397b99f8750b8cd4a633d96a0b932be3b  ./seed5/node6.log
+7c55723658c1221f54af18a2c35e17412d5b8183ec1bc4e63ffdcd3c90154dc8  ./seed5/node7.log
+1b87ba45f305400128b5ee44ad0e29c4b105666db13a7bf04676154f3e7333cb  ./seed5/node8.log
+f0202506b32bbc6b52e978b8ff1e7a38f2b47bae84da881529286fd211bb0929  ./seed5/node9.log
+9afbe6d4a86d6b3c26b386c298ceeed540bcbca8893cdded1bab85f9921bfcd9  ./seed5/node10.log
+21b7feab8addd6ea1d576628379061582d7e0de7200920f6eb991efd01613d31  ./seed5/node11.log
+8663c2e16082bc74a230e25555e04fe385a9845192bb3367607ea6ab044d9ea7  ./seed5/node12.log
+256c6b6e1d72da3415b93d1b45619ccddb2b9c71f5c742fb65096dcfbac4fbfd  ./seed5/node13.log
+b5541d2469ea48b89a7e1fe6e1b0f96029c29a9e109bfe17d13fed0ea22f9454  ./seed5/node14.log
+ceae947e11fca7ee2ed5cad58a4e3bae8321c8d223b0af7130724a5f45499263  ./seed6/br.log
+9deed1c6f25cfbed5efd38104aa808016fe39c73b1ff264dc6378eddf7eb3de4  ./seed6/exit_codes.txt
+6924f5abf997450daf3c58017627416a41dc81ebc2c1514b042051692eec315e  ./seed6/log_wsbr
+cc224fa3bccf3c7e26f0d84f57c59f0959508b9b53beb83b3ca1225156114642  ./seed6/node1.log
+90812b96a62cce6ced55368ae4b5e6c93fbe41cfcf7ce67148eff652aea89860  ./seed6/node2.log
+6444e71185eb0b0b4bda0b8b1d67a875a5f05fd3f3fdb7e2d9c7bf663c807ada  ./seed6/node3.log
+615673239eb73461c5d30c397b33b69a239540ad83949765a32e3617106ae8f1  ./seed6/node4.log
+20fb419523d386e93d7cc44b64438598c5b911bc5ab1695322c5a8ce9f0964e6  ./seed6/node5.log
+bd36325641eab4b089cdc488ab2fb4e4d6238ab3a16efe0b55a5d169ac7c02bb  ./seed6/node6.log
+181f0bb635564fb2ca827283bf2f649330b4022e7976e53f1b1a7adb41f2bd76  ./seed6/node7.log
+dc41d9e3be1b87b11ff2146f1b6fadd70218c229bbd4f55ee0720b442faf1626  ./seed6/node8.log
+2e420bf067374c85e3163dde6b6babe9549c5616096d7e56227dca7f91905fcd  ./seed6/node9.log
+28bcea989132e708f7bfff6ad2cfcf8e659694b7bd055e1e6db03692cf2f90f5  ./seed6/node10.log
+7f7c3ae86568641db991f36c42104723588abb56b10296c0e72151146b737ca7  ./seed6/node11.log
+176023c318b7fd414aa29524e4a1b1998072524af9b9e38add2562aa613d59ff  ./seed6/node12.log
+dd601ffebad1439f8431c3fc558bfd3576693839fde15139ce4cd00c15a6febd  ./seed6/node13.log
+dbb303ab998ec616c96a99b310677ef20d6b24f41b1a6831313dd3de99e65c99  ./seed6/node14.log
+35abc8146186179b3c336a6d2f0b5c404451a21ccd1f1834f3961ce39a4663a3  ./seed7/br.log
+9deed1c6f25cfbed5efd38104aa808016fe39c73b1ff264dc6378eddf7eb3de4  ./seed7/exit_codes.txt
+931bc4e2511a9af757772c402ed06971560cf661e129c09dfcefb39314304588  ./seed7/log_wsbr
+53cafd063a73930b52575af7a94f48bf50bccc7e2037f0aba52320d43cf3ac4b  ./seed7/node1.log
+c836e555899138b5b2a4da1c411a2133e5e1797fc86d0f18b3bf4aaee2dff2a8  ./seed7/node2.log
+a1df361c4af3a2ba8338760903e967df908d6188d061f1670908c38a626a0ac1  ./seed7/node3.log
+41eed3138327ddb1209b4097e273692b04273d704b17a46361e85acf57c89f59  ./seed7/node4.log
+dec170dd8a245e43d23dd3315f348810fb40a3a97d556412ccee6d46f74343e2  ./seed7/node5.log
+2eeb1064bcb0b8057ccf0bc1165a9275eece90154e2457ffbdaf053c954f74ce  ./seed7/node6.log
+94c15983610f9df1b0c9a0fee570c0291f4018a7dc3b82e40d2651ce64e1e411  ./seed7/node7.log
+aee230358f5fe20fc8a20b9abaabb9c61b033de5a2ff154db36f54c5617a554c  ./seed7/node8.log
+6a3edb5c456c112606da43d597c98c285124ff64ee2432ab9efa28a9eb429b84  ./seed7/node9.log
+2ef0a30accb0dacd417e626ac06a79f6e8dc6ac7e5867236b5f1a01096248e42  ./seed7/node10.log
+0d002905abb5b2f8ebbd8bb6a93d127b8d21c14891bd0ae2b2f4061765324bcf  ./seed7/node11.log
+30b8f5b15cc60c7f34ec1d02083cd38b42a628b54c7a193271823fff9c732aa3  ./seed7/node12.log
+3e38f422471eddf57085e07392452b3721b0652132af83972cd0cdba3442ee29  ./seed7/node13.log
+61a43d013c767784ebf65623bb445ec262506ebe7c245e70037cb73d65934bb4  ./seed7/node14.log
+4e89f27d0f686639155b555c790c86f38551e3e52a1ff7f7f3a5125cdda4aafe  ./seed8/br.log
+9deed1c6f25cfbed5efd38104aa808016fe39c73b1ff264dc6378eddf7eb3de4  ./seed8/exit_codes.txt
+63d0867c9bc115d79c013a1244594048bcc12aaea73575034b5a03738f7605b8  ./seed8/log_wsbr
+ec3de8ab697944728a78301f917f9f3e931ab13119ed280d6e7ad17ada281d16  ./seed8/node1.log
+29352aa4545375a7cd36a70215f8cd72ab50253a4cd08537ec67424c9db34639  ./seed8/node2.log
+8d5e701af5666a943d7cb2968e9e3048c11f4a8f63018d2553b54f220cecd6a6  ./seed8/node3.log
+39b70c9c4f6a29031de5096030dd91c5c9840264b32a74982d10f071cd40a0c6  ./seed8/node4.log
+9a440690c453991ccb6654fa6f39fcc13ab821dbbb418726608a5c21124edd51  ./seed8/node5.log
+eee9fabe8e3768e6a29024a89fbf36a25ac5db3f398c337f6d8d8897d670606f  ./seed8/node6.log
+94846857dce9dd9f8e16d867a0d3867b5a534002e3122e5536e78630b56d611a  ./seed8/node7.log
+e1dfce143510deeb3232d7c91706992c6498da7de30e531f2b4c11c13e1b0a88  ./seed8/node8.log
+1f9e563e3b792db25ecaa3c39562e11cd72856dc239f9890656e695ed11ce91c  ./seed8/node9.log
+c21eaa95edead042fd35c67ad2fafb8d5c0ba584076760733c290160b4673385  ./seed8/node10.log
+0dad881923b625ed589d2dbe1bc6472a5e98fc7509b68112138dd8cfb1e75d21  ./seed8/node11.log
+b65812555869405f12bc30a5bf3b798e687cfeb15f64e2896ad00deee5023baf  ./seed8/node12.log
+e20a0b9c71897668c3e1a5a827fc8863718510e2f47180e81ed116d41d6d7ae2  ./seed8/node13.log
+e2a8e8387643ba6522291defd4ee2b05fd1ff8acf64478446b50c7be8eae99b9  ./seed8/node14.log
+b62c7990ac434b379849095415abbac9f8470702356ceb5734d6d4a3d7ed8ca0  ./seed9/br.log
+9deed1c6f25cfbed5efd38104aa808016fe39c73b1ff264dc6378eddf7eb3de4  ./seed9/exit_codes.txt
+2c3472676943a799f5cc5f3d5a02d38e185ae8c0d39ce7318a29f07b818776a0  ./seed9/log_wsbr
+a9e2705a6ec8dffb6e42deb15e479b168e0bc13cc9b6319319aef271b656b083  ./seed9/node1.log
+e888c7bffecb594197c3483cc832033a3c743ca93cb99025875f54dc11ba033d  ./seed9/node2.log
+c2104b89b142f28f648fae13abf87da7b774a93a3f7ffe85ea973041ec055d93  ./seed9/node3.log
+f04933e216f4ae0a609e85920b2dbd60ef6dd7a4b7ac77fc9b12f0f4e572f494  ./seed9/node4.log
+b8e763d577cd256d6cebda828d0019beebf9239ab965704361aebb2f250e940e  ./seed9/node5.log
+6caa14c9376856b169a7c445f5389bab1c2798e27de5e03e822e199ed7bf2021  ./seed9/node6.log
+05e92945dd7c4886886bbae61453c29a9a6916ad0a295f323e9d073ecc0ed3f6  ./seed9/node7.log
+3102d81106655dd57eae8fc0e64ce45631005725fda87aa41bdfb098db72242f  ./seed9/node8.log
+69475ee49bae0ac3159d7544e567cabd77130301b86ac174c981df2655bc9bb1  ./seed9/node9.log
+0c2b5e25dd1a093bfdc1633d38c2dfdf2d43378b0847757604f2ae849a325b38  ./seed9/node10.log
+34df1f2df00ed19920688257bc2ad5cb4412d2579510338933579061fe98f091  ./seed9/node11.log
+94ee03b781a664b68d8f85018a1615ed6137f20188f4fb737e5c4695d8f20d0e  ./seed9/node12.log
+3bbe5ce2a94b13b381adb3622ecbfefcbe261dced4f55fd29f74a9ad0f2079d8  ./seed9/node13.log
+eea24285942fee434a28e4c46834845464159fc9c3e735e52450aab0fbb25ff0  ./seed9/node14.log
+63c60357c8065aae87ba5290b335d680924e522c7bbd49fdc4722afc9439c748  ./seed10/br.log
+9deed1c6f25cfbed5efd38104aa808016fe39c73b1ff264dc6378eddf7eb3de4  ./seed10/exit_codes.txt
+2d50b01df68f135f6955c319f3ef6cf6854a6d0bee427817596f2e9f325cf59a  ./seed10/log_wsbr
+f00b82cff9d344d637aeab9bfa6abfe9a154379426b0cfd8e579e07567510ff9  ./seed10/node1.log
+27582fd4ee786b58d3b5595246710cc2ac8633fc84277bcac03b0a3b9e923e0e  ./seed10/node2.log
+a4af16ddd8db756a7bbb7dada7d080fe578de0e8b1dfbdc43bd5ad8868ba389c  ./seed10/node3.log
+6aa2058119a575964546e52a908f79140b87bc9cf8df9622e4c3ad9002de85bd  ./seed10/node4.log
+c5b93140457cda626ee20bdc371db5dc6f9a34c4e1d07c6b9b4ac90fd5575454  ./seed10/node5.log
+da454e569632b85d622b4978a422a362944a7afe389d9a49572c90513008b686  ./seed10/node6.log
+6f736e1a4778555f59524463347f890f96d19aa4eec46fd5b337d89881066175  ./seed10/node7.log
+cd7fe0297561d629d28bee282369385c940eddef965470dfb3d4a85951fa3a5d  ./seed10/node8.log
+acaebcd6414133a8040c356f4e89d0dc0a2968b99175b032ddd56afe953cc563  ./seed10/node9.log
+dadbcef3ff8b509de6933083f649d3047e0d10c3662d75e64d0b0a004b8d09b2  ./seed10/node10.log
+17fc586996547060756b15f280c6ad4db805d88cc077962a4b1c0d3772144784  ./seed10/node11.log
+f93a5622ed44963d20e731ab4b918eff23d7dc3fcd75dd50a6d4397a03b15bae  ./seed10/node12.log
+f88bdd6eed3a530de1b2c653b5d3a53851ed8399d115d3e1c073760d38d87443  ./seed10/node13.log
+a690f4424794ff02eacc78dcde18e9b1f570dc603118fe2a5851c794964ac6f7  ./seed10/node14.log
+```
+
+## dag_simple_b1b9cc5 (before stack 8c5677e)
 
 | | |
 | --- | --- |
@@ -19,9 +231,9 @@ seed and options: virtual-time runs are deterministic.
 | Compare | `sim_utils/migration/nonreg_dag_simple.sh build-vt $(pwd) /home/yann/mesh-emulator-rework/reference-runs/dag_simple_b1b9cc5`: the same 10 seeds × 300 s with the current build and the legacy medium (`--medium=legacy`: the central medium, the default in virtual time since EM4, postdates these runs), each compared with `sim_utils/vtime/compare_logs.py --mask-pointers --mask-source-lines`; exit status 1 on any difference. With `TUN=none` (the default) the logs are identical to these, made on `tunvt0`: only printed heap addresses differ, which the masking hides |
 | Regenerate | check out the two commits above, build `build-vt` (`docs/VIRTUAL_TIME.md` §2), then the campaign above; the logs must match the checksums below |
 
-The FAN 1.0 logs have been identical to these at every stack and emulator
-commit since (no LFN code runs without an LFN role), which is what the
-comparison checks.
+The FAN 1.0 logs were identical to these at every stack and emulator commit
+up to stack 8c5677e (no LFN code runs without an LFN role), and still are
+with a build of a later stack with `-DNANOSTACK_MAC_RETRY_SUN_BACKOFF=OFF`.
 
 ### Checksums
 
