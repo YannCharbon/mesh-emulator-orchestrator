@@ -35,5 +35,9 @@ void pwr_radio(int node, uint64_t t, const struct sim_radio_report *r);
 void pwr_wake_report(int node, const struct nsim_wake *w);
 void pwr_idle(int node, uint64_t t, uint64_t next_us);     // "xi"
 void pwr_finish(uint64_t t_end_us, uint64_t seed);
+// The node's CCA duration in µs (its profile's cca_us, for its --power-mode
+// or the common value), rounded; 0 without power recording. Sent in a radio
+// interface client's welcome (docs/RADIO_INTERFACE.md §4.3)
+uint32_t pwr_cca_us(int node);
 
 #endif

@@ -87,7 +87,7 @@ The client never waits for anything other than the server. It must not sleep, po
 | 4 | 4 | flags | `POWER` (0x0001): the server records power, so the client may send `"xc"` (§7). `MEDIUM` (0x0002): the central medium decides reception; always set for clients of this interface. `SNIFF` (0x0004): the server serves preamble sniffing for this client, `"xn"` and `"xl"` (§6.7); set only for version 2 or later. Ignore unknown bits |
 | 8 | 8 | seed | the run's base seed (§6.4) |
 | 16 | 4 | drift_ppb | the node's clock error, signed (§6.3) |
-| 20 | 4 | reserved | |
+| 20 | 4 | cca_us | the node's CCA duration in µs, `uint32`: its power profile's `cca_us` (§6.6, §7), for the PHY mode set with `--power-mode` or else the profile's common value; 0 when the server records no power. Sent to clients of this interface only. Servers before 2026-11-09 sent 0 (reserved) |
 | 24 | 8 | start_us | the virtual time of the node's start (power-up); 0 for a node that starts with the run |
 
 The welcome is also the first wake: the node's current time is `start_us`.
@@ -310,7 +310,7 @@ A receive window that closes while a frame is being received normally waits for 
 
 The client sends `"xs"` with a channel and receives the energy at its antenna on that channel at the current time: the noise floor (−119.93 dBm) plus every frame on air on that channel from the node's neighbours, in dBm. The node's own frame is excluded. The client compares the energy with its own threshold; the server has no threshold. A CCA takes no virtual time. For the power report, the client then sends `"xr"` with its current state and the `CCA` event, and the server charges the profile's CCA duration (`cca_us`) at the end of the listening before it.
 
-A CCA needs the receiver on: report `LISTEN` on the channel at least the CCA duration before the query (a radio needs that time anyway). The server answers a query whatever the reported state, and the power report cuts the CCA to the length of the interval before it, so a receiver turned on in the same wake as the query charges no CCA time.
+A CCA needs the receiver on: report `LISTEN` on the channel at least the CCA duration before the query (a radio needs that time anyway). The CCA duration is the welcome's `cca_us` (§4.3): the power profile's value, 160 µs in both FG25 profiles for the common values (8 symbols at 50 ksym/s) and 53 µs for EU mode 3 (`cca_us@3`). It follows the PHY mode the client reports (§7): a client that reports a mode with its own value (`phy_mode` 5 for mode 3) is charged that value, which the welcome gives only if `--power-mode` selects that mode, so such a client takes it from the profile. With `cca_us` = 0 (no power recording) the client uses its own radio's figure; the duration then only matters for its own timing. The server answers a query whatever the reported state, and the power report cuts the CCA to the length of the interval before it, so a receiver turned on in the same wake as the query charges no CCA time.
 
 ### 6.7 Preamble sniffing (version 2)
 
@@ -361,9 +361,18 @@ With `--power=PROFILE` the server keeps a charge ledger per node and writes `pow
 - **Radio:** the states of the `"xr"` reports and those a sniff implies (§6.7), each charged with the profile's current for that state (`TX` per `tx_dbm`), the transitions between them, and the CCA events.
 - **MCU:** a wake starts at each `"xa"` (and at the welcome) and ends at the next `"xi"`. Its active time is modelled from the profile's cycle counts: a fixed cost per wake, plus a cost per frame delivered, per frame received (`RECEIVE` reports) and sent (`TX` reports), per unit of work and per timer expiry of each cause given in `"xc"`. The rest of the interval until the next wake is sleep. The sleep is deep when the radio is `OFF` (or `IDLE`, if the profile says an idle radio does not keep the fast clock) and the idle time is long enough to make deep sleep cheaper; otherwise it is light sleep.
 - **`"xc"` is optional.** Without it each wake costs the fixed cost plus its frames.
-- **`phy_mode`:** with 0, the profile's common values apply; a profile may hold values per Wi-SUN FSK PHY mode (1 = mode 1a … 8 = mode 5, `docs/POWER_MODEL.md` §6.2), selected when the client reports the mode it runs.
+- **`phy_mode`:** with 0, the profile's common values apply; a profile may hold values per Wi-SUN FSK PHY mode (`docs/POWER_MODEL.md` §6.2), selected when the client reports the mode it runs. The numbers are those of 2-FSK with bit rate and modulation index h: 1 = mode 1a (50 kbit/s, h = 0.5), 2 = 1b (50 kbit/s, h = 1), 3 = 2a (100 kbit/s, h = 0.5), 4 = 2b (100 kbit/s, h = 1), 5 = mode 3 (150 kbit/s, h = 0.5), 6 = 4a (200 kbit/s, h = 0.5), 7 = 4b (200 kbit/s, h = 1), 8 = mode 5 (300 kbit/s, h = 0.5).
 
 Every current, time and cycle count is in the profile, which the user chooses (`examples/power/*.ini`); the client does not send currents.
+
+**Which profile and `phy_mode` for a stack that is not Wi-SUN.** The ledger knows nothing of the protocol: it charges radio states, transitions, CCAs and wakes, so a profile describes the hardware and how its firmware drives the radio, not Wi-SUN. The two measured profiles are of the EFR32FG25 SoC with its radio driven by RAIL:
+
+| The node | Profile | Why |
+| --- | --- | --- |
+| Battery node that turns its receiver on in short windows or sniffs and sleeps in between (a duty-cycled leaf or router) | `examples/power/efr32fg25-lfn.ini` | Measured on our low-power (LFN) firmware: RX plateau 4.32 mA above EM1, EM2 floor 7.0 µA, wake from EM2 260 µs, and a fixed cost of about 7.35 µC per receive window beyond the listening itself (mostly the `listen_off` transition, 1000 µs at 6.56 mA, charged at each radio-off; the rest is the wake and the cycles). That fixed cost is mostly RAIL, the power manager and interrupts, not the Wi-SUN stack (`docs/POWER_MODEL.md` §12.9), so it applies to any stack that opens windows through RAIL in the same way. "LFN only" in that document means "not for Wi-SUN routers"; it is the profile for duty-cycled nodes of any stack |
+| Node whose receiver is on most of the time (a mains-powered relay or gateway) | `examples/power/efr32fg25-soc.ini` | Measured on our always-listening Wi-SUN router (HW5): the MCU stays in EM1 at 97.5 MHz while the radio listens, RX 6.0 mA above EM1 |
+
+Both are FG25 figures: another radio or MCU needs its own profile (copy one and edit it, `docs/POWER_MODEL.md` §6.1; `--power-node=IDS:PROFILE` gives a profile per node). Report `phy_mode` = the number above whose bit rate and modulation index match the client's PHY, else 0. With 0 a node gets the profile's common values, which for both FG25 profiles are EU mode 1a (50 kbit/s): a client that sends at 150 kbit/s with h = 0.5 reports 5 and gets the mode-3 TX currents, CCA time (53 µs) and TX cycles. The currents of listening and receiving do not depend on the mode in these profiles.
 
 ## 8. What the medium decides and what the client decides
 
@@ -379,7 +388,7 @@ Every current, time and cycle count is in the profile, which the user chooses (`
 | The CCA energy | |
 | Whether a sniff detects a frame, when, and whether it locks onto it (`docs/MEDIUM.md` §10) | When to sniff, for how long, on which channel, and the wake-up preamble of its frames |
 
-Links are directional and given in dBm. A link without a value (`-g A,B` alone) is a perfect link at 0 dBm, which destroys any frame it overlaps; give values when collisions matter. Without any `-g` option every node hears every other one, at 0 dBm.
+Links are given in dBm, the received power at the receiver. Their values are directional and default to symmetric: `-g A,B:RSSI` is the power at B of A's frames and, unless a `-g B,A:RSSI` option gives the other direction, also at A of B's frames. So a link given once is the same both ways, and giving the reverse direction too makes it asymmetric (`-g 1,2:-70 -g 2,1:-80`: node 2 hears node 1 at −70 dBm, node 1 hears node 2 at −80 dBm). A range or a list of other than two IDs (`-g 0-3:-70`) sets every pair, both directions. Options apply in order, the later one wins, and the server's log warns when a later option changes a value an earlier one set. Who hears whom stays symmetric: a one-way link is a reverse value too weak to be received. The full rules are in `docs/MEDIUM.md` §2. A link without a value (`-g A,B` alone) is a perfect link at 0 dBm, which destroys any frame it overlaps; give values when collisions matter. Without any `-g` option every node hears every other one, at 0 dBm.
 
 ## 9. Errors
 
@@ -416,6 +425,26 @@ WSSIM_SEED=1 build-vt/wssimserver --vtime=3 --vtime-end=60 \
 for n in 1 2 3; do my_client --sock /tmp/radio_sock --id $n & done
 wait
 ```
+
+The profile is the one for duty-cycled nodes (§7, "Which profile"). `sim_utils/vtime/run.sh` does the same with `IF_NODES` (below) and writes `simserver.log`, `if<i>.log`, `run_info.txt` and, with `POWER`, `power.json`; with node 0 among the clients the run has no Nanostack program and needs no `examples/` directory.
+
+**Topologies in a file.** `--group-file=FILE` reads the `-g` options from a file, one per line: `A,B:RSSI`, `A,B` or a group such as `0-3:RSSI`, with or without a leading `-g` (or `--group=`); blank lines and `#` comments (whole line or end of line) are skipped, and a malformed line stops the server with its file name and line number. It has no size limit, unlike the command line (about 2000 nodes of a building, `docs/SCALE.md` §4). `run.sh`'s `TOPO=` file has the same format (`sim_utils/vtime/README.md`, "Topology files"). `radio_if/scale/gen_building.py` writes such a file for a multi-floor building from a path-loss model (`docs/SCALE.md` §2):
+
+```
+# topology.txt: the link 0-1 the same in both directions, 0-2 asymmetric
+0,1:-71.7
+0,2:-85.1
+2,0:-88.0      # node 0 hears node 2 at -88.0 dBm, node 2 hears node 0 at -85.1
+-g 1,2:-79.5   # a leading -g is accepted
+```
+
+**Node logs.** The server does not read a client's output; `run.sh` writes it to `if<i>.log`. The controller of the mesh test bench (repository `mesh-testbed-controller`) reads these logs: it takes the **first word of each line as the virtual time in µs** since the start of the run (a decimal integer, the `now_us` of the wake that printed it), and a line that holds `MOP1 ` followed by one JSON object to the end of the line as an observation in its Mesh Observation Protocol, for example:
+
+```
+97803200 MOP1 {"mop":1,"type":"report","seq":12,"t_ms":97803,"node":{"id":4,"state":"operational"},"counters":{"tx":31}}
+```
+
+Text may come between the time and `MOP1 ` (the reference client prints its node ID there). The JSON is specified in that repository's `docs/STACK_NEUTRAL_MODEL.md` (§3 for the messages, §3.1 for the text-line form, §6.1 for clients of this interface). Other lines are free text.
 
 Useful server options (all in `wssimserver --help`): `--vtime-end`, `-g` (topology and link values), `--vtime-link`, `--vtime-cut`, `--vtime-kill`, `--vtime-start`, `--vtime-power-up`, `--drift`, `--drift-random`, `--medium-*` (thresholds, the per-frame log, §8), `--sniff-*` (the detection model and the per-sniff log, §6.7), `--power*`, `--vtime-frames` (every frame sent, with its PSDU in hex). `--vtime-drop` reads the PSDU as an IEEE 802.15.4 frame (its sequence number) and is meaningful only for such frames. `--power` cannot be combined with `--vtime-kill` or `--vtime-start`.
 
@@ -477,6 +506,8 @@ loop:
 | `tx_rules` | Frames outside `TX` and overlapping frames are not sent and are counted; leaving `TX` while the frame is on air is counted |
 | `sniff_version` | A version-2 welcome has `SNIFF` and the server answers its `"xn"`; a version-1 welcome does not, and its `"xn"` and `"xl"` are dropped and counted; leaving `TX` after the frame's airtime but before the end of the long preamble plus the frame is counted |
 | `sniff_xn_while_receiving` | `"xn"` while holding a frame, after its preamble: the frame is lost (`left`), no verdict comes, the sniff ends with nothing detected and the frame's power as the energy; `"xn"` during the node's own frame that outlasts the window: the `"xd"` at the window's end, the radio left in `TX` until the frame's end, no rule broken |
+| `asymmetric_link` | A link given in both directions with different values: each receiver gets its own direction's power in the medium log, and the server logs the asymmetric link; a link given once is the same both ways |
+| `welcome_cca_us` | The welcome's `cca_us`: the profile's common value (160 µs), the mode-3 value with `--power-mode=3` (53 µs), 0 without power recording |
 | `sniff_report_in_window` | During a sniff, a report of `OFF` and one of `LISTEN` on another channel end the sniff with no `"xd"` (`left`) and the radio hears nothing more; `LISTEN` and then `RECEIVE` on the sniff channel keep it: a frame that starts in the window is received and the sniff reports it with `locked` = 2 |
 
 ```bash
@@ -488,7 +519,7 @@ python3 radio_if/test_ref_client.py build-vt/wssimserver      # about 3 s
 ## 13. Versioning
 
 - The interface version is negotiated in the hello; the welcome confirms it. The server supports a range of versions (today 1 to 2) and refuses others by closing the connection.
-- Additions that a client of an older version can ignore do not change the version: new welcome flags, new server options, new optional client messages. A client ignores unknown welcome flags.
+- Additions that a client of an older version can ignore do not change the version: new welcome flags, new server options, new optional client messages, a value in a field that was reserved (ignored on receipt, §4.1). A client ignores unknown welcome flags. Such an addition so far: the welcome's `cca_us` (2026-11-09, both versions).
 - Any change that a client of an older version would misread (a field's meaning or a message's layout, a new message the server sends during a wake) gives a new version. The server keeps the older versions for as long as clients use them.
 
 | Version | Adds |

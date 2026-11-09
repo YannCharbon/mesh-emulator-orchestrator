@@ -24,6 +24,7 @@
 #define MAX_NODES SIM_MAX_NODES
 
 struct node_infos *nodes_infos_flat_map;
+static bool verbose;            // -v: one line per connection, the fd limit
 
 struct ctxt {
     struct sockaddr_un addr;
@@ -42,8 +43,9 @@ static int increase_limit_fd()
     struct rlimit rlimit;
 
     getrlimit(RLIMIT_NOFILE, &rlimit);
-    DEBUG("Increase file descriptors limit from %ld to %ld",
-          rlimit.rlim_cur, rlimit.rlim_max);
+    if (verbose)
+        DEBUG("Increase file descriptors limit from %ld to %ld",
+              rlimit.rlim_cur, rlimit.rlim_max);
     rlimit.rlim_cur = rlimit.rlim_max;
     setrlimit(RLIMIT_NOFILE, &rlimit);
     return rlimit.rlim_cur;
@@ -100,6 +102,10 @@ static int bitmap_parse(char *str, uint64_t *out, int size)
 
     memset(out, 0, size * sizeof(uint64_t));
     range = strtok(str_copy, ",");
+    if (!range) {
+        free(str_copy);
+        return -1;
+    }
     do {
         cur = strtoul(range, &endptr, 0);
         if (*endptr == '-') {
@@ -127,85 +133,96 @@ static int bitmap_parse(char *str, uint64_t *out, int size)
     return 0;
 }
 
-static int rssi_map_parse_for_one_group(char *str)
-{
-    char *range;
-    char *endptr;
-    int nodes_in_group[MAX_NODES] = {-1};
-    memset(nodes_in_group, -1, sizeof(nodes_in_group));
-    int nodes_in_group_idx = 0;
+// RSSI of the links from the -g options (docs/MEDIUM.md §2, docs/RADIO_INTERFACE.md §8).
+// The map is directional: sim_link(map, rx, tx) is the power at rx of tx's
+// frames. "A,B:RSSI" (exactly two IDs) is the link A -> B; it also sets B -> A
+// unless a "B,A:RSSI" option gives that direction itself, before or after it:
+// so a link given once is symmetric, and a reverse link makes it asymmetric.
+// Any other list ("0-3:RSSI", "1,2,5:RSSI", "0-2,7:RSSI") sets every pair of
+// its nodes, both directions. Options apply in order, the later one wins; a
+// change of a value that an earlier option set itself (not only as the
+// reverse of a link) is a warning. A group without ":RSSI" sets no value.
+enum link_origin {
+    LINK_UNSET,
+    LINK_REVERSE,               // set as the reverse of an "A,B:RSSI" link
+    LINK_GROUP,                 // set by a group of other than two IDs
+    LINK_GIVEN,                 // set by an "A,B:RSSI" link in this direction
+};
 
-    char *str_copy = strdup(str);
-    if (str_copy == NULL) {
+struct link_parse {
+    uint8_t *origin;            // MAX_NODES x MAX_NODES, [rx][tx]
+    int overrides;              // values an earlier option set, changed
+    int asymmetric;             // reverse links of a different value
+};
+
+static void link_set(struct link_parse *lp, const char *opt, int tx, int rx, float rssi, enum link_origin origin)
+{
+    uint8_t *o = &lp->origin[(long)rx * MAX_NODES + tx];
+    float *v = &sim_link(nodes_infos_flat_map, rx, tx)->rssi;
+
+    if ((*o == LINK_GROUP || *o == LINK_GIVEN) && *v != rssi) {
+        if (lp->overrides++ < 10)
+            WARN("-g %s: the link %d -> %d was %.1f dBm (an earlier -g), now %.1f dBm", opt, tx, rx, *v, rssi);
+        else if (lp->overrides == 11)
+            WARN("-g: more links set again with another value (count at the end)");
+    }
+    *v = rssi;
+    *o = origin;
+}
+
+// "-g" option: a list of IDs and ranges, then optionally ":RSSI"
+static int rssi_map_parse_for_one_group(struct link_parse *lp, const char *str)
+{
+    static int ids[MAX_NODES];
+    char buf[65536], *colon, *tok, *save, *end;
+    unsigned long a, b, k;
+    int n = 0, i, j;
+    float rssi;
+    bool pair;
+
+    if (strlen(str) >= sizeof(buf))
+        return -1;
+    strcpy(buf, str);
+    colon = strchr(buf, ':');
+    if (!colon)
+        return 0;               // no RSSI: a perfect link (0), the value left as it is
+    *colon = '\0';
+    rssi = strtof(colon + 1, &end);
+    if (end == colon + 1 || *end) {
+        WARN("-g %s: bad RSSI \"%s\" (a number of dBm, e.g. -67.5)", str, colon + 1);
         return -1;
     }
+    pair = true;
+    for (tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+        a = strtoul(tok, &end, 0);
+        b = a;
+        if (*end == '-') {
+            pair = false;       // a range is a group, even of two nodes
+            b = strtoul(end + 1, &end, 0);
+        }
+        if (*end || b < a || b >= MAX_NODES)
+            return -1;
+        for (k = a; k <= b; k++) {
+            if (n >= MAX_NODES)
+                return -1;
+            ids[n++] = k;
+        }
+    }
+    if (pair && n == 2 && ids[0] != ids[1]) {
+        uint8_t rev = lp->origin[(long)ids[0] * MAX_NODES + ids[1]];  // ids[1] -> ids[0]
 
-    char *rest = str_copy;
-    char *indexes_part, *rssi_part;
-    float rssi = 0.0;
-    indexes_part = __strtok_r(rest, ":", &rest);
-
-
-    if (indexes_part == NULL || strstr(str, ":") == NULL) {
-        // No RSSI has been specified
-        free(str_copy);
+        link_set(lp, str, ids[0], ids[1], rssi, LINK_GIVEN);
+        if (rev != LINK_GIVEN)
+            link_set(lp, str, ids[1], ids[0], rssi, LINK_REVERSE);
+        else if (sim_link(nodes_infos_flat_map, ids[0], ids[1])->rssi != rssi && lp->asymmetric++ < 10)
+            INFO("-g %s: asymmetric link: %d -> %d %.1f dBm, %d -> %d %.1f dBm", str, ids[0], ids[1], rssi,
+                 ids[1], ids[0], sim_link(nodes_infos_flat_map, ids[0], ids[1])->rssi);
         return 0;
     }
-
-    rssi_part = __strtok_r(rest, ":", &rest);
-
-    if (rssi_part != NULL) {
-        rssi = (float)atof(rssi_part);
-    }
-
-    strcpy(str_copy, str);
-    rest = str_copy;
-    indexes_part = __strtok_r(rest, ":", &rest);
-
-    // Map the RSSI
-    range = strtok(indexes_part, ",");
-    unsigned long start_node = strtoul(range, &endptr, 0);
-    unsigned long end_node;
-    if (*endptr == '-') {
-        range = ++endptr;
-        end_node = strtoul(range, &endptr, 0);
-
-        if (end_node >= MAX_NODES) {
-            free(str_copy);
-            return -1;
-        }
-        for (int i = start_node; i <= end_node; i++)
-            for (int j = start_node; j <= end_node; j++)
-                if (i != j)
-                    sim_link(nodes_infos_flat_map, i, j)->rssi = rssi;
-    } else {
-        // A list of IDs: count them, at most MAX_NODES (more is malformed)
-        nodes_in_group[nodes_in_group_idx++] = start_node;
-        while ((range = strtok(NULL, ","))) {
-            if (nodes_in_group_idx >= MAX_NODES) {
-                free(str_copy);
-                return -1;
-            }
-            nodes_in_group[nodes_in_group_idx++] = strtoul(range, &endptr, 0);
-        }
-        for (int i = 0; i < nodes_in_group_idx; i++) {
-            if (nodes_in_group[i] < 0 || nodes_in_group[i] >= MAX_NODES) {
-                free(str_copy);
-                return -1;
-            }
-        }
-        for (int i = 0; i < nodes_in_group_idx; i++) {
-            for (int j = 0; j < nodes_in_group_idx; j++) {
-                if (i != j) {
-                    sim_link(nodes_infos_flat_map, nodes_in_group[i], nodes_in_group[j])->rssi = rssi;
-                    sim_link(nodes_infos_flat_map, nodes_in_group[j], nodes_in_group[i])->rssi = rssi;
-                }
-            }
-        }
-    }
-
-    free(str_copy);
-
+    for (i = 0; i < n; i++)
+        for (j = 0; j < n; j++)
+            if (ids[i] != ids[j])
+                link_set(lp, str, ids[i], ids[j], rssi, LINK_GROUP);
     return 0;
 }
 
@@ -248,7 +265,7 @@ static void graph_dump(struct ctxt *ctxt)
         printf("\n");
     }
 
-    printf("\nRSSI map:\n");
+    printf("\nRSSI map (dBm; row: receiver, column: sender):\n");
     for (i = 0; i < max; i++) {
         if (i == 0) {
             printf("%*d ", 11, i);
@@ -289,9 +306,15 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "broadcast server to create networks of wshwsim\n");
     fprintf(stream, "\n");
     fprintf(stream, "Usage: wssimserver [OPTIONS] SOCKET_PATH\n");
-    fprintf(stream, "  -g, --group=NODES[:RSSI]  link these nodes (e.g. 0-2, or 2,5:-67.0)\n");
-    fprintf(stream, "  --group-file=FILE         -g options from FILE, one per line (empty lines and # comments\n");
-    fprintf(stream, "                            skipped): for topologies too large for the command line\n");
+    fprintf(stream, "  -g, --group=NODES[:RSSI]  link these nodes (e.g. 0-2, or 2,5:-67.0). RSSI in dBm at the\n");
+    fprintf(stream, "                            receiver. A,B:RSSI is the link A->B, and also B->A unless an\n");
+    fprintf(stream, "                            option B,A:RSSI gives it (asymmetric link); a range or a list\n");
+    fprintf(stream, "                            of other than two IDs sets every pair, both directions; the\n");
+    fprintf(stream, "                            later option wins (warning). docs/MEDIUM.md section 2\n");
+    fprintf(stream, "  --group-file=FILE         -g options from FILE, one per line, with or without \"-g\"\n");
+    fprintf(stream, "                            (blank lines and # comments skipped): for topologies too\n");
+    fprintf(stream, "                            large for the command line\n");
+    fprintf(stream, "  -v, --verbose             also log each connection's fd and the fd limit\n");
     fprintf(stream, "  -l, --dump                print the topology and the RSSI map\n");
     fprintf(stream, "  -f, --fpath[=FILE]        with -l, also write the edges to FILE (/tmp/graph.txt)\n");
     fprintf(stream, "  --vtime=N                 virtual time: conduct N nodes (docs/VIRTUAL_TIME.md)\n");
@@ -520,12 +543,13 @@ static int32_t drift_of(int node, uint64_t seed)
 
 void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
 {
-    const char *opts_short = "hlf::g:";
+    const char *opts_short = "hlvf::g:";
     static const struct option opts_long[] = {
         { "group", required_argument, 0,  'g' },
         { "fpath", optional_argument, 0, 'f'},
         { "dump",  no_argument,       0,  'l' },
         { "help",  no_argument,       0,  'h' },
+        { "verbose", no_argument,     0,  'v' },
         { "vtime", required_argument, 0, OPT_VTIME },
         { "vtime-end", required_argument, 0, OPT_VTIME_END },
         { "power", required_argument, 0, OPT_POWER },
@@ -566,29 +590,53 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     while ((opt = getopt_long(argc, argv, opts_short, opts_long, NULL)) != -1) {
         switch (opt) {
             case 'g':
-                FATAL_ON(bitmap_parse(optarg, mask, MAX_NODES / 64), 1, "Bad mask: %s", optarg);
+                FATAL_ON(bitmap_parse(optarg, mask, MAX_NODES / 64), 1,
+                         "-g %s: bad node list (IDs 0 to %d, e.g. 2,5:-67.5 or 0-3)", optarg, MAX_NODES - 1);
                 ctxt->groups = realloc(ctxt->groups, (ctxt->num_groups + 1) * sizeof(*ctxt->groups));
                 FATAL_ON(!ctxt->groups, 1, "realloc: %m");
                 ctxt->groups[ctxt->num_groups++] = optarg;
                 break;
             case OPT_GROUP_FILE: {
                 // One -g argument per line: large topologies exceed the
-                // command line's size limit (docs/SCALE.md)
+                // command line's size limit (docs/SCALE.md). A line is
+                // "IDS[:RSSI]", optionally after "-g" or "--group=";
+                // blank lines and '#' comments (whole or end of line) are
+                // skipped.
                 FILE *gf = fopen(optarg, "r");
-                char *line = NULL;
+                char *line = NULL, *l, *hash;
                 size_t cap = 0;
                 ssize_t n;
+                int lineno = 0;
 
                 FATAL_ON(!gf, 1, "--group-file: %s: %m", optarg);
                 while ((n = getline(&line, &cap, gf)) >= 0) {
-                    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' '))
-                        line[--n] = '\0';
-                    if (!n || line[0] == '#')
+                    lineno++;
+                    if ((hash = strchr(line, '#')))
+                        *hash = '\0';
+                    l = line;
+                    while (*l == ' ' || *l == '\t')
+                        l++;
+                    n = strlen(l);
+                    while (n && (l[n - 1] == '\n' || l[n - 1] == '\r' || l[n - 1] == ' ' || l[n - 1] == '\t'))
+                        l[--n] = '\0';
+                    if (!n)
                         continue;
-                    FATAL_ON(bitmap_parse(line, mask, MAX_NODES / 64), 1, "--group-file: bad mask: %s", line);
+                    if (!strncmp(l, "--group=", 8)) {
+                        l += 8;
+                    } else if (!strncmp(l, "-g", 2)) {
+                        l += 2;
+                        while (*l == ' ' || *l == '\t')
+                            l++;
+                    }
+                    FATAL_ON(!*l || strpbrk(l, " \t"), 1,
+                             "--group-file: %s:%d: one IDS[:RSSI] per line (e.g. 2,5:-67.5), got \"%s\"",
+                             optarg, lineno, l);
+                    FATAL_ON(bitmap_parse(l, mask, MAX_NODES / 64), 1,
+                             "--group-file: %s:%d: bad node list in \"%s\" (IDs 0 to %d, e.g. 2,5:-67.5 or 0-3)",
+                             optarg, lineno, l, MAX_NODES - 1);
                     ctxt->groups = realloc(ctxt->groups, (ctxt->num_groups + 1) * sizeof(*ctxt->groups));
                     FATAL_ON(!ctxt->groups, 1, "realloc: %m");
-                    ctxt->groups[ctxt->num_groups++] = strdup(line);
+                    ctxt->groups[ctxt->num_groups++] = strdup(l);
                 }
                 free(line);
                 fclose(gf);
@@ -721,6 +769,9 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             case 'h':
                 print_help(stdout, 0);
                 break;
+            case 'v':
+                verbose = true;
+                break;
             case '?':
                 print_help(stderr, 1);
                 break;
@@ -764,14 +815,30 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
 // shared memory, whose names depend on the socket path: this runs after both.
 static void apply_groups(struct ctxt *ctxt)
 {
+    struct link_parse lp = { };
     uint64_t mask[MAX_NODES / 64];
-    int i;
+    int i, j, max;
 
+    lp.origin = calloc((long)MAX_NODES * MAX_NODES, 1);
+    FATAL_ON(!lp.origin, 1, "calloc: %m");
     for (i = 0; i < ctxt->num_groups; i++) {
-        FATAL_ON(bitmap_parse(ctxt->groups[i], mask, MAX_NODES / 64), 1, "Bad mask: %s", ctxt->groups[i]);
-        FATAL_ON(rssi_map_parse_for_one_group(ctxt->groups[i]), 1, "Bad mask: %s", ctxt->groups[i]);
+        FATAL_ON(bitmap_parse(ctxt->groups[i], mask, MAX_NODES / 64), 1,
+                 "-g %s: bad node list (IDs 0 to %d, e.g. 2,5 or 0-3)", ctxt->groups[i], MAX_NODES - 1);
+        FATAL_ON(rssi_map_parse_for_one_group(&lp, ctxt->groups[i]), 1,
+                 "-g %s: bad option (IDS[:RSSI], IDs 0 to %d, e.g. 2,5:-67.5 or 0-3)", ctxt->groups[i], MAX_NODES - 1);
         graph_apply_mask(ctxt->node_graph, mask);
     }
+    free(lp.origin);
+    if (lp.overrides)
+        WARN("-g: %d link values set again with another value by a later -g (the later one applies)", lp.overrides);
+    max = ctxt->num_groups ? graph_get_num_nodes(ctxt) : 0;
+    lp.asymmetric = 0;
+    for (i = 0; i < max; i++)
+        for (j = i + 1; j < max; j++)
+            if (sim_link(nodes_infos_flat_map, i, j)->rssi != sim_link(nodes_infos_flat_map, j, i)->rssi)
+                lp.asymmetric++;
+    if (lp.asymmetric)
+        INFO("-g: %d asymmetric links (a different value in each direction)", lp.asymmetric);
     if (!ctxt->num_groups)
         memset(ctxt->node_graph, 0xFF, sizeof(ctxt->node_graph));
     for (i = 0; i < MAX_NODES; i++)
@@ -972,7 +1039,8 @@ static void serve(struct ctxt *ctxt)
                 if (fds[i].fd == -1) {
                     fds[i].events = POLLIN;
                     fds[i].fd = accept(fds[0].fd, NULL, NULL);
-                    DEBUG("Connect fd %d", fds[i].fd);
+                    if (verbose)
+                        DEBUG("Connect fd %d", fds[i].fd);
                     FATAL_ON(fds[i].fd < 0, 1, "accept: %m");
                     break;
                 }
@@ -1726,6 +1794,7 @@ static int vt_welcome(int node, const struct nsim_welcome *welcome)
         w.version = conns[slot_of_node[node]].radio_if;
         if (w.version >= 2 && med_central())
             w.flags |= SIM_WELCOME_SNIFF;
+        w.reserved = pwr_cca_us(node);     // cca_us (docs/RADIO_INTERFACE.md §4.3)
         vt_ri_reset(node);
     }
     return vt_send(node, &w, sizeof(w));
@@ -1971,6 +2040,8 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
+    // Colours only on a terminal: a log file gets plain text
+    g_enable_color_traces = isatty(STDERR_FILENO);
 
     parse_commandline(&ctxt, argc, argv);
 

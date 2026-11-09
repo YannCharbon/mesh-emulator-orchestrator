@@ -630,6 +630,13 @@ void pwr_start(int num_nodes, const int *nodes)
     }
 }
 
+uint32_t pwr_cca_us(int node)
+{
+    const struct pwr_node *n = node >= 0 && node < SIM_MAX_NODES ? pwr.nodes[node] : NULL;
+
+    return n && n->p->t_cca > 0 ? (uint32_t)lround(n->p->t_cca) : 0;
+}
+
 static void log_interval(const struct pwr_node *n, const char *part, const char *state,
                          double start, double len, int dbm, bool has_dbm)
 {

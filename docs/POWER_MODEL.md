@@ -13,7 +13,7 @@ Paths: `NGS` = `nanostack-generic-standalone/`; others are in this repo.
 | Port: wake report | `NGS/port/sim/sim_power.c`, `ns_port_sim.h` | The "xc" message: timer callbacks per cause, events dispatched, for each wake |
 | Sleep-depth rule | `NGS/include/ns_port/power.h` | Header-only rule, for the emulator and the firmware port alike (§4) |
 | Radio states | `app_wshwsim/sl_rf_driver.c`, `app_wssimserver/sim_proto.h` | The "xr" message at each change of the emulated radio's state, with the PHY mode the MAC configured (§6.2) |
-| Profiles | `examples/power/*.ini` | `efr32fg25-soc.ini`: the FG25 SoC calibrated with HW5's measurements (§6, §12); `efr32fg25-soc-datasheet.ini`: the same from the datasheet only, for comparison |
+| Profiles | `examples/power/*.ini` | `efr32fg25-soc.ini`: the FG25 SoC calibrated with HW5's measurements (§6, §12), for nodes that listen most of the time; `efr32fg25-lfn.ini`: the same SoC as our low-power firmware drives it (§12.8, §12.9), for duty-cycled nodes of any stack; `efr32fg25-soc-datasheet.ini`: the first from the datasheet only, for comparison |
 | Tools | `sim_utils/power_summary.py`, `sim_utils/vtime/run.sh` (`POWER=`), `sim_utils/vtime/test_power.py` | Summary of runs; runs with recording; a test of the ledger's arithmetic |
 
 ## 2. State machines
@@ -170,9 +170,10 @@ An INI file; `#` or `;` start a comment; every key is required unless said other
 
 **MCU + external transceiver** (STM32F769 + S2-LP, the MTS bench): the same machines; the transceiver's currents go in `[radio]`, and the SPI work per frame in `rx_frame`/`tx_frame`. No such profile yet.
 
-Two FG25 profiles:
+Three FG25 profiles:
 
 - **`examples/power/efr32fg25-soc.ini`, the default:** HW5's measurements where HW5 has them (RX listening, TX at +10 dBm, the charge per wake, the cycles per kind of work, the supply voltage), the datasheet or an estimate elsewhere, each figure tagged. Its common values are for 3.33 V, EU mode 1a (50 kbit/s), +10 dBm: the nodes' configuration `CONF=eu1a` (§12.5). §12.1 lists every change and what is still not measured. Its `@3` values (`tx_ma`, `cca_us`, `tx_frame`) are for EU mode 3 (150 kbit/s, the default configs' mode), measured on the same kits (§12.6); a node running mode 3 gets them without any setting.
+- **`examples/power/efr32fg25-lfn.ini`:** `efr32fg25-soc.ini` with the figures measured on our LFN firmware where they differ (§12.8, §12.9): the RX plateau of a listening window, TX, the wake from EM2, the fixed cost of a receive window, the charge of a timer wake. It is the profile for **any duty-cycled node**, Wi-SUN LFN or a node of another stack through the radio interface: the ledger sees only radio states and wakes, and the window's fixed cost is mostly RAIL, the power manager and interrupts, not the stack. `efr32fg25-soc.ini` stays the profile of always-listening nodes (Wi-SUN routers and border routers, or a mains-powered node of another stack). Which profile and `phy_mode` a client of the radio interface uses: `docs/RADIO_INTERFACE.md` §7.
 - **`examples/power/efr32fg25-soc-datasheet.ini`:** the profile as it was before HW5, from the datasheet (Rev. 1.2) only, with placeholder cycles. Kept so that a user can see how far the datasheet is from the board (§12.2): its radio currents are the datasheet's whole-chip RX/TX figures minus EM1 at 39 MHz, because they were measured with the MCU in EM1 at 39 MHz.
 
 ### 6.1 Every consumption parameter is the user's to set
@@ -459,7 +460,7 @@ Measured on our LFN firmware (`nanostack-efr32fg25-freertos` README, "LFN EM2 fl
 
 **EM2 floor: 7.0 µA.** Between its wakes our LFN draws **6.99–7.09 µA** on kit 440290182 (BRD4271A on BRD4002A, AEM at 100 kHz), equal to that kit's bare EM2 (6.92–6.94 µA, a test image that stops before the stack starts): RAIL's sleep configuration and the stack add nothing measurable. This is the SoC with full RAM retention and RAIL's timer on the low-frequency clock, plus the radio board; the datasheet's EM2 is 4.6 µA. Kit 440235509 (BRD4001A) reads **12.3 µA**: an excess specific to that kit (Silicon Labs' LFN reads 11.9 µA there too; that kit's bare EM2 is 5.8 µA), not used. Both FG25 profiles now take `mcu.deep_sleep_ma = 0.0070`.
 
-**`examples/power/efr32fg25-lfn.ini`**, for LFN nodes only (`wssimserver --power-node=<LFN IDs>:examples/power/efr32fg25-lfn.ini`; `test_lfn_profiles.sh` `LFN_POWER`): `efr32fg25-soc.ini` with these measured LFN values [M-LFN]:
+**`examples/power/efr32fg25-lfn.ini`**, for the LFN nodes and not the routers of a Wi-SUN run (`wssimserver --power-node=<LFN IDs>:examples/power/efr32fg25-lfn.ini`; `test_lfn_profiles.sh` `LFN_POWER`), and for duty-cycled clients of the radio interface (§6, `docs/RADIO_INTERFACE.md` §7): `efr32fg25-soc.ini` with these measured LFN values [M-LFN]:
 
 | Key | `efr32fg25-soc.ini` (FFN, HW5) | `efr32fg25-lfn.ini` (our LFN) | Measured |
 | --- | --- | --- | --- |
