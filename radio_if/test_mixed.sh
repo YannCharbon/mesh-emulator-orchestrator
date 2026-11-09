@@ -39,7 +39,15 @@
 # sniff every 100 ms with the lock flag (at 0 and 63 ms in the period), the
 # radio off in between, and a 100-byte frame with a 110 ms wake-up preamble
 # every 2 s (at 250 and 1250 ms), with a CCA before it. Node 21 runs the
-# Python reference client: a 10 ms sniff every 50 ms (at 37 ms), no frames.
+# Python reference client: a 20 ms sniff every 47 ms (from 37 ms), no frames.
+# Node 21's sniffs are the ones that catch Wi-SUN frames (lock_ns): the 1 ms
+# sniffs of nodes 20 and 22 almost never do. Its period is deliberately not a
+# divisor of the Wi-SUN timing: many of the Wi-SUN frames on channel 8 are
+# periodic broadcasts at a fixed phase in 50 ms, so a 50 ms period either
+# always or never covers them, and a change of the frames' airtime moves
+# them in or out of every window at once (the 12-byte mode-3 preamble of
+# EM5 moved them 1.7 ms, out of a 10 ms window at 37 ms: 0 to 4 detections
+# per seed instead of 9 to 14). With 47 ms the windows sweep across them.
 # Node 23 runs the C client with version 1: receiver always on, a 100-byte
 # frame every 50 ms from 100.4 ms, every other one inside node 20's sniffs
 # (it gives the collisions with the Wi-SUN nodes). The checks are then:
@@ -92,7 +100,7 @@ if [ "$SNIFF" = 1 ]; then
 	TOPO=$OUT/topo_mixed.txt IF_NODES="20 21 22 23" \
 		SIM_OPTS="--medium-log=$OUT/mixed/medium.log --sniff-log=$OUT/mixed/sniff.log" \
 		IF_CMD_20="$OUT/bin/rif_node" IF_OPTS_20="$PHY $SN $LP --offset-ms 250" \
-		IF_CMD_21="python3 $HERE/ref_client.py" IF_OPTS_21="$PHY --sniff-period-ms 50 --sniff-us 10000 --sniff-phase-ms 37" \
+		IF_CMD_21="python3 $HERE/ref_client.py" IF_OPTS_21="$PHY --sniff-period-ms 47 --sniff-us 20000 --sniff-phase-ms 37" \
 		IF_CMD_22="$OUT/bin/rif_node" IF_OPTS_22="$PHY $SN --sniff-phase-ms 63 $LP --offset-ms 1250" \
 		IF_CMD_23="$OUT/bin/rif_node" IF_OPTS_23="$PHY --listen --period-ms 50 --offset-ms 100.4 --payload-len 100" \
 		"$WORK/sim_utils/vtime/run.sh" "$BIN" "$WORK" "$OUT/mixed" "$DUR" > "$OUT/mixed.out" 2>&1

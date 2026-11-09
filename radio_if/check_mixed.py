@@ -13,7 +13,7 @@ out, base_rc, mixed_rc, dur = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), f
 SNIFF = sys.argv[5:6] == ["sniff"]        # the clients sniff (SNIFF=1)
 IF = (20, 21, 22, 23) if SNIFF else (20, 21, 22)   # interface clients
 SNIFFERS, LP_SENDERS, V1 = (20, 21, 22), (20, 22), 23
-SNIFF_US = {20: 1000, 21: 10000, 22: 1000}
+SNIFF_US = {20: 1000, 21: 20000, 22: 1000}
 NS = tuple(range(0, 15))                  # dag_simple: border router 0, routers 1-14
 SHR, PHR, FCS, RATE = 8, 2, 2, 150000     # the clients' defaults, and their --rate
 results = []
