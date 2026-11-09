@@ -76,6 +76,7 @@ void med_set_sniff_dwell(const char *arg);      // --sniff-dwell-bits=N
 void med_set_sniff_threshold(const char *arg);  // --sniff-threshold=DBM|off
 void med_set_sniff_curve(const char *arg);      // --sniff-curve=ber:N|SINR:P,...
 void med_set_sniff_sfd(const char *arg);        // --sniff-sfd-bits=N
+void med_set_sniff_settle(const char *arg);     // --sniff-settle-us=N
 void med_set_sniff_log(const char *path);       // --sniff-log=FILE
 
 // "xl": like med_frame_start(), with preamble_us of preamble before the frame
@@ -85,6 +86,11 @@ struct med_frame *med_frame_start_lp(int src, const struct sim_frame_hdr *hdr, u
 // "xn" from node now. Returns the serial of the new sniff (for its check
 // events); *next is the time of its first check.
 uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, uint64_t *next);
+// Whether the receiver of sniff serial is on by now: true once per sniff,
+// with its channel, for the power ledger to record LISTEN now. It is on at
+// the request, or when the node's own frame ends (half duplex): ask at once
+// after med_sniff_start(), and at each check event.
+bool med_sniff_rx_on(int node, uint32_t serial, uint64_t now, uint16_t *chan);
 // Receiver i of f (after med_decide()): if it sniffs on f's channel, f joins
 // the sniff. Returns the time of a check to queue, or MED_SNIFF_NONE.
 uint64_t med_sniff_frame(struct med_frame *f, int i, uint32_t *serial);

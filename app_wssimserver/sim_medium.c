@@ -140,7 +140,10 @@ struct sn_sniff {
     uint32_t id;                // the node's tag
     uint16_t chan;
     uint8_t flags, end_state;
-    uint64_t t_req, t0, t1;     // request; window [t0, t1), t0 after the node's own TX
+    uint64_t t_req, t0, t1;     // request; window [t0, t1), t0 after the node's own TX and the settling time
+    uint64_t t_on;              // receiver on: t_req, or the end of the node's own frame (half duplex)
+    bool on_pending;            // the ledger's LISTEN is still to record, at t_on
+    uint64_t queued;            // earliest check event queued for this sniff (MED_SNIFF_NONE: none)
     int n, cap;
     struct sn_heard *h;
 };
@@ -154,6 +157,7 @@ static struct {
     int curve_n;
     float curve_x[SN_CURVE_MAX], curve_p[SN_CURVE_MAX];
     unsigned int sfd_bits;
+    uint32_t settle_us;         // --sniff-settle-us: receiver on, not yet detecting
     const char *log_path;
     FILE *log;
     uint32_t next_serial;
@@ -263,7 +267,7 @@ void med_set_sniff_curve(const char *arg)
         FATAL_ON(!colon, 1, "--sniff-curve: expected ber:N or SINR:P,...: %s", arg);
         *colon = '\0';
         sn.curve_x[sn.curve_n] = strtof(tok, &end);
-        FATAL_ON(*end || !*tok, 1, "--sniff-curve: bad SINR %s", tok);
+        FATAL_ON(*end || !*tok || !isfinite(sn.curve_x[sn.curve_n]), 1, "--sniff-curve: bad SINR %s", tok);
         sn.curve_p[sn.curve_n] = strtof(colon + 1, &end);
         FATAL_ON(*end || !colon[1] || !(sn.curve_p[sn.curve_n] >= 0 && sn.curve_p[sn.curve_n] <= 1), 1,
                  "--sniff-curve: bad probability %s", colon + 1);
@@ -279,6 +283,14 @@ void med_set_sniff_sfd(const char *arg)
 {
     sn.sfd_bits = med_number("--sniff-sfd-bits", arg, 0, 256);
     FATAL_ON(sn.sfd_bits != strtof(arg, NULL), 1, "--sniff-sfd-bits: expected a whole number: %s", arg);
+}
+
+void med_set_sniff_settle(const char *arg)
+{
+    float v = med_number("--sniff-settle-us", arg, 0, 1000000);
+
+    FATAL_ON(v != (uint32_t)v, 1, "--sniff-settle-us: expected a whole number: %s", arg);
+    sn.settle_us = v;
 }
 
 void med_set_sniff_log(const char *path)
@@ -856,6 +868,8 @@ static uint64_t sn_next(const struct sn_sniff *x)
     uint64_t next = x->t1;
     int i;
 
+    if (x->on_pending && x->t_on < next)
+        next = x->t_on;
     for (i = 0; i < x->n; i++)
         if (x->h[i].next && x->h[i].next < next)
             next = x->h[i].next;
@@ -869,10 +883,10 @@ uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, ui
     const struct med_rx *rx;
 
     if (!sn.next_serial)
-        INFO("medium: sniffing: %s detection, dwell %u bits, threshold %s%.1f dBm, curve %s%d, SFD %u bits",
-             sn.frame_mode ? "frame" : "preamble", sn.dwell_bits, sn.has_threshold ? "" : "off ",
+        INFO("medium: sniffing: %s detection, dwell %u bits, threshold %s%.1f dBm, curve %s%d, SFD %u bits, "
+             "settling %u us", sn.frame_mode ? "frame" : "preamble", sn.dwell_bits, sn.has_threshold ? "" : "off ",
              sn.has_threshold ? sn.threshold : 0.0, sn.curve_ber_bits ? "ber:" : "table of ",
-             sn.curve_ber_bits ? sn.curve_ber_bits : sn.curve_n, sn.sfd_bits);
+             sn.curve_ber_bits ? sn.curve_ber_bits : sn.curve_n, sn.sfd_bits, sn.settle_us);
     if (!x) {
         x = sn.s[node] = calloc(1, sizeof(*x));
         FATAL_ON(!x, 1, "calloc: %m");
@@ -887,13 +901,20 @@ uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, ui
     x->flags = req->flags;
     x->end_state = req->end_state < SIM_RADIO_STATES ? req->end_state : SIM_RADIO_OFF;
     x->t_req = now;
-    x->t0 = now;
+    x->t_on = now;
     x->t1 = now + req->duration_us;
     x->n = 0;
     // Half duplex: deaf until its own frame has left the air
     for (f = med.air; f; f = f->next)
-        if (f->src == node && f->t_end > x->t0)
-            x->t0 = f->t_end;
+        if (f->src == node && f->t_end > x->t_on)
+            x->t_on = f->t_end;
+    if (x->t_on > x->t1)
+        x->t_on = x->t1;
+    // The conductor asks med_sniff_rx_on() at once; a window that its own
+    // frame fills is never listened to
+    x->on_pending = x->t_on == now || x->t_on < x->t1;
+    // Then the receiver settles before it can detect
+    x->t0 = x->t_on + sn.settle_us;
     if (x->t0 > x->t1)
         x->t0 = x->t1;
     for (f = med.air; f; f = f->next) {
@@ -903,8 +924,19 @@ uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, ui
         if (rx)
             sn_add(x, f, rx);
     }
-    *next = sn_next(x);
+    *next = x->queued = sn_next(x);
     return x->serial;
+}
+
+bool med_sniff_rx_on(int node, uint32_t serial, uint64_t now, uint16_t *chan)
+{
+    struct sn_sniff *x = sn.s[node];
+
+    if (!x || !x->active || x->serial != serial || !x->on_pending || now < x->t_on)
+        return false;
+    x->on_pending = false;
+    *chan = x->chan;
+    return true;
 }
 
 uint64_t med_sniff_frame(struct med_frame *f, int i, uint32_t *serial)
@@ -918,7 +950,12 @@ uint64_t med_sniff_frame(struct med_frame *f, int i, uint32_t *serial)
     sn_add(x, f, rx);
     h = &x->h[x->n - 1];
     *serial = x->serial;
-    return h->next ? h->next : MED_SNIFF_NONE;
+    // One chain of check events per sniff: a new event only if it comes
+    // before the earliest one queued (a later one finds this dwell itself)
+    if (!h->next || h->next >= x->queued)
+        return MED_SNIFF_NONE;
+    x->queued = h->next;
+    return h->next;
 }
 
 // Lowest SINR of h over [from, to), the other heard frames as interferers
@@ -981,6 +1018,7 @@ static struct med_lock *sn_lock(int node, const struct sn_heard *h, uint64_t now
     }
     if (now > h->pre_end)
         return NULL;
+    med_prune(now);             // frames that ended are no longer energy on the channel
     for (f = med.air; f && f->id != h->id; f = f->next)
         ;
     if (!f)
@@ -1004,6 +1042,7 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
     struct sn_sniff *x = sn.s[node];
     struct sn_heard *h, *best;
     const struct med_frame *f;
+    const struct med_lock *l;
     double sinr, p;
     bool detected, already;
     int i;
@@ -1012,6 +1051,8 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
     *next = MED_SNIFF_NONE;
     if (!x || !x->active || x->serial != serial)
         return false;
+    if (now >= x->queued)
+        x->queued = MED_SNIFF_NONE;   // this is the earliest event of the chain
     memset(res, 0, sizeof(*res));
     memcpy(res->magic, "xd", 2);
     res->sniff_id = x->id;
@@ -1031,6 +1072,11 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
         h = best;
         sinr = sn_sinr_min(x, h, h->next - h->dwell, h->next);
         p = sn.has_threshold && h->dbm < sn.threshold ? 0 : sn_curve(sinr);
+        // A receiver locked onto another frame (at its start, during the
+        // window) is synchronised on it: it detects no other preamble
+        l = med.locks[node];
+        if (l && l->active && l->frame_id != h->id && l->t_start < h->next && l->t_end > h->next - h->dwell)
+            p = 0;
         detected = p >= 1;
         if (p > 0 && p < 1) {
             sn.draws++;
@@ -1073,6 +1119,11 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
         return true;
     }
     *next = sn_next(x);
+    if (*next >= x->queued) {
+        *next = MED_SNIFF_NONE;     // an event of the chain is already due by then
+    } else {
+        x->queued = *next;
+    }
     return false;
 }
 

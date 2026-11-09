@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_conductor as tc  # noqa: E402
 import test_power  # noqa: E402
 from test_conductor import Server, check, got, NOISE_DBM, PAYLOAD, AIRTIME  # noqa: E402
-from fake_node import (Behaviour, Driver, TestError, NEVER, RADIO_OFF, RADIO_LISTEN, RADIO_RECEIVE,  # noqa: E402
+from fake_node import (Behaviour, Driver, TestError, NEVER, RADIO_OFF, RADIO_LISTEN, RADIO_RECEIVE, RADIO_TX,  # noqa: E402
                        FRAME_MEDIUM, FRAME_LONG_PREAMBLE, SNIFF_LOCK, SNIFF_LOCKED, SNIFF_RECEIVING)
 
 RADIO_REPORT = struct.Struct("=2sBbBBH")   # "xr": magic, state, tx_dbm, events, phy_mode, channel
@@ -36,7 +36,7 @@ DWELL = 320             # 16 bits at 50 kbit/s
 class Sniffer(Behaviour):
     """A sniff-MAC radio. ACTIONS: {time: [action, ...]} with ("tx", fields),
     ("lp", preamble_us, fields), ("sniff", chan, duration, flags),
-    ("radio", state, chan). Its radio is off unless it sniffs or receives:
+    ("radio", state, chan), ("raw", message). Its radio is off unless it sniffs or receives:
     a sniff puts it in LISTEN on the channel, a result without detection
     turns it off, an "xx" puts it in RECEIVE and a verdict turns it off."""
 
@@ -75,6 +75,8 @@ class Sniffer(Behaviour):
                 self.sniff(a[1], a[2], sniff_id=self.n_sniff, flags=a[3] if len(a) > 3 else 0)
             elif a[0] == "radio":
                 self.radio = (a[1], a[2])
+            elif a[0] == "raw":
+                self.raw(a[1])
         later = [x for x in self.actions if x > t]
         return self.out, min(later) if later else NEVER
 
@@ -329,6 +331,88 @@ def test_sniff_power():
     check(st["receive"]["time_us"] == end - 105320, f"receive {st['receive']}")
 
 
+def test_sniff_power_half_duplex():
+    """2 reports TX, sends at 1000 (on air until 6760) and sniffs in the same
+    run until 9000, nothing on air: the ledger keeps the TX time and counts
+    listening only from the frame's end (the receiver is deaf until then),
+    less the profile's TX-to-listen transition (20 us)."""
+    prof = os.path.join(tc.ARGS.logdir, "sniff_profile_hd.conf")
+    with open(prof, "w") as f:
+        f.write(test_power.PROFILE)
+    pout = os.path.join(tc.ARGS.logdir, "sniff_power_hd.json")
+    r = {2: Sniffer(2, {1000: [("raw", RADIO_REPORT.pack(b"xr", RADIO_TX, 14, 0, 0, 0)), ("tx", {}),
+                               ("sniff", 0, 8000)]})}
+    d, out, rows, sn = sniff_run(r, [], opts=[f"--power={prof}", f"--power-out={pout}", "--vtime-end=1"])
+    check(results(r[2]) == [(9000, 0, 0, 0, 9000)], f"{r[2].results}")
+    n = [x for x in json.load(open(pout))["nodes"] if x["node"] == 2][0]
+    st = n["radio"]["states"]
+    check(st["tx"]["time_us"] == AIRTIME, f"tx {st['tx']}")
+    check(st["listen"]["time_us"] == 9000 - (1000 + AIRTIME) - 20, f"listen {st['listen']}")
+
+
+def test_sniff_settle():
+    """--sniff-settle-us=200: a sniff at 1100 detects from 1300 (first dwell
+    ends at 1620); a window shorter than the settling time detects nothing.
+    The ledger counts the settling time as listening."""
+    prof = os.path.join(tc.ARGS.logdir, "sniff_profile_st.conf")
+    with open(prof, "w") as f:
+        f.write(test_power.PROFILE)
+    pout = os.path.join(tc.ARGS.logdir, "sniff_power_st.json")
+    r = {1: Sniffer(1, {1000: [("tx", {})]}), 2: Sniffer(2, {1100: [("sniff", 0, 2000)]}),
+         3: Sniffer(3, {1100: [("sniff", 0, 150)]})}
+    d, out, rows, sn = sniff_run(r, [(1, 2, -60), (1, 3, -60)],
+                                 opts=["--sniff-settle-us=200", f"--power={prof}", f"--power-out={pout}",
+                                       "--vtime-end=1"])
+    check(results(r[2]) == [(1620, 1, 0, 1, 1620)], f"2: {r[2].results}")
+    check(results(r[3]) == [(1250, 0, 0, 0, 1250)], f"3: {r[3].results}")
+    check([(s["node"], s["t0"]) for s in sn] == [(3, 1250), (2, 1300)], f"log {sn}")
+    n = {x["node"]: x for x in json.load(open(pout))["nodes"]}
+    check(n[3]["radio"]["states"]["listen"]["time_us"] == 150, f"3 listen {n[3]['radio']['states']['listen']}")
+
+
+def test_sniff_lock_ended_frame():
+    """The lock threshold after a detection counts only the frames still on
+    air. 3's strong frame (-50 dBm) ends at 6760 during 2's window; 1's long
+    preamble (-80 dBm) is detected at 7140 (the dwell from 6500 had 3's frame
+    on air) and must be locked onto: 3's frame has left the air."""
+    r = {1: Sniffer(1, {1000: [("lp", 20000, {})]}), 3: Sniffer(3, {1000: [("tx", {})]}),
+         2: Sniffer(2, {6500: [("sniff", 0, 2000, SNIFF_LOCK)]})}
+    d, out, rows, sn = sniff_run(r, [(1, 2, -80), (3, 2, -50)])
+    check(results(r[2]) == [(7140, 1, SNIFF_LOCKED, 1, 7140)], f"{r[2].results}")
+    check(len(got(r[2], "xv")) == 1 and got(r[2], "xv")[0][1]["ok"] == 1, f"{r[2].rx}")
+
+
+def test_sniff_busy_receiver():
+    """A receiver that locked onto a frame at its start during the window
+    detects no other preamble. With a lock threshold of -10 dB and a curve
+    that always detects: 1's long preamble (-55 dBm) is on air from 0; 2
+    sniffs at 1000 with SNIFF_LOCK, its radio in LISTEN; 3's frame starts at
+    1010 and 2 locks onto it at its start (-60 dBm, SINR -5 dB). The sniff
+    reports 3's frame, already being received, at 1330, not 1's at 1320."""
+    r = {1: Sniffer(1, {0: [("lp", 50000, {})]}), 3: Sniffer(3, {1010: [("tx", {})]}),
+         2: Sniffer(2, {1000: [("sniff", 0, 2000, SNIFF_LOCK)]})}
+    d, out, rows, sn = sniff_run(r, [(1, 2, -55), (3, 2, -60)], opts=["--medium-lock-snr=-10", "--sniff-curve=0:1"])
+    check(results(r[2]) == [(1330, 1, SNIFF_RECEIVING, 2, 1330)], f"{r[2].results}")
+    check([t for t, m in got(r[2], "xx")] == [1010], f"frames {got(r[2], 'xx')}")
+
+
+def test_sniff_many_frames():
+    """Weak frames (-125 dBm, about 2^-16 per dwell) start one after another
+    during a 30 ms window, then a strong one at 25000: detected at its first
+    dwell (25320). Each frame joining the sniff must not add a chain of check
+    events: the same result as with the strong frame alone. 2's radio is in
+    LISTEN, so it also locks onto the strong frame at its start (25000) and
+    gets its verdict at its end; no other wake."""
+    acts = {k: Sniffer(k, {1000 + 1000 * k: [("tx", {})]}) for k in range(3, 23)}
+    r = {1: Sniffer(1, {25000: [("tx", {})]}), 2: Sniffer(2, {500: [("sniff", 0, 30000)]}), **acts}
+    d, out, rows, sn = sniff_run(r, [(1, 2, -60)] + [(k, 2, -125) for k in acts])
+    x = r[2].results[0][1] if r[2].results else {}
+    check(results(r[2]) == [(25320, 1, 0, 21, 25320)] and x["src"] == 1, f"{r[2].results}")
+    wakes = [t for t, n, f, o in d.log if n == 2]
+    check(wakes == [0, 500, 25000, 25320, 25000 + AIRTIME], f"wakes of 2 {wakes}")
+
+
+
 
 
 def test_sniff_options():
@@ -337,7 +421,10 @@ def test_sniff_options():
                       (["--vtime=1", "--sniff-curve=3:0.5,1:1"], "must ascend"),
                       (["--vtime=1", "--sniff-curve=ber:0"], "ber:N"),
                       (["--vtime=1", "--sniff-curve=1:2"], "bad probability"),
-                      (["--vtime=1", "--sniff-dwell-bits=2.5"], "whole number")):
+                      (["--vtime=1", "--sniff-dwell-bits=2.5"], "whole number"),
+                      (["--vtime=1", "--sniff-curve=nan:0.5"], "bad SINR"),
+                      (["--vtime=1", "--sniff-settle-us=-1"], "--sniff-settle-us"),
+                      (["--vtime=1", "--sniff-settle-us=2.5"], "whole number")):
         srv = Server(args)
         check(srv.wait() != 0 and msg in srv.output(), f"{args} accepted, or no \"{msg}\"")
 

@@ -338,6 +338,8 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --sniff-curve=ber:N|SINR:P,...  detection probability of one try against its lowest\n");
     fprintf(stream, "                            SINR: the medium's bit error rate over N bits, or a table (ber:16)\n");
     fprintf(stream, "  --sniff-sfd-bits=N        bits of SFD at the end of each SHR (16)\n");
+    fprintf(stream, "  --sniff-settle-us=N       receiver settling time: a sniff detects from N us after its\n");
+    fprintf(stream, "                            receiver is on (0)\n");
     fprintf(stream, "  --sniff-log=FILE          one line per sniff (t_req node id chan t0 t1 outcome t frame_id\n");
     fprintf(stream, "                            src rssi_dbm sinr_db locked)\n");
     exit(exit_code);
@@ -371,6 +373,7 @@ enum {
     OPT_SNIFF_THRESHOLD,
     OPT_SNIFF_CURVE,
     OPT_SNIFF_SFD,
+    OPT_SNIFF_SETTLE,
     OPT_SNIFF_LOG,
 };
 
@@ -547,6 +550,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "sniff-threshold", required_argument, 0, OPT_SNIFF_THRESHOLD },
         { "sniff-curve", required_argument, 0, OPT_SNIFF_CURVE },
         { "sniff-sfd-bits", required_argument, 0, OPT_SNIFF_SFD },
+        { "sniff-settle-us", required_argument, 0, OPT_SNIFF_SETTLE },
         { "sniff-log", required_argument, 0, OPT_SNIFF_LOG },
         { 0,       0,                 0,   0  }
     };
@@ -681,6 +685,9 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
                 break;
             case OPT_SNIFF_SFD:
                 med_set_sniff_sfd(optarg);
+                break;
+            case OPT_SNIFF_SETTLE:
+                med_set_sniff_settle(optarg);
                 break;
             case OPT_SNIFF_LOG:
                 med_set_sniff_log(optarg);
@@ -1252,11 +1259,14 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
             const struct sim_sniff *req = (const struct sim_sniff *)buf;
             uint64_t check;
             uint32_t serial = med_sniff_start(node, req, vt_now, &check);
+            uint16_t chan;
 
             vt_sniffs_in++;
             vt_push_ev((struct vt_event){ .t = check, .node = node, .kind = VT_EV_SNIFF, .sniff = serial });
-            if (pwr_enabled()) {
-                struct sim_radio_report r = { .magic = "xr", .state = SIM_RADIO_LISTEN, .channel = req->channel };
+            // The ledger: listening from now, or once its own frame has
+            // ended (then at a check event)
+            if (med_sniff_rx_on(node, serial, vt_now, &chan) && pwr_enabled()) {
+                struct sim_radio_report r = { .magic = "xr", .state = SIM_RADIO_LISTEN, .channel = chan };
 
                 pwr_radio(node, vt_now, &r);
             }
@@ -1330,7 +1340,13 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
             uint64_t next;
             float rx_dbm;
             int flen;
+            uint16_t chan;
 
+            if (med_sniff_rx_on(node, ev.sniff, t, &chan) && pwr_enabled()) {
+                struct sim_radio_report r = { .magic = "xr", .state = SIM_RADIO_LISTEN, .channel = chan };
+
+                pwr_radio(node, t, &r);
+            }
             if (!med_sniff_check(node, ev.sniff, t, &msgs[num].result, &lock, &fmsg, &flen, &rx_dbm, &next)) {
                 if (next != MED_SNIFF_NONE)
                     vt_push_ev((struct vt_event){ .t = next, .node = node, .kind = VT_EV_SNIFF, .sniff = ev.sniff });
