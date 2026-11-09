@@ -22,6 +22,11 @@ Verdicts ("xv") reach `on_verdict()`, and in the event log they appear among
 the frames as ("xv", frame_id, ok, cause). `rx` keeps every message received,
 with the frames' headers.
 
+Preamble sniffing (docs/MEDIUM.md §10): `sniff(chan, duration_us, ...)` sends
+an "xn", `send_lp(payload, preamble_us, ...)` a frame with a long preamble
+("xl"); sniff results ("xd") reach `on_sniff()` and appear in the event log
+as ("xd", fields).
+
 Used by test_conductor.py; no dependencies outside the standard library.
 """
 import heapq
@@ -43,6 +48,15 @@ FRAME_FIELDS = ("magic", "len", "chan", "seq", "src", "shr_len", "fcs_len", "phr
 FRAME_MEDIUM = 0x01
 VERDICT = struct.Struct("=2sBBIff")  # magic, ok, cause, frame_id, rx_dbm, sinr_db
 SENSE = struct.Struct("=2sHf")       # magic, channel, dbm
+SNIFF = struct.Struct("=2sHIIBBH")   # magic, channel, duration_us, sniff_id, flags, end_state, reserved
+SNIFF_RESULT = struct.Struct("=2sBBIIHHQff")  # magic, detected, locked, sniff_id, frame_id, src, reserved, t_us,
+#                                               rssi_dbm, sinr_db
+SNIFF_FIELDS = ("magic", "detected", "locked", "sniff_id", "frame_id", "src", "reserved", "t_us", "rssi_dbm",
+                "sinr_db")
+LP_FRAME = struct.Struct("=2sHI")    # magic, reserved, preamble_us; an "xx" follows
+SNIFF_LOCK = 0x01
+SNIFF_LOCKED, SNIFF_RECEIVING = 1, 2
+FRAME_LONG_PREAMBLE = 0x02
 WELCOME = struct.Struct("=2sHIQiIQ")  # magic, version, flags, seed, drift_ppb, reserved, start_us
 PROTO_VERSION = 4
 WELCOME_POWER = 0x0001
@@ -113,6 +127,22 @@ class Behaviour:
         """A CCA query, in order with the frames sent in this run."""
         self.out.append(("xs", chan))
 
+    def sniff(self, chan, duration_us, sniff_id=0, flags=0, end_state=0):
+        """A preamble sniff ("xn"); its result reaches on_sniff()."""
+        self.out.append(("xn", chan, duration_us, sniff_id, flags, end_state))
+
+    def send_lp(self, payload, preamble_us, **fields):
+        """A frame after preamble_us of preamble ("xl")."""
+        payload = payload.encode() if isinstance(payload, str) else payload
+        self.out.append(("xl", preamble_us, payload, fields))
+
+    def raw(self, msg):
+        """Any other message, as bytes (e.g. an "xr")."""
+        self.out.append(("raw", msg))
+
+    def on_sniff(self, result):
+        pass
+
     def start(self):
         pass
 
@@ -138,6 +168,8 @@ class Behaviour:
         for fr in frames:
             if fr[0] == "xv":
                 self.on_verdict(*fr[1:])
+            elif fr[0] == "xd":
+                self.on_sniff(fr[1])
             else:
                 self.on_frame(*fr)
         # Like the port: timers due at t fire after the frames, by deadline then name.
@@ -269,12 +301,27 @@ class Driver:
                 _, chan, dbm = SENSE.unpack(msg)
                 node.sensed.append((t, chan, dbm))
                 continue
+            if isinstance(p, tuple) and p[0] == "raw":
+                s.send(p[1])
+                continue
+            if isinstance(p, tuple) and p[0] == "xn":
+                s.send(SNIFF.pack(b"xn", *p[1:], 0))
+                continue
+            if isinstance(p, tuple) and p[0] == "xl":
+                s.send(LP_FRAME.pack(b"xl", 0, p[1]) + frame_msg(p[2], seq=i, **p[3]))
+                continue
             payload, fields = p if isinstance(p, tuple) else (p, {})
             s.send(frame_msg(payload, seq=i, **fields))     # src is set by the server
         s.send(IDLE.pack(b"xi", 0, 0, 0, nxt))
 
     def _recv_frame(self, nid, s, t=None):
         msg = s.recv(65536)
+        if msg[:2] == b"xd":
+            if len(msg) != SNIFF_RESULT.size:
+                raise TestError(f"node {nid}: sniff result of {len(msg)} bytes")
+            res = dict(zip(SNIFF_FIELDS, SNIFF_RESULT.unpack(msg)))
+            self.nodes[nid].rx.append((t, "xd", res))
+            return ("xd", res)
         if msg[:2] == b"xv":
             if len(msg) != VERDICT.size:
                 raise TestError(f"node {nid}: verdict of {len(msg)} bytes")

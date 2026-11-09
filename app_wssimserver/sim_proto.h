@@ -63,6 +63,7 @@ struct sim_frame_hdr {
 };
 
 #define SIM_FRAME_MEDIUM 0x01   // the medium locked this receiver onto the frame: wait for its "xv"
+#define SIM_FRAME_LONG_PREAMBLE 0x02 // the frame was sent with "xl": a long preamble came before it
 
 // Central medium: outcome of a frame at a receiver ("xv" and --medium-log)
 enum sim_rx_cause {
@@ -88,6 +89,56 @@ struct sim_sense {
     char magic[2];              // "xs"
     uint16_t channel;
     float dbm;                  // noise + every frame on air at the radio on that channel
+};
+
+// Preamble sniffing (docs/MEDIUM.md §10), central medium only.
+//
+// "xl": a frame with a long wake-up preamble. The sender's radio sends it
+// instead of "xx", during its run: preamble_us of preamble on air, then the
+// frame (its own SHR, PHR, PSDU and FCS), as one transmission. A complete "xx"
+// message follows the struct. Receivers that lock onto it get that "xx",
+// with SIM_FRAME_LONG_PREAMBLE in its flags.
+struct sim_lp_frame {
+    char magic[2];              // "xl"
+    uint16_t reserved;
+    uint32_t preamble_us;       // preamble before the frame's own SHR, in µs
+};
+
+// "xn": the radio's receiver is on, on channel, from now for duration_us,
+// looking for a preamble. Sent during the node's run, not answered at once:
+// the conductor sends one "xd" when it detects a frame or at the window's
+// end. A new "xn" replaces a sniff in progress (no "xd" for the old one); a
+// frame the node sends ends it (no "xd").
+#define SIM_SNIFF_LOCK 0x01     // on detection, lock the receiver onto the frame if it can still be received
+struct sim_sniff {
+    char magic[2];              // "xn"
+    uint16_t channel;
+    uint32_t duration_us;
+    uint32_t sniff_id;          // the node's own tag, echoed in "xd"
+    uint8_t flags;              // SIM_SNIFF_*
+    uint8_t end_state;          // enum sim_radio_state at a window's end with nothing detected (power ledger)
+    uint16_t reserved;
+};
+
+// "xd": the outcome of a sniff, at the detection time or at the window's end.
+// locked: SIM_SNIFF_LOCKED, the medium locked the receiver onto the frame
+// now and its "xx" (SIM_FRAME_MEDIUM) follows in the same wake;
+// SIM_SNIFF_RECEIVING, the receiver was already locked onto it (its "xx"
+// came at its start); 0, no lock (SIM_SNIFF_LOCK not asked, or the frame can
+// no longer be received).
+#define SIM_SNIFF_LOCKED 1
+#define SIM_SNIFF_RECEIVING 2
+struct sim_sniff_result {
+    char magic[2];              // "xd"
+    uint8_t detected;
+    uint8_t locked;             // 0, SIM_SNIFF_LOCKED or SIM_SNIFF_RECEIVING
+    uint32_t sniff_id;
+    uint32_t frame_id;          // the frame detected, 0 if none
+    uint16_t src;               // its sender, 0 if none
+    uint16_t reserved;
+    uint64_t t_us;              // detection time, or the window's end if none
+    float rssi_dbm;             // the frame's received power; if none, the energy on the channel at the end
+    float sinr_db;              // lowest SINR over the detecting dwell (0 if none)
 };
 
 // Power recording (docs/POWER_MODEL.md), virtual time only: when the welcome

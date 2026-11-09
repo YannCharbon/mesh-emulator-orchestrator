@@ -331,6 +331,15 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "                            being received, captures the receiver (6)\n");
     fprintf(stream, "  --medium-log=FILE         central: one line per frame and receiver (t_end_us src dst\n");
     fprintf(stream, "                            frame_id outcome rx_dbm sinr_min_db)\n");
+    fprintf(stream, "  Preamble sniffing (central medium, docs/MEDIUM.md §10):\n");
+    fprintf(stream, "  --sniff-detect=preamble|frame  what part of a frame a sniff can detect (preamble)\n");
+    fprintf(stream, "  --sniff-dwell-bits=N      bits of a frame a sniff must observe for one detection try (16)\n");
+    fprintf(stream, "  --sniff-threshold=DBM|off lowest received power a sniff detects (off)\n");
+    fprintf(stream, "  --sniff-curve=ber:N|SINR:P,...  detection probability of one try against its lowest\n");
+    fprintf(stream, "                            SINR: the medium's bit error rate over N bits, or a table (ber:16)\n");
+    fprintf(stream, "  --sniff-sfd-bits=N        bits of SFD at the end of each SHR (16)\n");
+    fprintf(stream, "  --sniff-log=FILE          one line per sniff (t_req node id chan t0 t1 outcome t frame_id\n");
+    fprintf(stream, "                            src rssi_dbm sinr_db locked)\n");
     exit(exit_code);
 }
 
@@ -357,6 +366,12 @@ enum {
     OPT_MEDIUM_LOCK_SNR,
     OPT_MEDIUM_CAPTURE_DB,
     OPT_MEDIUM_LOG,
+    OPT_SNIFF_DETECT,
+    OPT_SNIFF_DWELL,
+    OPT_SNIFF_THRESHOLD,
+    OPT_SNIFF_CURVE,
+    OPT_SNIFF_SFD,
+    OPT_SNIFF_LOG,
 };
 
 // --vtime-drop=SRC:DST:SEQ:FROM:TO: frames from SRC with this MAC sequence
@@ -527,6 +542,12 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "medium-lock-snr", required_argument, 0, OPT_MEDIUM_LOCK_SNR },
         { "medium-capture-db", required_argument, 0, OPT_MEDIUM_CAPTURE_DB },
         { "medium-log", required_argument, 0, OPT_MEDIUM_LOG },
+        { "sniff-detect", required_argument, 0, OPT_SNIFF_DETECT },
+        { "sniff-dwell-bits", required_argument, 0, OPT_SNIFF_DWELL },
+        { "sniff-threshold", required_argument, 0, OPT_SNIFF_THRESHOLD },
+        { "sniff-curve", required_argument, 0, OPT_SNIFF_CURVE },
+        { "sniff-sfd-bits", required_argument, 0, OPT_SNIFF_SFD },
+        { "sniff-log", required_argument, 0, OPT_SNIFF_LOG },
         { 0,       0,                 0,   0  }
     };
     uint64_t mask[MAX_NODES / 64];
@@ -646,6 +667,24 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             case OPT_MEDIUM_LOG:
                 med_set_log(optarg);
                 break;
+            case OPT_SNIFF_DETECT:
+                med_set_sniff_detect(optarg);
+                break;
+            case OPT_SNIFF_DWELL:
+                med_set_sniff_dwell(optarg);
+                break;
+            case OPT_SNIFF_THRESHOLD:
+                med_set_sniff_threshold(optarg);
+                break;
+            case OPT_SNIFF_CURVE:
+                med_set_sniff_curve(optarg);
+                break;
+            case OPT_SNIFF_SFD:
+                med_set_sniff_sfd(optarg);
+                break;
+            case OPT_SNIFF_LOG:
+                med_set_sniff_log(optarg);
+                break;
             case 'h':
                 print_help(stdout, 0);
                 break;
@@ -665,8 +704,8 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     if (ctxt->vtime_nodes)
         med_default_central();
     FATAL_ON(med_tuning_given() && !med_central(), 1,
-             "--medium-tx-ref, --medium-lock-snr, --medium-capture-db and --medium-log need the central medium "
-             "(not --medium=legacy)");
+             "--medium-tx-ref, --medium-lock-snr, --medium-capture-db, --medium-log and --sniff-* need the "
+             "central medium (not --medium=legacy)");
     // The ledger follows each node's radio and MCU without gaps (a node
     // powered up late: its ledger starts at its first wake)
     for (int i = 0; i < vt_ctls_n; i++)
@@ -926,7 +965,7 @@ struct vt_frame {
     uint8_t data[];
 };
 
-enum { VT_EV_DEADLINE, VT_EV_FRAME, VT_EV_VERDICT };
+enum { VT_EV_DEADLINE, VT_EV_FRAME, VT_EV_VERDICT, VT_EV_SNIFF };
 
 struct vt_event {
     uint64_t t;
@@ -936,6 +975,7 @@ struct vt_event {
     struct vt_frame *frame;     // FRAME
     float rx_dbm;               // FRAME, central medium: the power at this receiver
     struct med_lock *lock;      // VERDICT
+    uint32_t sniff;             // SNIFF: the serial of the sniff to check
 };
 
 static struct vt_event *vt_heap;
@@ -947,7 +987,7 @@ static int vt_num_nodes;
 static uint64_t vt_now;                         // time of the last wake
 static uint64_t vt_wakes, vt_frames_in, vt_frames_out;
 static uint64_t vt_cut[MAX_NODES][MAX_NODES / 64]; // vt_cut[dst]: senders it no longer hears
-static uint64_t vt_verdicts_out, vt_senses;
+static uint64_t vt_verdicts_out, vt_senses, vt_sniffs_in, vt_sniff_results_out;
 static uint8_t *vt_cca_shm;                     // the CCA shared memory (SIM_SHM_CCA_STRIDE bytes per node)
 
 static bool vt_before(const struct vt_event *a, const struct vt_event *b)
@@ -1085,7 +1125,7 @@ static bool vt_hears(struct ctxt *ctxt, int src, int dst, const struct sim_frame
 // Central medium (docs/MEDIUM.md §3): the frame goes on air; each receiver
 // that locks onto it gets it now ("xx" with SIM_FRAME_MEDIUM and its power)
 // and a verdict at its end.
-static void vt_queue_frame_medium(struct ctxt *ctxt, int src, void *msg, int len)
+static void vt_queue_frame_medium(struct ctxt *ctxt, int src, void *msg, int len, uint32_t preamble_us)
 {
     struct sim_frame_hdr *hdr = msg;
     struct vt_frame *frame = NULL;
@@ -1094,17 +1134,25 @@ static void vt_queue_frame_medium(struct ctxt *ctxt, int src, void *msg, int len
     float rx_dbm;
     int i;
 
+    uint32_t serial;
+    uint64_t check;
+
     med_tx_start(src, vt_now);
-    f = med_frame_start(src, hdr, vt_now);
+    f = med_frame_start_lp(src, hdr, vt_now, preamble_us);
     if (!f)
         return;
     for (i = 0; i < vt_num_nodes; i++)
         if (vt_hears(ctxt, src, vt_nodes[i], hdr))
             med_add_rx(f, vt_nodes[i]);
-    hdr->flags = SIM_FRAME_MEDIUM;
+    hdr->flags = SIM_FRAME_MEDIUM | (preamble_us ? SIM_FRAME_LONG_PREAMBLE : 0);
     hdr->frame_id = med_frame_id(f);
     for (i = 0; i < med_num_rx(f); i++) {
         lock = med_decide(f, i, vt_now, &rx_dbm);
+        // A receiver that sniffs on this channel: a dwell to check (§10)
+        check = med_sniff_frame(f, i, &serial);
+        if (check != MED_SNIFF_NONE)
+            vt_push_ev((struct vt_event){ .t = check, .node = med_rx_node(f, i), .kind = VT_EV_SNIFF,
+                                          .sniff = serial });
         if (!lock)
             continue;
         if (!frame) {
@@ -1124,7 +1172,8 @@ static void vt_queue_frame_medium(struct ctxt *ctxt, int src, void *msg, int len
 }
 
 // Queue a frame from src for its neighbours at the current time.
-static void vt_queue_frame(struct ctxt *ctxt, int src, void *msg, int len)
+// preamble_us: the long preamble of an "xl" (central medium only).
+static void vt_queue_frame(struct ctxt *ctxt, int src, void *msg, int len, uint32_t preamble_us)
 {
     struct sim_frame_hdr *hdr = msg;
     struct vt_frame *frame;
@@ -1145,7 +1194,7 @@ static void vt_queue_frame(struct ctxt *ctxt, int src, void *msg, int len)
     hdr->frame_id = 0;
     hdr->rx_dbm = 0;
     if (med_central()) {
-        vt_queue_frame_medium(ctxt, src, msg, len);
+        vt_queue_frame_medium(ctxt, src, msg, len, preamble_us);
         return;
     }
     frame = malloc(sizeof(*frame) + len);
@@ -1189,7 +1238,28 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
             return 0;
         }
         if (len >= 2 && !memcmp(buf, "xx", 2)) {
-            vt_queue_frame(ctxt, node, buf, len);
+            vt_queue_frame(ctxt, node, buf, len, 0);
+        } else if (med_central() && len >= 2 && !memcmp(buf, "xl", 2)) {
+            // A frame with a long preamble (§10): the "xx" that follows
+            const struct sim_lp_frame *lp = (const struct sim_lp_frame *)buf;
+
+            if (len < (int)sizeof(*lp) + 2)
+                WARN("node %d: \"xl\" of %zd bytes, dropped", node, len);
+            else
+                vt_queue_frame(ctxt, node, buf + sizeof(*lp), len - sizeof(*lp), lp->preamble_us);
+        } else if (med_central() && len == sizeof(struct sim_sniff) && !memcmp(buf, "xn", 2)) {
+            // A sniff (§10): its receiver is on from now; checks queued
+            const struct sim_sniff *req = (const struct sim_sniff *)buf;
+            uint64_t check;
+            uint32_t serial = med_sniff_start(node, req, vt_now, &check);
+
+            vt_sniffs_in++;
+            vt_push_ev((struct vt_event){ .t = check, .node = node, .kind = VT_EV_SNIFF, .sniff = serial });
+            if (pwr_enabled()) {
+                struct sim_radio_report r = { .magic = "xr", .state = SIM_RADIO_LISTEN, .channel = req->channel };
+
+                pwr_radio(node, vt_now, &r);
+            }
         } else if (med_central() && len == sizeof(struct sim_sense) && !memcmp(buf, "xs", 2)) {
             // CCA: answered at once, the node waits for it
             struct sim_sense *sense = (struct sim_sense *)buf;
@@ -1216,9 +1286,11 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
 static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
 {
     static struct vt_msg {
-        struct vt_frame *frame;     // NULL: verdict
+        struct vt_frame *frame;     // NULL: verdict or sniff result
         float rx_dbm;
+        bool sniff;                 // sniff result, not verdict
         struct sim_verdict verdict;
+        struct sim_sniff_result result;
     } *msgs;
     static size_t msgs_cap;
     static uint8_t out[sizeof(buf)];
@@ -1248,9 +1320,54 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
         if (ev.kind == VT_EV_VERDICT) {
             if (!med_verdict(ev.lock, t, &msgs[num].verdict))
                 continue;
+            msgs[num].sniff = false;
             msgs[num++].frame = NULL;
             continue;
         }
+        if (ev.kind == VT_EV_SNIFF) {
+            struct med_lock *lock;
+            const void *fmsg;
+            uint64_t next;
+            float rx_dbm;
+            int flen;
+
+            if (!med_sniff_check(node, ev.sniff, t, &msgs[num].result, &lock, &fmsg, &flen, &rx_dbm, &next)) {
+                if (next != MED_SNIFF_NONE)
+                    vt_push_ev((struct vt_event){ .t = next, .node = node, .kind = VT_EV_SNIFF, .sniff = ev.sniff });
+                continue;
+            }
+            if (pwr_enabled()) {
+                struct sim_radio_report r = { .magic = "xr", .channel = 0 };
+
+                // Nothing detected: the radio goes to the request's end
+                // state; locked: it receives (§10)
+                r.state = !msgs[num].result.detected ? med_sniff_end_state(node, t) :
+                          lock ? SIM_RADIO_RECEIVE : SIM_RADIO_LISTEN;
+                if (r.state != SIM_RADIO_LISTEN && r.state < SIM_RADIO_STATES)
+                    pwr_radio(node, t, &r);
+            }
+            msgs[num].sniff = true;
+            msgs[num++].frame = NULL;
+            if (!lock)
+                continue;
+            if (num == msgs_cap) {
+                msgs_cap *= 2;
+                msgs = realloc(msgs, msgs_cap * sizeof(*msgs));
+                FATAL_ON(!msgs, 1, "realloc: %m");
+            }
+            msgs[num].frame = malloc(sizeof(struct vt_frame) + flen);
+            FATAL_ON(!msgs[num].frame, 1, "malloc: %m");
+            msgs[num].frame->refs = 1;
+            msgs[num].frame->len = flen;
+            memcpy(msgs[num].frame->data, fmsg, flen);
+            msgs[num].sniff = false;
+            msgs[num++].rx_dbm = rx_dbm;
+            num_frames++;
+            vt_push_ev((struct vt_event){ .t = med_lock_end(lock), .node = node, .kind = VT_EV_VERDICT,
+                                          .lock = lock });
+            continue;
+        }
+        msgs[num].sniff = false;
         msgs[num].frame = ev.frame;
         msgs[num++].rx_dbm = ev.rx_dbm;
         num_frames++;
@@ -1269,6 +1386,12 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
     if (vt_send(node, &adv, sizeof(adv)))
         ret = -1;
     for (i = 0; i < num; i++) {
+        if (!msgs[i].frame && msgs[i].sniff) {
+            if (!ret && vt_send(node, &msgs[i].result, sizeof(msgs[i].result)))
+                ret = -1;
+            vt_sniff_results_out++;
+            continue;
+        }
         if (!msgs[i].frame) {
             if (!ret && vt_send(node, &msgs[i].verdict, sizeof(msgs[i].verdict)))
                 ret = -1;
@@ -1570,6 +1693,9 @@ out:
     if (med_central()) {
         INFO("medium: %llu verdicts delivered, %llu CCA queries answered", (unsigned long long)vt_verdicts_out,
              (unsigned long long)vt_senses);
+        if (vt_sniffs_in)
+            INFO("medium: %llu sniffs requested, %llu sniff results delivered", (unsigned long long)vt_sniffs_in,
+                 (unsigned long long)vt_sniff_results_out);
         med_finish();
     }
     // A run that reached its end time lasted until then; any other, until
