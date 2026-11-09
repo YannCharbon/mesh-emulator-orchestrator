@@ -66,6 +66,7 @@ struct med_frame {
     int len;
     int n_rx, cap_rx;
     struct med_rx *rx;          // ascending node IDs
+    uint64_t rx_mask[SIM_MAX_NODES / 64]; // the nodes in rx: a quick test before the search
     struct med_frame *next;
 };
 
@@ -382,6 +383,8 @@ static const struct med_rx *med_find_rx(const struct med_frame *f, int node)
 {
     int lo = 0, hi = f->n_rx - 1, mid;
 
+    if (!(f->rx_mask[node / 64] & (1ULL << (node % 64))))
+        return NULL;
     while (lo <= hi) {
         mid = (lo + hi) / 2;
         if (f->rx[mid].node == node)
@@ -613,6 +616,7 @@ void med_add_rx(struct med_frame *f, int node)
         FATAL_ON(!f->rx, 1, "realloc: %m");
     }
     rx = &f->rx[f->n_rx++];
+    f->rx_mask[node / 64] |= 1ULL << (node % 64);
     rx->node = node;
     rx->dbm = med_rx_dbm(node, f->src, f->tx_dbm);
     rx->mw = dbm_to_mw(rx->dbm);
