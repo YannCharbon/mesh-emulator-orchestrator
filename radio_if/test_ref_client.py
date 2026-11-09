@@ -8,7 +8,8 @@ Each test starts a copy of wssimserver on its own socket (so its own shared
 memory names: a real run on the same PC is not disturbed) and one
 ref_client.py process per node, then checks the nodes' logs, the server's
 medium log and power report. Exit status 0 when every test passes. About
-5 s in all.
+5 s in all. Without --logdir, the logs go to a new temporary directory,
+removed when every test passes and kept (its path printed) on a failure.
 """
 import argparse
 import json
@@ -884,30 +885,43 @@ def main():
     global ARGS
     ap = argparse.ArgumentParser()
     ap.add_argument("server", help="wssimserver binary of a virtual-time build (copied before use)")
-    ap.add_argument("--logdir", default=None)
+    ap.add_argument("--logdir", default=None,
+                    help="keep the logs here; by default a new temporary directory, removed when every test passes")
     ap.add_argument("-k", default="", help="run only tests whose name contains this")
     ARGS = ap.parse_args()
+    temp_logs = not ARGS.logdir
     ARGS.logdir = ARGS.logdir or tempfile.mkdtemp(prefix="radio_if_")
     os.makedirs(ARGS.logdir, exist_ok=True)
     ARGS.bin = os.path.join(ARGS.logdir, "wssimserver-radio-if")
     ARGS.sockdir = tempfile.mkdtemp(prefix="rif_", dir="/tmp")
-    shutil.copy2(ARGS.server, ARGS.bin)
-    ARGS.cbin = os.path.join(ARGS.logdir, "rif_node")
-    subprocess.run(["cc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-o", ARGS.cbin, C_SRC], check=True)
-    tests = [(n[5:], f) for n, f in globals().items() if n.startswith("test_")]
     failed = 0
-    for name, fn in tests:
-        if ARGS.k not in name:
-            continue
-        t0 = time.monotonic()
-        try:
-            fn()
-            print(f"PASS {name} ({time.monotonic() - t0:.1f} s)")
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            print(f"FAIL {name}: {type(e).__name__}: {e}")
-    shutil.rmtree(ARGS.sockdir, ignore_errors=True)
-    print(f"logs in {ARGS.logdir}")
+    try:
+        shutil.copy2(ARGS.server, ARGS.bin)
+        ARGS.cbin = os.path.join(ARGS.logdir, "rif_node")
+        subprocess.run(["cc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-o", ARGS.cbin, C_SRC], check=True)
+        tests = [(n[5:], f) for n, f in globals().items() if n.startswith("test_")]
+        for name, fn in tests:
+            if ARGS.k not in name:
+                continue
+            t0 = time.monotonic()
+            try:
+                fn()
+                print(f"PASS {name} ({time.monotonic() - t0:.1f} s)")
+            except Exception as e:  # noqa: BLE001
+                failed += 1
+                print(f"FAIL {name}: {type(e).__name__}: {e}")
+    except BaseException:
+        failed += 1
+        raise
+    finally:
+        shutil.rmtree(ARGS.sockdir, ignore_errors=True)
+        # A temporary log directory goes when every test passed; it stays
+        # for a failure (and with --logdir, always)
+        if temp_logs and not failed:
+            shutil.rmtree(ARGS.logdir, ignore_errors=True)
+            print("all passed: logs removed (--logdir DIR keeps them)")
+        else:
+            print(f"logs in {ARGS.logdir}")
     return 1 if failed else 0
 
 
