@@ -2,7 +2,7 @@
 
 This guide is the starting point for developers of a mesh stack that is not built on Nanostack and lives in its own repository. It explains how to test that stack in the emulator, observe it in the web application (`mesh-testbed-controller`) and then run it on the MTS bench. It gives the order of the work and the commands, and it links to the specifications for the details; it does not repeat them.
 
-Every command in this guide was run once on 2026-11-09, on emulator `main` at `1a6082a`, controller `9297149` and bootloader `12ea43af`, except those that need the bench, which are marked. The server-only build (§2), `run.sh` with relative client paths and large topologies (§3) were run again after the emulator fixes of the same day. Paths are relative to the emulator checkout unless stated otherwise; `<root>` is the checkout of `mesh-emulator-rework`, which holds the emulator, the controller, the bootloader and the stack as sibling directories.
+Every command in this guide was run once on 2026-11-09, on emulator `main` at `1a6082a`, controller `9297149` and bootloader `12ea43af`, except those that need the bench, which are marked. The server-only build (§2), `run.sh` with relative client paths and large topologies (§3), and the web-app steps of §4 (on a test instance of controller `1c346d6`) were run again after the fixes of the same day. Paths are relative to the emulator checkout unless stated otherwise; `<root>` is the checkout of `mesh-emulator-rework`, which holds the emulator, the controller, the bootloader and the stack as sibling directories.
 
 ## 1. What the environment offers, and its limits
 
@@ -131,53 +131,46 @@ Plan the memory as the client's resident size × N ([SCALE.md](SCALE.md) §3–�
 
 The web app reads each client's `MOP1` lines and shows the nodes, their states, parents and links, counters and events ([STACK_NEUTRAL_MODEL.md](../../mesh-testbed-controller/docs/STACK_NEUTRAL_MODEL.md), "The emulator" and "Nodes of other stacks: clients of the radio interface"). Installation of .NET and the settings are in the controller's [README](../../mesh-testbed-controller/README.md).
 
-**Start an instance for the emulator only.** The default settings also open the real bench: always switch it off in an instance used for emulator work.
+**Start an instance for the emulator only,** with the test profile, its own port and its own data directory. The test profile switches the real bench off whatever the other options say, keeps the configurations, event log, exports and runs under the data directory, uses no TUN device, and builds the program in `<data dir>/build` ([README](../../mesh-testbed-controller/README.md), "Extra instances"). Switch the simulated bench off too, so that the emulator is the instance's environment:
 
 ```bash
 cd <root>/mesh-testbed-controller
-./run.sh --urls http://127.0.0.1:5091 --Environments:MtsReal=false --Environments:MtsSimulated=false \
-    --Environments:Emulator=true --Environments:Default=Emulator \
-    --Emulator:EmulatorDir=<emulator checkout> --Emulator:Tun=none \
-    --Emulator:ExportRoot=<dir>/emulator --Data:ConfigDir=<dir>/configs \
-    --Data:RecordDir=<dir>/records --Data:EventLogFile=<dir>/events.log
+./run.sh --profile test --dataDir <dir> --urls http://127.0.0.1:5091 \
+    --Environments:MtsSimulated=false --Emulator:EmulatorDir=<emulator checkout>
 ```
 
-**Write the configuration.** A configuration names the stack, its program and arguments, the nodes and the topology ([STACK_NEUTRAL_MODEL.md](../../mesh-testbed-controller/docs/STACK_NEUTRAL_MODEL.md), "Configuration of nodes of other stacks, and the neutral TX power"). It can be edited as JSON on the Configuration page, or written as a file in the configuration directory. This script turns a topology file into a configuration in which every node runs the stack:
+Every page then shows "Test instance: no real bench". Use a port of your own: another instance may already use 5080 or 5081.
 
-```python
-import json, sys
-# mkconfig.py <topology file> <name> <program> > <config dir>/<name>.json
-topo, name, program = sys.argv[1:4]
-links, ids = [], set()
-for line in open(topo):
-    line = line.split("#")[0].strip()
-    if not line:
-        continue
-    ab, rssi = line.split(":")
-    a, b = (int(x) for x in ab.split(","))
-    links.append({"a": a, "b": b, "rssiDbm": float(rssi)})
-    ids |= {a, b}
-print(json.dumps({
-    "schema": 1, "name": name,
-    "radio": {"txPowerDbm": 14},
-    "topology": {"kind": "edges", "links": links},
-    "stacks": {"my-stack": {"program": program, "arguments": "", "settings": {}, "txPowerSetting": "tx-dbm"}},
-    "run": {"durationS": 300, "seeds": [1], "virtualTime": True},
-    "nodes": [{"id": i, "stack": "my-stack"} for i in sorted(ids)],
-}, indent=1))
+**Write the configuration.** A configuration names the stack, its program and arguments, the topology and the run ([STACK_NEUTRAL_MODEL.md](../../mesh-testbed-controller/docs/STACK_NEUTRAL_MODEL.md), "Configuration of nodes of other stacks, and the neutral TX power"). It can be edited as JSON on the Configuration page, or written as a file in the configuration directory (`<dir>/configs` of a test instance). The topology can stay in its file (`"kind": "file"`, the emulator's topology format, read at each plan and run), and `defaultStack` puts every node of the topology on the stack without listing the nodes:
+
+```json
+{
+ "schema": 1, "name": "mystack48",
+ "radio": {"txPowerDbm": 14},
+ "topology": {"kind": "file", "file": "/abs/path/topo48.txt"},
+ "defaultStack": "my-stack",
+ "stacks": {"my-stack": {"program": "/abs/path/to/my_client", "arguments": "", "settings": {}, "txPowerSetting": "tx-dbm"}},
+ "run": {"durationS": 300, "seeds": [1], "virtualTime": true, "powerProfile": "examples/power/efr32fg25-lfn.ini"}
+}
 ```
 
 - `txPowerSetting` names the client's argument for the TX power: the neutral TX power `radio.txPowerDbm` is passed as `--tx-dbm 14`. Settings in `stacks.<name>.settings` and `nodes[i].settings` become `--name value` arguments; a value must not contain spaces or quotes.
 - `run.mediumTxRefDbm` makes the link values the received power at that TX power, so that a node's TX power changes what others receive.
-- `"program"` may use `$EMU`, the emulator checkout (for example `python3 $EMU/radio_if/ref_client.py`).
+- `"program"` may use `$EMU`, the emulator checkout (for example `python3 $EMU/radio_if/ref_client.py`); otherwise give absolute paths.
+- `topology.file`: give an absolute path. The documentation allows a path relative to the configuration directory, but on controller `1c346d6` such a path was looked up in the controller's own directory (the plan says "no file ...").
+- The Configuration page can also import a topology file into the configuration's links (`"kind": "edges"`), and chooses the default stack and the power profile. A node keeps its own stack with an entry in `nodes` (`{"id": 0, "stack": "wisun"}` for a Nanostack border router).
+- `run.powerProfile` (an `.ini` of the emulator's `examples/power/`, or an absolute path) and `run.powerCell` (`mAh[:V[:efficiency]]`) are exported as `POWER` and `POWER_CELL` of `run.sh`; both are also on the Configuration page and the Runs page.
 
-**Run it.** On the Configuration page: choose the configuration, **Load**, **Plan**, **Apply selected steps** (this writes `config.json`, `topology.txt` and `run.sh` into `<ExportRoot>/<name>/`). On **Runs and recording**: **Start**. **Nodes**, **Mesh** and **Events** then show the run; event times carry the run's virtual time ("(run t=97.803 s)"). Do these steps in one browser tab (§7).
+**Run it.** On the Configuration page: choose the configuration, **Load**, **Plan**, **Apply selected steps** (this writes `config.json`, `topology.txt` and `run.sh` into `<ExportRoot>/<name>/`). On **Runs and recording**: **Start**; the button names what it starts ("Start 'mystack48' (seed 1, 300 s, power)"). The server has one current configuration, shared by every browser tab and shown at the top of every page, so the run may be started from any tab. **Nodes**, **Mesh** and **Events** then show the run; events of an emulator run carry its virtual time in the time column ("run 97.803 s").
 
-**Power report and other options from a web-app configuration.** The web app's runs do not record power yet. Run the exported script instead, which passes the environment through to `run.sh`; its runs appear under **Show a run**:
+**Power report.** With a power profile in the configuration or chosen on the Runs page, the run writes `power.json`, shown on the Runs page as a per-node table (average current, charge, RX and TX time, deep sleep, wakes; CSV export) and in each node's details.
+
+**Runs made outside the web app.** A run made with `run.sh` or by hand opens on the Runs page by its path (**Open a run directory**), if it lies under the export directory, the emulator's `runs/` or a directory of `Emulator:RunRoots` (`--Emulator:RunRoots:0=/home/me/runs`). It needs the clients' `if<i>.log` (or `br.log`); its `topology.txt`, `t0` and `power.json` are used when present. For example, from the emulator checkout:
 
 ```bash
-cd <ExportRoot>/<name>
-POWER=<emulator checkout>/examples/power/efr32fg25-lfn.ini SIM_OPTS="--medium-log=medium.log" ./run.sh 2
+TOPO=topo48.txt IF_NODES="$(seq -s ' ' 0 47)" IF_CMD=./my_client TUN=none \
+    POWER=examples/power/efr32fg25-lfn.ini sim_utils/vtime/run.sh build-srv . runs/hand1 60
+# Runs page, "Open a run directory": <emulator checkout>/runs/hand1
 ```
 
 **Setting changes at a virtual time.** In the emulator a setting changes at a virtual time given in the configuration, not from the node details, so that a run stays repeatable ([STACK_NEUTRAL_MODEL.md](../../mesh-testbed-controller/docs/STACK_NEUTRAL_MODEL.md), "Setting changes during an emulator run"). The client must list its settings in its reports (`ops`, `settings`) and read a schedule of MOP `set` requests from the file named by `setFileArgument`:
@@ -254,11 +247,13 @@ The simulated bench of the controller (`--Environments:MtsSimulated=true`, with 
 | Every overlapping frame lost | A link without a value is 0 dBm and destroys any frame it overlaps: give link values |
 | A link behaves differently in each direction | A line `B,A:RSSI` sets the reverse direction; the server warns when a later line changes a value ([MEDIUM.md](MEDIUM.md) §2) |
 | Two runs with the same seed differ | The client reads the wall clock or another random source, or iterates over something unordered; compare the node logs to find the first difference |
-| The power report is missing from a web-app run | Run the exported `run.sh` with `POWER` (§4) |
-| A run made by hand is not offered under "Show a run" | The web app lists the runs under its export directory: run the exported `run.sh` there |
-| The run started from the web app is not the configuration just loaded | The active configuration belongs to the browser tab: load it and start the run in the same tab |
+| The power report is missing from a web-app run | No power profile was chosen: set `run.powerProfile` on the Configuration page or choose one on the Runs page before **Start** (§4) |
+| A run made by hand cannot be opened | Open it by its path on the Runs page; it must lie under the export directory, the emulator's `runs/` or a directory of `Emulator:RunRoots`, and contain `if<i>.log` or `br.log` (§4) |
+| The run started from the web app is not the configuration expected | The Runs page starts the current configuration (shown at the top of every page, shared by all tabs) or the saved one chosen there; the **Start** button names it (§4) |
+| The plan says `topology.file: no file ...` | Give the topology file as an absolute path (§4) |
+| The Configuration page shows "Object reference not set to an instance of an object" after **Plan**, and **Apply selected steps** stays disabled | Seen when the plan targeted the simulated bench (the button reads "Apply to MTS bench (simulated)") with a configuration of other-stack nodes only: start the instance with `--Environments:MtsSimulated=false` (§4) or choose the Emulator environment at the top of the page |
 | A node is shown "unknown" | Its log has no `MOP1` report line, or the line's first word is not the virtual time in µs |
-| A second controller instance contacts the real bench | Its default settings enable the real bench: start it with `--Environments:MtsReal=false` |
+| A second controller instance contacts the real bench | Start extra instances with `--profile test` (§4), which keeps the real bench off; an instance with the real bench warns on every page when another one uses it |
 | The power figures look like mode 1a at another bit rate | The client reports `phy_mode` 0: report the number matching its PHY ([RADIO_INTERFACE.md](RADIO_INTERFACE.md) §7) |
 | An image on the bench is rolled back after three boots | It never confirmed its trial: install it as permanent, or confirm once its management link works (§5) |
 | A node on the bench no longer answers on the network | Without MOP `reset` or the management protocol, reset it at the board while the host sends `HOLD` (`tools/mtsbl.py hold all --seconds 60`), or reset it three times so that the bootloader rolls back ([MTS_Bootloader_Design.md](../../documents/mts/MTS_Bootloader_Design.md) §13) |

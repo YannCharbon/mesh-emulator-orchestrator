@@ -126,6 +126,7 @@
 # included), except the instances that KILL or RESTART stopped.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3; DUR=$4
+[ -x "$BIN/wssimserver" ] || { echo "run.sh: no $BIN/wssimserver (bindir: a virtual-time or server-only build)" >&2; exit 1; }
 BR_CONF=$WORK/examples/wsbrd${CONF:+-$CONF}.conf
 NODE_CONF=$WORK/examples/wsnode${CONF:+-$CONF}.conf
 if [ -n "${POWER:-}" ]; then
