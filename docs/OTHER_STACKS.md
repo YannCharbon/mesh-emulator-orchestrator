@@ -2,7 +2,7 @@
 
 This guide is the starting point for developers of a mesh stack that is not built on Nanostack and lives in its own repository. It explains how to test that stack in the emulator, observe it in the web application (`mesh-testbed-controller`) and then run it on the MTS bench. It gives the order of the work and the commands, and it links to the specifications for the details; it does not repeat them.
 
-Every command in this guide was run once on 2026-11-09, on emulator `main` at `1a6082a`, controller `9297149` and bootloader `12ea43af`, except those that need the bench, which are marked. Paths are relative to the emulator checkout unless stated otherwise; `<root>` is the checkout of `mesh-emulator-rework`, which holds the emulator, the controller, the bootloader and the stack as sibling directories.
+Every command in this guide was run once on 2026-11-09, on emulator `main` at `1a6082a`, controller `9297149` and bootloader `12ea43af`, except those that need the bench, which are marked. The server-only build (§2), `run.sh` with relative client paths and large topologies (§3) were run again after the emulator fixes of the same day. Paths are relative to the emulator checkout unless stated otherwise; `<root>` is the checkout of `mesh-emulator-rework`, which holds the emulator, the controller, the bootloader and the stack as sibling directories.
 
 ## 1. What the environment offers, and its limits
 
@@ -21,7 +21,7 @@ Every command in this guide was run once on 2026-11-09, on emulator `main` at `1
 | Limit | Effect on results |
 | --- | --- |
 | Preamble detection figures (probability, dwell, settling time) are model values; the FG25 datasheet gives none | Sniffing results are indicative until the kits measure them ([MEDIUM.md](MEDIUM.md) §10.5–§10.6) |
-| Interference is treated like noise in the loss curve, which needs about 20 dB of SINR for 1 % loss on a 50-byte frame; the FG25 datasheet gives a co-channel rejection of −4.4 to −7.2 dB | Collision losses are upper bounds until the kits measure FSK-on-FSK behaviour |
+| Interference is treated like noise in the loss curve, which needs about 20 dB of SINR for 1 % loss on a 50-byte frame; the FG25 datasheet gives a co-channel rejection of −4.4 to −7.2 dB (EU modes 1a–3) | Collision losses are upper bounds until the kits measure FSK-on-FSK behaviour (EM5, in progress) ([MEDIUM.md](MEDIUM.md) §9, "Known bias") |
 | No adjacent-channel interference, fading, external interferers, node positions or RX/TX turnaround times ([MEDIUM.md](MEDIUM.md) §9) | Topologies give fixed link values; channel plans are not penalised for adjacent channels |
 | Code runs in zero virtual time; MCU time is modelled from cycle counts in the profile | A slow MCU does not delay the protocol in the emulator |
 | The power profiles are measured on the FG25 kits (an always-listening router and our low-power firmware) | Another radio or MCU needs its own profile ([POWER_MODEL.md](POWER_MODEL.md) §6.1) |
@@ -29,16 +29,16 @@ Every command in this guide was run once on 2026-11-09, on emulator `main` at `1
 
 ## 2. Step 1: write a client
 
-**Build the server.** Only `wssimserver` is needed, from a virtual-time build. The build still needs the stack's sources and mbedtls to configure, as described in the emulator [README](../README.md), "Compile mbedtls":
+**Build the server.** Only `wssimserver` is needed. The option `-DWSSIM_SERVER_ONLY=ON` builds it alone, without mbedtls, libnl, libsystemd or any stack library. It still reads six source files of a `nanostack-generic-standalone` checkout (the logger and the simulation port's protocol headers, which the server shares with the Nanostack nodes; nothing of the stack is configured or built), so clone that repository next to the emulator or pass its path ([README](../README.md), "The server alone"):
 
 ```bash
-git clone --branch=v3.0.0 https://github.com/ARMmbed/mbedtls
-(cd mbedtls && cmake -G Ninja -DCMAKE_C_FLAGS=-DMBEDTLS_NO_PLATFORM_ENTROPY -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF . && ninja)
-cmake -S . -B build-vt -G Ninja -DNANOSTACK_PORT=nanostack_port_sim -DCMAKE_PREFIX_PATH=$(pwd)/mbedtls \
-    -DNANOSTACK_DIR=<root>/nanostack-generic-standalone -DCMAKE_C_FLAGS="-std=gnu17 -fpermissive"
-ninja -C build-vt wssimserver
-python3 radio_if/test_ref_client.py build-vt/wssimserver     # the server's interface tests, about 2 s
+cmake -S . -B build-srv -G Ninja -DWSSIM_SERVER_ONLY=ON -DNANOSTACK_DIR=<root>/nanostack-generic-standalone \
+    -DCMAKE_C_FLAGS="-std=gnu17 -fpermissive"
+ninja -C build-srv
+python3 radio_if/test_ref_client.py build-srv/wssimserver     # the server's interface tests, about 2 s
 ```
+
+The server is the same as in the full virtual-time build (`build-vt`, emulator [README](../README.md), "Compile mbedtls"), which is needed only to run Nanostack nodes next to the clients. The commands below use `build-srv`; `build-vt` works the same way.
 
 **What to implement first,** in this order, each section of [RADIO_INTERFACE.md](RADIO_INTERFACE.md) being the reference:
 
@@ -58,7 +58,7 @@ The clients in `radio_if/` (Python and C) illustrate the interface. The stack's 
 
 ```bash
 SOCK=/tmp/mystack.sock
-WSSIM_SEED=1 build-vt/wssimserver --vtime=3 --vtime-end=60 -g 1,2:-70 -g 1,3:-70 -g 2,3:-75 \
+WSSIM_SEED=1 build-srv/wssimserver --vtime=3 --vtime-end=60 -g 1,2:-70 -g 1,3:-70 -g 2,3:-75 \
     --medium-log=medium.log --power=examples/power/efr32fg25-lfn.ini --power-out=power.json \
     $SOCK > simserver.log 2>&1 &
 for i in $(seq 200); do [ -S $SOCK ] && break; sleep 0.05; done
@@ -86,12 +86,12 @@ The generator draws nothing at random: the same options give the same file.
 **Run with `run.sh`.** `sim_utils/vtime/run.sh` starts the server and one client per ID in `IF_NODES`, writes one log per client and records the run's settings ([sim_utils/vtime/README.md](../sim_utils/vtime/README.md), "run.sh"). With node 0 among the clients, the run has no Nanostack program and needs no TUN device:
 
 ```bash
-TOPO=topo48.txt IF_NODES="$(seq -s ' ' 0 47)" IF_CMD=/abs/path/to/my_client WSSIM_SEED=1 TUN=none \
+TOPO=topo48.txt IF_NODES="$(seq -s ' ' 0 47)" IF_CMD=../mystack/build/my_client WSSIM_SEED=1 TUN=none \
     POWER=examples/power/efr32fg25-lfn.ini SIM_OPTS="--medium-log=medium.log --sniff-log=sniff.log" \
-    sim_utils/vtime/run.sh build-vt . runs/mystack/seed1 300
+    sim_utils/vtime/run.sh build-srv . runs/mystack/seed1 300
 ```
 
-- `IF_CMD` is the client's command, given `--sock <socket> --id <i>`; `IF_OPTS_<i>` and `IF_CMD_<i>` give one node its own arguments or program. The programs run in the output directory, so `IF_CMD` must be an absolute path or a command on `PATH`.
+- `IF_CMD` is the client's command, given `--sock <socket> --id <i>`; `IF_OPTS_<i>` and `IF_CMD_<i>` give one node its own arguments or program. The programs run in the output directory. In `IF_CMD`, `IF_CMD_<i>` and `IF_OPTS_<i>`, a word that contains a `/` and names an existing file or directory relative to the directory `run.sh` is called from is made absolute (`../mystack/build/my_client`, `./my_client`, `python3 radio_if/ref_client.py`, a schedule file `sched/3.txt`); a bare name (`my_client`) is looked up on `PATH`, as by the shell. A file that the client creates is relative to the output directory unless its path is absolute.
 - `SIM_OPTS` passes any server option (`wssimserver --help`): the medium and sniff logs, clock drift (`--drift-random=20`), cut links and link changes in virtual time (`CUT`, `LINK`), late power-up (`POWER_UP`, `SPREAD`).
 - The output directory must be new or empty.
 
@@ -117,16 +117,12 @@ Size campaigns to what they must show: a few seeds of a reasonable length, not m
 | `if<i>.log` | The client's own output, with its `MOP1` lines |
 | `run_info.txt`, `exit_codes.txt`, `topology.txt` | Seed, nodes, options, the wall-clock start and end; each program's exit status; the topology as used |
 
-**Large runs.** Above a few hundred nodes, start the server and the clients by hand with `--group-file` instead of `run.sh` (§7): a 1000-node building took 2.5 min for `run.sh` to prepare and 6 s by hand, with identical results.
+**Large runs.** `run.sh` gives the topology to the server with `--group-file`, so it takes any network up to 4096 node IDs: a 1000-node building (19 156 links) is prepared in under 1 s, and its 60 virtual seconds took 3.6 s in all (2.5 min before 2026-11-09, when `run.sh` passed every link as `-g`; same results); a 4000-node building ran through it too. Starting the server and the clients by hand ([SCALE.md](SCALE.md) §2) is no longer needed for size. Use the building generator for the topology:
 
 ```bash
 python3 radio_if/scale/gen_building.py --nodes 1000 -o topo1000.txt
-SOCK=/tmp/mystack-$$.sock; N=1000
-WSSIM_SEED=1 build-vt/wssimserver --vtime=$N --vtime-end=60 --group-file=topo1000.txt \
-    --power=examples/power/efr32fg25-lfn.ini --power-out=power.json $SOCK > simserver.log 2>&1 &
-for i in $(seq 200); do [ -S $SOCK ] && break; sleep 0.05; done
-for i in $(seq 0 $((N - 1))); do my_client --sock $SOCK --id $i > if$i.log 2>&1 & done
-wait
+TOPO=topo1000.txt IF_NODES="$(seq -s ' ' 0 999)" IF_CMD=./my_client WSSIM_SEED=1 TUN=none \
+    POWER=examples/power/efr32fg25-lfn.ini sim_utils/vtime/run.sh build-srv . runs/mystack/n1000 60
 ```
 
 Plan the memory as the client's resident size × N ([SCALE.md](SCALE.md) §3–§4).
@@ -246,9 +242,11 @@ The simulated bench of the controller (`--Environments:MtsSimulated=true`, with 
 
 | Symptom | Cause and remedy |
 | --- | --- |
-| `cmake` fails on `MbedTLS` or on the stack's directory | The virtual-time build configures the whole project even for `wssimserver`: build mbedtls and point `-DNANOSTACK_DIR` at a checkout of `nanostack-generic-standalone` (§2) |
-| A client exits with "can't open file" or "not found" under `run.sh` | The programs run in the output directory: give `IF_CMD` as an absolute path or a command on `PATH` |
-| `run.sh` takes minutes before the run starts, or fails with "Argument list too long" | It reads the topology line by line and passes each link as `-g`: slow above a few hundred nodes and limited to about 2000. Start the server by hand with `--group-file` (§3) |
+| `cmake` fails on `MbedTLS`, `libnl-route-3.0` or the stack's directory | Configure with `-DWSSIM_SERVER_ONLY=ON`, which needs neither mbedtls nor libnl, and point `-DNANOSTACK_DIR` at a checkout of `nanostack-generic-standalone` (§2). The full build (`build-vt`) needs mbedtls and is only for Nanostack nodes |
+| `WSSIM_SERVER_ONLY: no stack checkout in NANOSTACK_DIR` | `-DNANOSTACK_DIR` does not point at a `nanostack-generic-standalone` checkout (§2) |
+| A client exits with "can't open file" or "not found" under `run.sh` | The programs run in the output directory. `run.sh` makes a relative path absolute only if it contains a `/` and exists from the directory it is called from: write `./my_client`, not `my_client` (a bare name is looked up on `PATH`), and call `run.sh` from the directory the paths are relative to. A file the client opens through an option whose value is joined to it (`--file=x/y`) is not resolved: give it as a separate word or absolute (§3) |
+| `run.sh` takes minutes before the run starts, or fails with "Argument list too long" | An emulator checkout from before 2026-11-09: `run.sh` then passed each link as `-g`. Update it; `run.sh` now uses `--group-file` (§3) |
+| `--group-file: ...topology.txt:N: ...` in `simserver.log` | Line N of the topology (as cleaned in the output directory's `topology.txt`) is malformed: one `A,B:RSSI` per line, IDs 0 to 4095 ([sim_utils/vtime/README.md](../sim_utils/vtime/README.md), "Topology files") |
 | `run.sh: ... is not empty` | Each run needs a new output directory |
 | The server closes the connection right after the hello | Wrong size or version, an ID used twice or above 4095, more clients than `--vtime=N`, or a server without `--vtime`: the warning is in `simserver.log` ([RADIO_INTERFACE.md](RADIO_INTERFACE.md) §9) |
 | The run stops when one client exits | A client that disconnects during the run stops it; read that client's log |
