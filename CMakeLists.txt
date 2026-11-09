@@ -357,6 +357,11 @@ if(COMPILE_SIMULATION_TOOLS)
         ${NANOSTACK_ROOT}/port/sim/
     )
     target_link_libraries(wssimserver PRIVATE m)
+    # The conductor and the medium are on the critical path of every wake
+    # (docs/SCALE.md): optimised even in this Debug build. No fast-math, so
+    # the medium's and the power ledger's floating-point results are those of
+    # -O0 (x86-64 SSE, no FMA contraction without -mfma).
+    target_compile_options(wssimserver PRIVATE -O2)
     install(TARGETS wssimserver RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 endif()
