@@ -12,6 +12,9 @@
  * conductor. The nodes are built on the simulation port, set SIM_HELLO_VTIME
  * in their hello, and the conductor messages of ns_port_sim.h (in
  * nanostack-generic-standalone/port/sim/) travel on the same socket.
+ *
+ * Programs that are not built on Nanostack use the stack-neutral subset of
+ * these messages specified in docs/RADIO_INTERFACE.md (SIM_HELLO_RADIO_IF).
  */
 #ifndef SIM_PROTO_H
 #define SIM_PROTO_H
@@ -30,12 +33,22 @@ static inline int sim_node_id(const uint8_t eui64[8])
 }
 
 #define SIM_HELLO_VTIME 0x0001  // the node runs on virtual time
+// The node is a client of the stack-neutral radio interface
+// (docs/RADIO_INTERFACE.md): it writes no shared memory, its radio state comes
+// from its "xr" reports, and the server checks its frames against that state.
+// Needs SIM_HELLO_VTIME and the central medium; version says which interface.
+#define SIM_HELLO_RADIO_IF 0x0002
+#define SIM_HELLO_KNOWN (SIM_HELLO_VTIME | SIM_HELLO_RADIO_IF)
+
+// Versions of the radio interface this server speaks (hello's version)
+#define SIM_RADIO_IF_VERSION_MIN 1
+#define SIM_RADIO_IF_VERSION_MAX 1
 
 struct sim_hello {
     char magic[2];              // "xh"
     uint16_t node_id;
     uint16_t flags;             // SIM_HELLO_*
-    uint16_t reserved;
+    uint16_t version;           // with SIM_HELLO_RADIO_IF: the interface version; else 0
 };
 
 struct sim_frame_hdr {
@@ -96,7 +109,7 @@ struct sim_sense {
 // states are the hardware's, not the driver's: the conductor's power ledger
 // gives each one a current from the node's power profile.
 enum sim_radio_state {
-    SIM_RADIO_OFF,              // powered down (none yet: GS8 stage 1)
+    SIM_RADIO_OFF,              // powered down
     SIM_RADIO_IDLE,             // ready, neither receiving nor sending
     SIM_RADIO_LISTEN,           // RX on, no frame (also during CSMA backoffs)
     SIM_RADIO_RECEIVE,          // RX of a frame, from its start to its end

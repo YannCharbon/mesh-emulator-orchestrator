@@ -86,7 +86,7 @@ In virtual time the node's run loop (`NGS/port/sim/sim_scheduler.c`) runs until 
 - **The wake's work** is known at its "xi": the port's "xc" (§5.1) and the "xr" seen in between.
 - **The idle** that follows lasts until the next "xa" of that node.
 
-The ledger reads this in the conductor, so it works for any program that speaks the conductor protocol: EM7's clients get the same accounting by sending "xi" (and, if they can, "xc" and "xr"). On the firmware, the same intervals are the FreeRTOS idle task's sleeps (HW5).
+The ledger reads this in the conductor, so it works for any program that speaks the conductor protocol: clients of the stack-neutral radio interface ([RADIO_INTERFACE.md](RADIO_INTERFACE.md) §7) get the same accounting from their "xi", "xr" and optional "xc". On the firmware, the same intervals are the FreeRTOS idle task's sleeps (HW5).
 
 ### 3.3 Radio off and idle-tick skipping: checks (GS8 stage 1, 2026-10-28)
 

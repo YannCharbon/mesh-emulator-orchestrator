@@ -714,6 +714,7 @@ static void apply_groups(struct ctxt *ctxt)
 // A connection, and the node it carries once its hello arrived.
 struct conn {
     int node;                   // -1 until the hello
+    uint16_t radio_if;          // client of the radio interface (SIM_HELLO_RADIO_IF): its version, else 0
 };
 
 static struct pollfd fds[MAX_NODES + 1];
@@ -739,6 +740,7 @@ static void conn_close(int slot)
     fds[slot].fd = -1;
     fds[slot].events = 0;
     conns[slot].node = -1;
+    conns[slot].radio_if = 0;
 }
 
 // The first --vtime-start of node that has no connection yet takes slot.
@@ -765,6 +767,19 @@ static void conn_hello(int slot, const void *buf, int len, int vtime_nodes)
     if (len != sizeof(*hello) || memcmp(hello->magic, "xh", 2)) {
         WARN("fd %d: expected a hello, dropping the connection", fds[slot].fd);
         conn_close(slot);
+    } else if (hello->flags & ~SIM_HELLO_KNOWN) {
+        WARN("fd %d: node %d: unknown hello flags 0x%04x: refused", fds[slot].fd, hello->node_id,
+             hello->flags & ~SIM_HELLO_KNOWN);
+        conn_close(slot);
+    } else if ((hello->flags & SIM_HELLO_RADIO_IF) &&
+               (hello->version < SIM_RADIO_IF_VERSION_MIN || hello->version > SIM_RADIO_IF_VERSION_MAX)) {
+        WARN("fd %d: node %d: radio interface version %u, this server speaks %d to %d: refused", fds[slot].fd,
+             hello->node_id, hello->version, SIM_RADIO_IF_VERSION_MIN, SIM_RADIO_IF_VERSION_MAX);
+        conn_close(slot);
+    } else if ((hello->flags & SIM_HELLO_RADIO_IF) && (!vtime || !med_central())) {
+        WARN("fd %d: node %d: the radio interface needs virtual time and the central medium "
+             "(--vtime, not --medium=legacy): refused", fds[slot].fd, hello->node_id);
+        conn_close(slot);
     } else if (hello->node_id >= MAX_NODES) {
         WARN("fd %d: node ID %d out of range (max %d)", fds[slot].fd, hello->node_id, MAX_NODES - 1);
         conn_close(slot);
@@ -772,9 +787,11 @@ static void conn_hello(int slot, const void *buf, int len, int vtime_nodes)
         // Another instance of a connected node, for --vtime-start: welcomed
         // at its start time
         conns[slot].node = hello->node_id;
+        conns[slot].radio_if = (hello->flags & SIM_HELLO_RADIO_IF) ? hello->version : 0;
         num_connected++;
         fds[slot].events = 0;
-        INFO("node %d connected (instance for a later start)", hello->node_id);
+        INFO("node %d connected (instance for a later start%s)", hello->node_id,
+             conns[slot].radio_if ? ", radio interface" : "");
     } else if (slot_of_node[hello->node_id]) {
         WARN("fd %d: node %d is already connected", fds[slot].fd, hello->node_id);
         conn_close(slot);
@@ -789,11 +806,15 @@ static void conn_hello(int slot, const void *buf, int len, int vtime_nodes)
         conn_close(slot);
     } else {
         conns[slot].node = hello->node_id;
+        conns[slot].radio_if = (hello->flags & SIM_HELLO_RADIO_IF) ? hello->version : 0;
         slot_of_node[hello->node_id] = slot;
         num_connected++;
         if (vtime)
             fds[slot].events = 0; // only hang-ups until the run starts
-        INFO("node %d connected", hello->node_id);
+        if (conns[slot].radio_if)
+            INFO("node %d connected (radio interface version %u)", hello->node_id, conns[slot].radio_if);
+        else
+            INFO("node %d connected", hello->node_id);
     }
 }
 
@@ -949,6 +970,58 @@ static uint64_t vt_wakes, vt_frames_in, vt_frames_out;
 static uint64_t vt_cut[MAX_NODES][MAX_NODES / 64]; // vt_cut[dst]: senders it no longer hears
 static uint64_t vt_verdicts_out, vt_senses;
 static uint8_t *vt_cca_shm;                     // the CCA shared memory (SIM_SHM_CCA_STRIDE bytes per node)
+
+/*
+ * Clients of the stack-neutral radio interface (docs/RADIO_INTERFACE.md).
+ * They write no shared memory: the server keeps their radio's state from
+ * their "xr" reports and writes it to the node's shared-memory entry itself,
+ * where the medium reads every radio's state. It also checks their frames:
+ * a frame is sent only while the reported state is tx, and not before the end
+ * of the node's previous frame. Frames that break these rules are not sent.
+ */
+enum { RI_ERR_TX_STATE, RI_ERR_TX_OVERLAP, RI_ERR_REPORT, RI_ERR_COUNT };
+static const char *const ri_err_names[RI_ERR_COUNT] = {
+    "frames sent while the reported radio state was not tx",
+    "frames sent before the end of the node's previous frame",
+    "malformed radio reports",
+};
+static struct {
+    uint8_t state;              // enum sim_radio_state, from its last "xr"
+    uint64_t tx_end;            // end of its last frame on air
+    uint64_t errors[RI_ERR_COUNT];
+} vt_ri[MAX_NODES];
+
+static bool vt_radio_if(int node)
+{
+    return slot_of_node[node] && conns[slot_of_node[node]].radio_if;
+}
+
+// The driver states of app_wshwsim/sl_rf_driver.c (byte 0 of a node's
+// shared-memory entry, read only by the legacy medium's CCA): kept consistent
+static const uint8_t ri_drvstate[SIM_RADIO_STATES] = { 7, 2, 3, 5, 4 };
+
+static void vt_shm_radio(int node, uint8_t state, uint16_t chan)
+{
+    uint8_t *e = vt_cca_shm + node * SIM_SHM_CCA_STRIDE;
+
+    e[0] = ri_drvstate[state];
+    memcpy(e + 1, &chan, 2);
+    e[3] = state;
+}
+
+static void vt_ri_error(int node, int kind, const char *what)
+{
+    if (!vt_ri[node].errors[kind]++ || !(vt_ri[node].errors[kind] & (vt_ri[node].errors[kind] - 1)))
+        WARN("node %d: radio interface: %s at %llu us (%llu so far)", node, what,
+             (unsigned long long)vt_now, (unsigned long long)vt_ri[node].errors[kind]);
+}
+
+// A new instance or a stopped node: its radio is off, nothing on air
+static void vt_ri_reset(int node)
+{
+    vt_ri[node].state = SIM_RADIO_OFF;
+    vt_ri[node].tx_end = 0;
+}
 
 static bool vt_before(const struct vt_event *a, const struct vt_event *b)
 {
@@ -1132,6 +1205,20 @@ static void vt_queue_frame(struct ctxt *ctxt, int src, void *msg, int len)
 
     if (!frame_check(src, msg, len))
         return;
+    if (vt_radio_if(src)) {
+        uint64_t airtime = hdr->rate_bps ?
+            (uint64_t)(hdr->shr_len + hdr->phr_len + hdr->len + hdr->fcs_len) * 8 * 1000000 / hdr->rate_bps : 0;
+
+        if (vt_ri[src].state != SIM_RADIO_TX) {
+            vt_ri_error(src, RI_ERR_TX_STATE, "frame sent while the radio is not in tx: not sent");
+            return;
+        }
+        if (vt_now < vt_ri[src].tx_end) {
+            vt_ri_error(src, RI_ERR_TX_OVERLAP, "frame sent before the end of the previous one: not sent");
+            return;
+        }
+        vt_ri[src].tx_end = vt_now + airtime;
+    }
     hdr->src = src;
     vt_frames_in++;
     if (vt_frames_file) {
@@ -1198,10 +1285,22 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
             vt_senses++;
             if (vt_send(node, sense, sizeof(*sense)))
                 return -1;
-        } else if (pwr_enabled() && len == sizeof(struct sim_radio_report) && !memcmp(buf, "xr", 2)) {
-            pwr_radio(node, vt_now, (const struct sim_radio_report *)buf);
-        } else if (pwr_enabled() && len == sizeof(struct nsim_wake) && !memcmp(buf, "xc", 2)) {
-            pwr_wake_report(node, (const struct nsim_wake *)buf);
+        } else if (len == sizeof(struct sim_radio_report) && !memcmp(buf, "xr", 2)) {
+            const struct sim_radio_report *r = (const struct sim_radio_report *)buf;
+
+            if (vt_radio_if(node)) {
+                if (r->state >= SIM_RADIO_STATES) {
+                    vt_ri_error(node, RI_ERR_REPORT, "radio report with an unknown state: ignored");
+                    continue;
+                }
+                vt_ri[node].state = r->state;
+                vt_shm_radio(node, r->state, r->channel);
+            }
+            if (pwr_enabled())
+                pwr_radio(node, vt_now, r);
+        } else if (len == sizeof(struct nsim_wake) && !memcmp(buf, "xc", 2)) {
+            if (pwr_enabled())
+                pwr_wake_report(node, (const struct nsim_wake *)buf);
         } else {
             WARN("node %d: unexpected message (%zd bytes, \"%.2s\"), dropped", node, len, buf);
         }
@@ -1375,8 +1474,22 @@ static void vt_kill(int node)
         vt_cca_shm[node * SIM_SHM_CCA_STRIDE] = 7;   // DRVSTATE_OFF (app_wshwsim/sl_rf_driver.c)
         vt_cca_shm[node * SIM_SHM_CCA_STRIDE + 3] = SIM_RADIO_OFF;
     }
+    vt_ri_reset(node);
     if (med_central())
         med_node_stopped(node, vt_now);
+}
+
+// The welcome of a node. A client of the radio interface gets its interface
+// version in the version field, not the conductor's (docs/RADIO_INTERFACE.md).
+static int vt_welcome(int node, const struct nsim_welcome *welcome)
+{
+    struct nsim_welcome w = *welcome;
+
+    if (vt_radio_if(node)) {
+        w.version = conns[slot_of_node[node]].radio_if;
+        vt_ri_reset(node);
+    }
+    return vt_send(node, &w, sizeof(w));
 }
 
 static int vt_ctl_run(struct ctxt *ctxt, struct vt_ctl *c, struct nsim_welcome *welcome)
@@ -1414,7 +1527,7 @@ static int vt_ctl_run(struct ctxt *ctxt, struct vt_ctl *c, struct nsim_welcome *
         if (pwr_enabled())
             pwr_wake(c->node, vt_now, 0);
         welcome->drift_ppb = drift_of(c->node, welcome->seed);
-        if (vt_send(c->node, welcome, sizeof(*welcome)) || vt_read_until_idle(ctxt, c->node))
+        if (vt_welcome(c->node, welcome) || vt_read_until_idle(ctxt, c->node))
             return -1;
         return 0;
     }
@@ -1495,7 +1608,7 @@ static int vt_run(struct ctxt *ctxt)
         welcome.drift_ppb = drift_of(node, welcome.seed);
         if (welcome.drift_ppb)
             INFO("virtual time: node %d clock drift %+.3f ppm", node, welcome.drift_ppb / 1000.0);
-        if (vt_send(node, &welcome, sizeof(welcome)) || vt_read_until_idle(ctxt, node)) {
+        if (vt_welcome(node, &welcome) || vt_read_until_idle(ctxt, node)) {
             status = stop ? 0 : 1;
             reason = stop ? "interrupted" : "a node failed";
             goto out;
@@ -1572,6 +1685,11 @@ out:
              (unsigned long long)vt_senses);
         med_finish();
     }
+    for (node = 0; node < MAX_NODES; node++)
+        for (i = 0; i < RI_ERR_COUNT; i++)
+            if (vt_ri[node].errors[i])
+                WARN("radio interface: node %d: %llu %s", node, (unsigned long long)vt_ri[node].errors[i],
+                     ri_err_names[i]);
     // A run that reached its end time lasted until then; any other, until
     // its last wake.
     if (pwr_enabled())
