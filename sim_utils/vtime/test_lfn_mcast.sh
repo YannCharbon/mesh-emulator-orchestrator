@@ -126,10 +126,13 @@ for node, sub in ((2, True), (3, False), (4, True), (5, False)):
         got.setdefault(p, []).append(t)
     dup = sum(len(v) - 1 for v in got.values())
     if sub:
-        # a request sent less than a listen interval (and 15 s) before the end,
-        # or before the LFN leaves, may not reach it in time
+        # a request sent less than a listen interval (and 15 s) before the LFN
+        # leaves, or two before the end, may not reach it in time: a parent's
+        # asynchronous PAN Configuration sweep in the LFN's window can push
+        # its copy to the next window (legacy medium, Eco, drift 20 ppm, seed
+        # 1: Q 47 sent at 21211 s, delivered at 21676 s in a longer run)
         iv = listen_interval_s(f'{out}/node{node}.log')
-        until = (leave_at if node == 4 else dur) - 15 - iv
+        until = leave_at - 15 - iv if node == 4 else dur - 15 - 2 * iv
         want = [p for t, p in sent if oper and oper + 15 < t < until]
         ffn = [p for p in want if node == 4 and seq.get(p) not in r_got]
         want = [p for p in want if p not in ffn]

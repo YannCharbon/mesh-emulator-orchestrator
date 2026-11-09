@@ -52,6 +52,8 @@ All in `app_wssimserver/sim_proto.h`. Each is one `SOCK_SEQPACKET` message on th
 
 Frames in a node's `"xa"` batch now include verdicts: the count in `"xa"` is the number of messages that follow (frames and verdicts), in queue order.
 
+Preamble sniffing adds three messages, `"xl"`, `"xn"` and `"xd"` (§10.4); the `"xa"` count includes the `"xd"` results.
+
 ## 5. Shared memory
 
 For clients of the stack-neutral radio interface ([RADIO_INTERFACE.md](RADIO_INTERFACE.md)), which write no shared memory, the server writes their entry from their "xr" reports. `/wssimcca` grows to 4 bytes per node: driver state (1 byte, as today), channel (2 bytes, as today), then **the radio's hardware state** (`enum sim_radio_state`, what `rf_power_state()` returns). The radio writes all four in `set_shm_cca_state()` in both modes. The server's medium reads byte 3 and the channel; the legacy CCA keeps reading byte 0. `vt_kill` sets byte 0 to `DRVSTATE_OFF` and byte 3 to `SIM_RADIO_OFF`.
@@ -70,6 +72,7 @@ Under `NS_PORT_SIM` and `ns_port_sim_medium()` (`app_wshwsim/sl_rf_driver.c`):
 
 - `--medium=legacy|central` (virtual time only; refused without `--vtime`). Default with `--vtime`: `central`.
 - `--medium-tx-ref=DBM`, `--medium-lock-snr=DB`, `--medium-capture-db=DB` (refused with `--medium=legacy`).
+- Preamble sniffing: `--sniff-detect`, `--sniff-dwell-bits`, `--sniff-threshold`, `--sniff-curve`, `--sniff-sfd-bits`, `--sniff-log` (§10.5; refused with `--medium=legacy`).
 - `--medium-log=FILE`: one line per (frame, receiver) outcome: `t_end_us src dst frame_id outcome rx_dbm sinr_min_db`, outcome one of `ok`, `noise` (lost, no interferer), `interference` (lost with an interferer), `captured`, `below_lock` (heard, not locked: too weak against the noise and interference), `busy` (heard while receiving another frame and not captured), `not_listening`, `tx_abort`, `left`.
 - At the end of the run, a summary line per outcome (totals), and the CCA query count with the number of queries that found a frame on air. The server does not know the radios' CCA thresholds: the busy counts are in the radios' exit lines (`rf medium: N CCA, N busy`).
 - Random: the verdict draws use a stream per receiver, `mix64(seed + mix64(node ID + 1) + K)` with a constant `K` that separates it from the port's and the drift's streams.
@@ -86,4 +89,98 @@ The gate passed: the central medium is the default with `--vtime`. What compares
 
 ## 9. Not in the MVP
 
-Adjacent-channel rejection, fading and shadowing, bursts of losses, external interferers, preamble-sniff detection, node positions and path-loss models, RX↔TX turnaround and settling times, a reported RSSI with its own error (Investigation §5, P4–P11 and the layered loss model). The radio still decides its own TX timing; the medium does not delay or refuse a transmission. A frame that will be lost keeps its receiver in RX for its whole airtime, as on a real radio (legacy dropped it at its start), so central runs show more RX time.
+Adjacent-channel rejection, fading and shadowing, bursts of losses, external interferers, node positions and path-loss models, RX↔TX turnaround and settling times, a reported RSSI with its own error (Investigation §5, P4–P11 and the layered loss model). The radio still decides its own TX timing; the medium does not delay or refuse a transmission. A frame that will be lost keeps its receiver in RX for its whole airtime, as on a real radio (legacy dropped it at its start), so central runs show more RX time.
+
+## 10. Preamble sniffing
+
+For sniff MACs (low-power listening, preamble sampling): a node wakes for a short window on a period, its receiver looks for a preamble on one channel, and it stays in RX only if it found one. Senders put a wake-up preamble longer than the receivers' period before their frame. The medium decides each detection from the frames on air, and a receiver that detects a long preamble can then receive the frame that follows. Central medium only (§1); the Nanostack nodes do not use it.
+
+### 10.1 The primitive
+
+A radio sends `"xn"` (`struct sim_sniff`) during its run at time `t`: channel `C`, duration `d`, a tag, flags, an end state. Its receiver is on, on `C`, from `t_on` to `t1 = t + d`: `t_on = t`, or the end of the node's own frame if one is on air (half duplex, §10.3). It detects over the **window** `[t0, t1)`, `t0 = t_on + --sniff-settle-us` (0 by default), at most `t1`. The conductor answers with one `"xd"` (`struct sim_sniff_result`), not at once but in a later wake of the node:
+
+- at the **detection time** `td`, the end of the first dwell that detects a frame (§10.2): `detected = 1`, the frame's `frame_id` and sender, `t_us = td`, `rssi_dbm` = the frame's received power `P`, `sinr_db` = the lowest SINR over that dwell;
+- or at `t1` if nothing was detected: `detected = 0`, `t_us = t1`, `rssi_dbm` = the energy on `C` at the node at `t1` (noise plus the frames on air then that it hears, as `"xs"` would answer; on an empty channel, the noise floor −119.93 dBm).
+
+A new `"xn"` while a sniff is in progress replaces it (no `"xd"` for the old one). A frame sent by the node ends its sniff, with no `"xd"` (half duplex, §10.3). A stopped node's sniff ends with it.
+
+### 10.2 Detection rules
+
+The candidates are the frames on `C` whose sender is a graph neighbour of the node, not cut and not dropped for it (as for reception, §3), other than the node's own; they are also each other's interferers, over their whole airtime. For each candidate `F`, received at power `P_F`:
+
+- **Detectable part.** `--sniff-detect=preamble` (default): its preamble, `[t_start, pre_end)`, `pre_end` = the end of its SHR minus the SFD (`--sniff-sfd-bits`, 16 bits, at the frame's rate), including an `"xl"` preamble. `--sniff-detect=frame`: the whole frame (a carrier or energy detector that also catches a frame in progress).
+- **Dwells.** A detection try observes `--sniff-dwell-bits` bits (16) of the frame, `D_F = ⌈bits · 10⁶ / rate_F⌉` µs (320 µs at 50 kbit/s, 107 µs at 150 kbit/s). The tries are consecutive dwells `[a + k·D_F, a + (k+1)·D_F)` from `a = max(t0, t_start(F))`, each ending at or before `min(t1, end of the detectable part)`. A frame that overlaps the window by less than one dwell is never detected; a long preamble that covers the whole window gets `⌊(t1 − t0) / D_F⌋` tries.
+- **Probability of one try.** 0 if `P_F` is below `--sniff-threshold` (off by default); otherwise `curve(SINR_min)`, `SINR_min` the lowest SINR of `F` over the dwell, `P_F / (N + I)` with `I` the sum of the other candidates on air (it is lowest at the dwell's start or where an interferer starts). Default curve `ber:16`: `(1 − BER(SINR))^16`, `BER` the medium's error curve (§2), that is, 16 preamble bits received without an error. A table `--sniff-curve=SINR:P,SINR:P,...` (dB, ascending) replaces it: linear between the points, the end values beyond them.
+- **Draws.** Each try with `0 < p < 1` takes one uniform draw from the node's detection stream, `mix64(seed + mix64(node ID + 1) + K')`, separate from the verdict streams; `p = 0` or `1` takes none. The tries are decided in the order of their dwell ends (then frame start, then frame ID), each when the conductor reaches its end, so every interferer that started before it is known. The first try that succeeds is the detection; the rest are not drawn.
+- **Busy receiver.** A receiver locked onto a frame (at that frame's start during the window, §10.3) is synchronised on it and detects no other frame: the tries of other frames whose dwell overlaps that reception have probability 0 (no draw). With the default lock threshold this only matters when the locked frame is on another channel or with `--medium-lock-snr` below 0, since otherwise the locked frame's power keeps the other frames' SINR low.
+
+Values of the default curve without interference (`P = N + SINR`, `N` = −119.93 dBm):
+
+| SINR (dB) | 3 | 4.9 | 6 | 8.7 | 10 | 13.4 | 20 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Received power (dBm) | −116.9 | −115.0 | −113.9 | −111.3 | −109.9 | −106.5 | −99.9 |
+| One try | 0.15 | 0.50 | 0.67 | 0.90 | 0.95 | 0.99 | 1.00 |
+| Four tries (an 8-byte preamble wholly inside the window) | 0.48 | 0.94 | 0.99 | 1.00 | 1.00 | 1.00 | 1.00 |
+
+### 10.3 Receiving after a detection
+
+**The lock rule (§3) extended.** Until now a receiver could only lock onto a frame at the frame's start; a frame whose preamble started before the receiver was on was never received, however much preamble remained. Real receivers acquire such a frame if the preamble lasts long enough to synchronise and the SFD is still ahead. The rule here: with `SIM_SNIFF_LOCK` in the request, a detection of `F` at `td` **locks the receiver onto `F`** if
+
+1. the SFD is still ahead: `td ≤ pre_end(F)` (always true with `--sniff-detect=preamble`, whose dwells lie in the preamble; with `frame`, a detection in the payload does not lock);
+2. the receiver holds no lock (else `locked = 2` if it already receives `F`, 0 if another frame);
+3. `F` passes the lock threshold at `td` against the frames then on air (§3, rule 2).
+
+The `"xd"` then has `locked = 1` and is followed, in the same wake, by `F`'s `"xx"` (`SIM_FRAME_MEDIUM`, its `frame_id`, `rx_dbm` = `P_F`, and `SIM_FRAME_LONG_PREAMBLE` if it came with `"xl"`); the verdict `"xv"` comes at `F`'s end as for any lock, and capture by a stronger frame during the rest of the SHR applies. The bits counted in the verdict (§2) are spread over `[max(td, t_bits), t_end)`, `t_bits` being the frame's start or the end of its `"xl"` preamble: interference during the preamble before the lock does not count, the detection rule covers it.
+
+Without `SIM_SNIFF_LOCK`, the detection is reported only; the client decides (a new sniff with the flag at that time detects again after one dwell and locks if the preamble lasts). A radio that turns its receiver on without a sniff still locks only at a frame's start (§3 unchanged): `"xn"` is how a client says "my receiver is on now, acquire a frame already on air".
+
+**During the window the radio is in RX.** It writes LISTEN and the channel in its shared-memory entry (§5) as any radio, so a frame that **starts** during the window locks it at its start by §3; its sniff then reports that frame with `locked = 2` when its dwell detects it.
+
+**Half duplex.** A sniff asked while the node's own frame is on air starts when that frame ends (`t_on`; `t0` in the sniff log adds the settling time). A frame the node sends during the window ends the sniff (outcome `tx_abort`, no `"xd"`).
+
+### 10.4 Messages
+
+All in `app_wssimserver/sim_proto.h`, central mode only (the legacy medium drops them with a warning). New message types; no existing message changed.
+
+| Message | From | Struct | Content |
+| --- | --- | --- | --- |
+| `"xl"` | a node, during its run | `struct sim_lp_frame` + a complete `"xx"` | `preamble_us`: preamble on air before the frame's own SHR. The frame is on air for `preamble_us` + its airtime (§2); its capture window is `preamble_us` + its SHR. The sender's TX end is the client's own. |
+| `"xn"` | a node, during its run | `struct sim_sniff` (16 bytes) | `channel`, `duration_us`, `sniff_id` (echoed), `flags` (`SIM_SNIFF_LOCK`), `end_state` (`enum sim_radio_state` after a window with nothing detected, for the ledger; OFF if out of range) |
+| `"xd"` | conductor, in the node's wake at `t_us` | `struct sim_sniff_result` (32 bytes) | `detected`, `locked` (0, `SIM_SNIFF_LOCKED` = 1, `SIM_SNIFF_RECEIVING` = 2), `sniff_id`, `frame_id`, `src`, `t_us`, `rssi_dbm`, `sinr_db` |
+
+`"xd"` and the `"xx"` of a lock it made count in the `"xa"` count, in queue order. A sniff with nothing on the channel costs the node one wake, at `t1`.
+
+**Power ledger** (with `--power`, [POWER_MODEL.md](POWER_MODEL.md)): the conductor records the states the sniff implies, so a client that sends no `"xr"` is still charged: LISTEN on `C` from `t_on` (the request, or the end of the node's own frame: its TX time is kept; the settling time counts as listening; nothing if its own frame fills the window); at `t1` with nothing detected, `end_state` (unless the receiver holds a lock, then it is receiving); RECEIVE from a lock the sniff made. Every other change is the client's to report with `"xr"`: after a detection without a lock the radio stays in LISTEN until the client reports otherwise, and after the verdict as for any frame. The ledger ignores a report of the state it already has, so a client that also reports these states is not charged twice. The sender of an `"xl"` reports its TX state with `"xr"` as for any frame and keeps it for `preamble_us` plus the frame's airtime: the conductor records nothing for it, so the long preamble's charge is the client's TX report.
+
+### 10.5 Settings and defaults
+
+All are user settings. The FG25 datasheet gives no preamble-detection figure (no detection time, probability or threshold; root repo `documents/pre-study/datasheets/efr32fg25-datasheet.pdf`, Rev. 1.2, §4.9.5); the defaults below are therefore chosen to be consistent with the medium's own error model and the FG25 radio's documented behaviour, and are to be replaced by kit measurements (§10.6).
+
+| Option | Default | Source or reason |
+| --- | --- | --- |
+| `--sniff-detect=preamble\|frame` | `preamble` | RAIL's RX duty-cycle "preamble sense" mode: the radio stays in RX if it has a preamble at the end of the sense time (`RAIL_RX_CHANNEL_HOPPING_MODE_PREAMBLE_SENSE`, `rail_types.h` of the Simplicity SDK 2026.6.2) |
+| `--sniff-dwell-bits=N` | 16 | Assumption: a quarter of the Wi-SUN FSK preamble the emulated radio sends (8 bytes, `WSSIM_PHY_PREAMBLE`); no datasheet value |
+| `--sniff-threshold=DBM\|off` | `off` | RAIL applies an RSSI threshold in duty-cycle mode only if `RAIL_RX_CHANNEL_HOPPING_OPTION_RSSI_THRESHOLD` is set (`rssiThresholdDbm`, same header); off by default. The medium compares it with the candidate frame's own received power, not with the total energy on the channel the radio measures; they differ only with interferers, whose SINR then already lowers the try's probability |
+| `--sniff-curve=ber:N\|SINR:P,...` | `ber:16` | The medium's BER curve (§2) over 16 bits: 50 % at −115.0 dBm, 90 % at −111.3 dBm per try without interference. For comparison, FG25 packet sensitivity (10 % PER, 250 octets) in the 866 MHz band: −110.8 dBm in mode 1a, −108.8 dBm in mode 3 with FEC (datasheet Table 4.30, p. 92); a preamble detector is expected to work at or below packet sensitivity |
+| `--sniff-sfd-bits=N` | 16 | IEEE 802.15.4 SUN FSK SFD of 2 octets, as the emulated radio sends (`WSSIM_PHY_SFD` = 2 bytes) |
+| `--sniff-settle-us=N` | 0 | Receiver settling (RX warm-up, AGC, timing recovery) before detection can start, after the request or after the node's own frame. 0 keeps the medium's exact timing (§9); no datasheet value is used, to be set from kit measurements (§10.6) |
+| `--sniff-log=FILE` | none | One line per sniff: `t_req node sniff_id chan t0 t1 outcome t frame_id src rssi_dbm sinr_db locked`, outcome one of `detected`, `none`, `tx_abort`, `replaced`, `stopped` |
+
+The run's end prints the number of sniffs per outcome, the locks made by a sniff and the detection draws.
+
+### 10.6 Limits and calibration
+
+- **What the kits should measure (EM5, FA2):** the detection probability against the input level, with no interferer, for one sense window of a given length and for each PHY mode used (the table form of `--sniff-curve`, converted from power to SINR by adding 119.93 dB, and `--sniff-dwell-bits` from the shortest window that detects at a strong level); the same with a co-channel FSK interferer at a few U/D ratios (the SINR axis); the time from the window's start to the detection event, against how much preamble is left; how much preamble must remain after detection for the frame to be received (the SFD rule). Until then detection figures are model values.
+- Detection is per frame: interferers only lower a frame's SINR. A detector that triggers on the summed energy of several frames (for example on a collision whose frames are each too weak) is not modelled.
+- The settling time (`--sniff-settle-us`) is 0 by default, as elsewhere in the medium (§9). A frame that starts during the settling time still locks the receiver at its start by §3 if the client wrote LISTEN in its shared-memory entry.
+- No false detection: a window with no frame on air never detects (the curve at very low SINR gives `2^-16` per try with `ber:16`, and only for a frame on air). Real preamble detectors trigger falsely on noise now and then, which keeps the receiver on until the client's timeout; that charge is not modelled.
+- **Energy carrier sense** is approximated, not modelled: `--sniff-detect=frame` with `--sniff-threshold` and a table curve detects a frame from its own power, while an energy detector compares the total energy on the channel with its threshold.
+- **Several channels in sequence:** one `"xn"` per channel, each answered by its own `"xd"` in a wake of the node, so a scan of `n` channels costs `n` wakes in the ledger; a radio that hops between sense windows in hardware (RAIL's RX channel hopping) wakes the MCU only on a detection.
+- A node that starts (or restarts) while frames are on air does not hear those frames (as for reception: the receivers of a frame are fixed at its start), so its first sniff cannot detect them.
+- The legacy medium drops `"xn"` and `"xl"` with a warning: a client waiting for an `"xd"` gets none.
+- Adjacent channels do not detect (as for reception, §9).
+- Sniffing works in virtual time with the central medium only.
+
+### 10.7 Checks
+
+`sim_utils/vtime/test_sniff.py` (fake nodes, in the LFN suite as `sniff`): detection of a frame on air at the expected time and power; an empty channel (noise floor, one wake); the threshold; partial overlap at both edges of the window, with both detection modes; an interferer (SINR against the formula, no detection at equal power); the wrong channel; half duplex (deaf during its own frame, a frame sent during the window ends the sniff); one-dwell detection rate at the margin against the curve, and determinism by seed; a table curve (no draws at 0 and 1); a 100 ms `"xl"` preamble detected and locked onto mid-preamble, its `"xx"` and verdict, against a radio that only listened from the start, one that turned on late without a sniff, and a sniff without the lock flag; the lock rules (no lock after the SFD, an existing lock reported, bits counted from the lock, the lock threshold against the frames still on air only, no detection of another frame while locked); the ledger (listening during the window, receiving after the lock, the TX time kept when the sniff is asked during the node's own frame); the settling time; many frames joining a window (one chain of check events); option errors.
