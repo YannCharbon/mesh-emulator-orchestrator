@@ -364,8 +364,9 @@ class Mop:
 
     The report is derived from this node's own log lines: counters per event,
     and per peer the frames received and lost with the last RSSI (links). A
-    parent given with --mop-parent is reported as a configured relation: the
-    demonstration protocol has no routing of its own."""
+    parent given with --mop-parent is reported as a configured relation, and
+    --mop-root marks the node as the network's root: the demonstration
+    protocol has no routing of its own."""
 
     COUNTED = ("tx", "lp_tx", "rx_ok", "rx_lost", "rx_aborted", "cca_busy", "tx_skipped", "window_open", "sniff",
                "sniff_detect", "sniff_none", "anomaly")
@@ -402,7 +403,7 @@ class Mop:
             rel.append({"kind": "parent", "peer_id": a.mop_parent, "preferred": True, "attrs": {"source": "configured (--mop-parent)"}})
         self._print({"mop": 1, "type": "report", "seq": 0, "t_ms": r.local_us() // 1000,
                      "node": {"id": r.node_id, "name": f"ref-client {r.node_id}", "stack": "em7-ref-client",
-                              "version": f"interface v{r.version}", "role": "sniff" if sniff else "window", "root": False,
+                              "version": f"interface v{r.version}", "role": "sniff" if sniff else "window", "root": a.mop_root,
                               "state": self.state, "detail": detail, "uptime_s": (r.now - r.start_us) // 10**6},
                      "links": links, "relations": rel, "counters": dict(sorted(self.counters.items())),
                      "values": {"channel": a.chan, "tx_dbm": a.tx_dbm, "rate_bps": a.rate, "drift_ppb": r.drift_ppb}})
@@ -564,6 +565,7 @@ def main():
     m = ap.add_argument_group("observation (MOP v1 lines for the mesh testbed controller)")
     m.add_argument("--mop-period-ms", type=float, default=0, help="print MOP1 report lines this often (0: none)")
     m.add_argument("--mop-parent", type=int, default=None, help="report this node as a configured parent")
+    m.add_argument("--mop-root", action="store_true", help="report this node as the root of the network")
     g = ap.add_argument_group("preamble sampling (SniffNode, interface version 2)")
     g.add_argument("--sniff-period-ms", type=float, default=0, help="sniff every period (0: no sniffing)")
     g.add_argument("--sniff-us", type=int, default=1000, help="length of each sniff")
