@@ -559,7 +559,8 @@ class Radio(Behaviour):
             acts.append(("tx", {}))
         for a in acts:
             if a[0] == "tx":
-                self.send(PAYLOAD, **a[1])
+                fields = dict(a[1])
+                self.send(fields.pop("payload", PAYLOAD), **fields)
             elif a[0] == "sense":
                 self.sense(a[1])
             elif a[0] == "radio":
@@ -654,11 +655,14 @@ def test_medium_overlap():
 
 
 def test_medium_capture():
-    """A frame 20 dB stronger captures the receiver during the first frame's
-    SHR (1600 us), not after; one 3 dB stronger never does."""
+    """--medium-model=em4 (the MVP's rule, kept for comparison): a frame
+    20 dB stronger captures the receiver during the first frame's whole SHR
+    (1600 us), not after; one 3 dB stronger never does. Since EM5 the default
+    model captures only in the measured windows (test_medium_calib_capture);
+    this test now passes --medium-model=em4 to keep checking the old rule."""
     for delay, rssi3, captured in ((SHR_US - 1, -60, True), (SHR_US, -60, False), (500, -77, False)):
         r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {1000 + delay: [("tx", {})]})}
-        d, out, rows = medium_run(r, [(1, 2, -80), (3, 2, rssi3)])
+        d, out, rows = medium_run(r, [(1, 2, -80), (3, 2, rssi3)], opts=["--medium-model=em4"])
         xx = [(t, m["frame_id"]) for t, m in got(r[2], "xx")]
         xv = [(t, m["frame_id"], m["ok"]) for t, m in got(r[2], "xv")]
         outcomes = {(x[3], x[4]) for x in rows}
@@ -708,19 +712,26 @@ def test_medium_same_time():
 
 def test_medium_cca():
     """CCA energy: the sender's power on its channel at a neighbour (whatever
-    the neighbour's MAC knows of it), the noise floor on another channel, after
-    the frame, at a node that does not hear the sender, and at the sender."""
-    r = {1: Radio(1, {1000: [("tx", {"chan": 3})], 2000: [("sense", 3)]}),
-         2: Radio(2, {0: [("radio", RADIO_IDLE, 3)], 2000: [("sense", 3), ("sense", 4)], 7000: [("sense", 3)]}),
-         3: Radio(3, {2000: [("sense", 3)]})}
-    d, out, rows = medium_run(r, [(1, 2, -70), (2, 3, -50)])
-    e = 10 * math.log10(10 ** (NOISE_DBM / 10) + 10 ** (-70 / 10))
-    s2 = [dbm for t, c, dbm in r[2].sensed]
-    check(len(s2) == 3 and abs(s2[0] - e) < 0.01 and abs(s2[1] - NOISE_DBM) < 0.01 and abs(s2[2] - NOISE_DBM) < 0.01,
-          f"CCA at 2: {r[2].sensed}")
-    check(abs(r[3].sensed[0][2] - NOISE_DBM) < 0.01 and abs(r[1].sensed[0][2] - NOISE_DBM) < 0.01,
-          f"CCA at 3 {r[3].sensed}, at 1 {r[1].sensed}")
-    check("5 CCA queries, 1 with a frame on air" in out, "CCA summary")
+    the neighbour's MAC knows of it), 10 dB less on the next channel (EM5:
+    adjacent-channel leakage; before EM5 the noise floor there), the noise
+    floor two channels away, after the frame, at a node that does not hear
+    the sender, and at the sender. --medium-model=em4: the noise floor on
+    the next channel."""
+    for opts, adj in (([], -80), (["--medium-model=em4"], None)):
+        r = {1: Radio(1, {1000: [("tx", {"chan": 3})], 2000: [("sense", 3)]}),
+             2: Radio(2, {0: [("radio", RADIO_IDLE, 3)], 2000: [("sense", 3), ("sense", 4), ("sense", 5)],
+                          7000: [("sense", 3)]}),
+             3: Radio(3, {2000: [("sense", 3)]})}
+        d, out, rows = medium_run(r, [(1, 2, -70), (2, 3, -50)], opts=opts)
+        e = 10 * math.log10(10 ** (NOISE_DBM / 10) + 10 ** (-70 / 10))
+        e4 = NOISE_DBM if adj is None else 10 * math.log10(10 ** (NOISE_DBM / 10) + 10 ** (adj / 10))
+        s2 = [dbm for t, c, dbm in r[2].sensed]
+        check(len(s2) == 4 and abs(s2[0] - e) < 0.01 and abs(s2[1] - e4) < 0.01 and abs(s2[2] - NOISE_DBM) < 0.01
+              and abs(s2[3] - NOISE_DBM) < 0.01, f"{opts}: CCA at 2: {r[2].sensed}")
+        check(abs(r[3].sensed[0][2] - NOISE_DBM) < 0.01 and abs(r[1].sensed[0][2] - NOISE_DBM) < 0.01,
+              f"{opts}: CCA at 3 {r[3].sensed}, at 1 {r[1].sensed}")
+        n_on = 1 if adj is None else 2
+        check(f"6 CCA queries, {n_on} with a frame on air" in out, f"{opts}: CCA summary")
 
 
 def test_medium_tx_ref():
@@ -791,8 +802,30 @@ def sinr_db(p, *intf):
 
 
 def p_success(segments):
-    """MEDIUM.md §2: segments [(share of the frame, SINR dB)] -> P_success."""
+    """MEDIUM.md §2, --medium-model=em4: segments [(share of the frame, SINR
+    dB)] -> P_success."""
     return math.prod((1 - min(0.5, 0.5 * math.exp(-0.5 * s))) ** (BITS * share) for share, s in segments)
+
+
+# Measured interference curves (MEDIUM.md §2.1; firmware repo
+# docs/COCHANNEL_RESULTS.md §4.1, §5): x0, b per profile
+INT_CURVE = {50000: (-2.40, 0.90), 150000: (-2.85, 0.90)}
+
+
+def ber_fg25(p, intf, rate=50000):
+    """The default model's bit error rate: the larger of the noise curve of
+    the SNR and the interference curve of the SIR."""
+    x0, b = INT_CURVE[rate]
+    ber = 0.5 * math.exp(-0.5 * (p - NOISE_DBM))
+    if intf:
+        sir = p - 10 * math.log10(sum(10 ** (i / 10) for i in intf))
+        ber = max(ber, 0.5 * math.exp(-(sir - x0) / b))
+    return min(0.5, ber)
+
+
+def p_success_fg25(segments, bits=BITS, rate=50000):
+    """segments [(share of the counted bits, P dBm, [interferers dBm])]."""
+    return math.prod((1 - ber_fg25(p, i, rate)) ** (bits * share) for share, p, i in segments)
 
 
 def test_medium_segments():
@@ -801,14 +834,40 @@ def test_medium_segments():
     at the start (it started before the frame, while the receiver was idle),
     at a SINR where that quarter loses about half of the frames. The loss
     rate matches P_success of the formula, far from the whole frame
-    interfered (about 96 %). 2 locks every frame and hears every interferer
-    (busy, or not_listening when it was idle)."""
-    n, period, p_a, p_i = 400, 12000, -80, -87
+    interfered. 2 locks every frame and hears every interferer (busy, or
+    not_listening when it was idle).
+
+    Two models: --medium-model=em4 (the interferer 7 dB below, the noise
+    curve of the SINR over the whole airtime, as before EM5) and the default
+    (EM5): the interferer 0.9 dB below, the measured curve, the counted bits
+    over the frame after its SHR, so the interferer covers a quarter of the
+    airtime at the start but only (quarter - SHR) of the bits after it."""
+    for model in ("em4", "fg25"):
+        test_medium_segments_model(model)
+
+
+def test_medium_segments_model(model):
+    n, period, p_a = 400, 12000, -80
     quarter = AIRTIME // 4
-    want_loss = 1 - p_success([(0.75, sinr_db(p_a)), (0.25, sinr_db(p_a, p_i))])
-    whole = 1 - p_success([(1, sinr_db(p_a, p_i))])
-    sigma = math.sqrt(n * want_loss * (1 - want_loss))
+    if model == "em4":
+        p_i = -87
+        want_loss = 1 - p_success([(0.75, sinr_db(p_a)), (0.25, sinr_db(p_a, p_i))])
+        want_start = want_loss
+        whole = 1 - p_success([(1, sinr_db(p_a, p_i))])
+        opts = ["--medium-model=em4"]
+    else:
+        p_i = -80.9
+        data = AIRTIME - SHR_US
+        want_loss = 1 - p_success_fg25([(1 - quarter / data, p_a, []), (quarter / data, p_a, [p_i])])
+        # Here the quarter (1440 us) is shorter than the SHR (1600 us): no
+        # counted bit is interfered, nothing is lost
+        part = max(0, quarter - SHR_US) / data
+        want_start = 1 - p_success_fg25([(1 - part, p_a, []), (part, p_a, [p_i])])
+        whole = 1 - p_success_fg25([(1, p_a, [p_i])])
+        opts = []
     for where in ("end", "start"):
+        want = want_loss if where == "end" else want_start
+        sigma = math.sqrt(n * want * (1 - want))
         first = 10000
         if where == "end":
             off3, acts2 = AIRTIME - quarter, {}
@@ -821,18 +880,22 @@ def test_medium_segments():
                 acts2[t + off3 - 1] = [("radio", RADIO_IDLE, 0)]
                 acts2[t - 1] = [("radio", RADIO_LISTEN, 0)]
         r = {1: Radio(1, period=(first, period, n)), 2: Radio(2, acts2), 3: Radio(3, period=(first + off3, period, n))}
-        d, out, rows = medium_run(r, [(1, 2, p_a), (3, 2, p_i)])
+        d, out, rows = medium_run(r, [(1, 2, p_a), (3, 2, p_i)], opts=opts)
         xv = [m for t, m in got(r[2], "xv")]
         check(len(xv) == n and all(m["frame_id"] % 2 == (1 if where == "end" else 0) for m in xv),
-              f"{where}: {len(xv)} verdicts, or not for 1's frames")
+              f"{model} {where}: {len(xv)} verdicts, or not for 1's frames")
         lost = sum(1 for m in xv if not m["ok"])
-        check(all(m["ok"] or m["cause"] == 2 for m in xv), f"{where}: a loss not caused by interference")
-        check(all(abs(m["sinr_db"] - sinr_db(p_a, p_i)) < 0.01 for m in xv), f"{where}: segment SINR")
-        check(abs(lost - n * want_loss) < 4 * sigma, f"{where}: {lost} lost of {n}, formula {n * want_loss:.0f}")
+        check(all(m["ok"] or m["cause"] == 2 for m in xv), f"{model} {where}: a loss not caused by interference")
+        # The lowest SINR over the counted bits (fg25 start: the interferer
+        # ended before them)
+        smin = sinr_db(p_a) if model == "fg25" and where == "start" else sinr_db(p_a, p_i)
+        check(all(abs(m["sinr_db"] - smin) < 0.01 for m in xv), f"{model} {where}: segment SINR")
+        check(abs(lost - n * want) < max(4 * sigma, 0.5), f"{model} {where}: {lost} lost of {n}, formula {n * want:.0f}")
         heard3 = {x[4] for x in rows if x[1] == 3}
-        check(heard3 == ({"busy"} if where == "end" else {"not_listening"}), f"{where}: 3's frames at 2: {heard3}")
-        print(f"     interferer at the {where}: {lost}/{n} lost, formula {n * want_loss:.1f} (sigma {sigma:.1f}), "
-              f"whole frame interfered {n * whole:.0f}")
+        check(heard3 == ({"busy"} if where == "end" else {"not_listening"}),
+              f"{model} {where}: 3's frames at 2: {heard3}")
+        print(f"     {model}, interferer at the {where}: {lost}/{n} lost, formula {n * want:.1f} "
+              f"(sigma {sigma:.1f}), whole frame interfered {n * whole:.0f}")
 
 
 def test_medium_lock_refused():
@@ -854,12 +917,15 @@ def test_medium_lock_refused():
 
 
 def test_medium_other_channel():
-    """A frame on another channel, starting during the lock or before it,
+    """A frame two channels away, starting during the lock or before it,
     does not interfere: the verdict's SINR is the noise SNR, and the other
-    frame is not_listening at 2 (its channel is not 2's)."""
-    for t3 in (2000, 500):
-        r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {t3: [("tx", {"chan": 1})]})}
-        d, out, rows = medium_run(r, [(1, 2, -100), (3, 2, -50)])
+    frame is not_listening at 2 (its channel is not 2's). Before EM5 the
+    test used the next channel (1), which now interferes 10 dB weaker
+    (test_medium_calib_adjacent); with --medium-model=em4 it still does not."""
+    for t3, chan, opts in ((2000, 2, []), (500, 2, []), (2000, 1, ["--medium-model=em4"]),
+                           (500, 1, ["--medium-model=em4"])):
+        r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {t3: [("tx", {"chan": chan})]})}
+        d, out, rows = medium_run(r, [(1, 2, -100), (3, 2, -50)], opts=opts)
         xv = [m for t, m in got(r[2], "xv")]
         check(len(xv) == 1 and abs(xv[0]["sinr_db"] - sinr_db(-100)) < 0.01, f"t3 {t3}: verdicts {xv}")
         check({(x[1], x[4]) for x in rows} - {(1, "ok"), (1, "noise")} == {(3, "not_listening")}, f"t3 {t3}: {rows}")
@@ -893,13 +959,22 @@ def test_medium_cut_drop():
 
 
 def test_medium_capture_margin():
-    """Capture margin 6 dB (default): a frame exactly 6 dB stronger,
-    during the SHR, captures; 0.01 dB less does not. With
-    --medium-capture-db=10, 6 dB no longer captures and 10 dB does. The
-    captured frame stays on air: it interferes with the capturing one."""
-    for p3, opts, captured in ((-74, [], True), (-74.01, [], False),
-                               (-74, ["--medium-capture-db=10"], False), (-70, ["--medium-capture-db=10"], True)):
-        r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {1500: [("tx", {})]})}
+    """Capture margin 3 dB (default since EM5, measured; 6 dB before, and
+    with --medium-model=em4): a frame exactly at the margin, in the early
+    capture window (200 us after the first frame's start, 50 kbit/s: mode
+    1a's window is 20 bits, 400 us), captures; 0.01 dB less does not. With
+    --medium-capture-db=10, 6 dB no longer captures and 10 dB does;
+    --medium-capture-db=1a:4 sets the 50 kbit/s profile only. Before EM5 the
+    second frame started 500 us in (inside the old whole-SHR window; now in
+    the window where a stronger frame breaks the search, test_medium_calib_capture).
+    The captured frame stays on air: it interferes with the capturing one."""
+    for p3, opts, captured in ((-77, [], True), (-77.01, [], False),
+                               (-74, ["--medium-model=em4"], True), (-74.01, ["--medium-model=em4"], False),
+                               (-74, ["--medium-capture-db=10"], False), (-70, ["--medium-capture-db=10"], True),
+                               (-76.01, ["--medium-capture-db=1a:4"], False),
+                               (-76, ["--medium-capture-db=1a:4"], True),
+                               (-77, ["--medium-capture-db=3:10"], True)):
+        r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {1200: [("tx", {})]})}
         d, out, rows = medium_run(r, [(1, 2, -80), (3, 2, p3)], opts=opts)
         outcomes = {(x[1], x[4]) for x in rows}
         if captured:
@@ -940,6 +1015,223 @@ def test_medium_restart():
         check(w2 == [t_new, 10000, 10000 + AIRTIME], f"{opts}: wakes of the new instance {w2}")
         check({(x[3], x[4]) for x in rows} == {(1, "left"), (2, "ok")}, f"{opts}: log {rows}")
         check(d.start.get(2) == t_new, f"{opts}: start {d.start}")
+
+
+# EM5: the model calibrated on the FG25 kits (MEDIUM.md §2.1; firmware repo
+# docs/COCHANNEL_RESULTS.md). Mode 3: 150 kbit/s, 12-byte preamble and 2-byte
+# SFD as the FG25's PHY, 45-byte PSDU: 8 * (2 + 45 + 4) = 408 counted bits,
+# the kits' 50-byte frame.
+M3 = {"rate_bps": 150000, "shr_len": 14}
+M3_SHR = 14 * 8 * 1000000 // 150000             # 746 us
+M3_PRE = 12 * 8 * 1000000 // 150000             # 640 us
+M3_PSDU = b"q" * 45
+M3_AIR = (14 + 2 + 45 + 4) * 8 * 1000000 // 150000   # 3466 us
+
+
+def received_share(rssi_a, rssi_i, n, wanted, interferer, period, opts=(), seed="1"):
+    """Node 1 sends n frames (fields wanted) to 2 at rssi_a; node 3 sends
+    one (fields interferer, with its "at" offset from 1's start) at rssi_i
+    with each. Returns the share of 1's frames received and the verdicts."""
+    first = 10000
+    at = interferer.pop("at")
+    r = {1: Radio(1, {first + k * period: [("tx", dict(wanted))] for k in range(n)}), 2: Radio(2),
+         3: Radio(3, {first + at + k * period: [("tx", dict(interferer))] for k in range(n)})}
+    d, out, rows = medium_run(r, [(1, 2, rssi_a), (3, 2, rssi_i)], opts=opts, seed=seed)
+    xv = [m for t, m in got(r[2], "xv") if m["frame_id"] % 2 == 1]
+    check(len(xv) == n, f"{len(xv)} verdicts for 1's frames, not {n}")
+    return sum(m["ok"] for m in xv) / n, xv
+
+
+def test_medium_calib_sir():
+    """The measured locked-frame points (COCHANNEL_RESULTS.md §4.1, §5): a
+    frame already locked, an interferer from just after its SHR to its end.
+    Mode 3, 50-byte frame: received 0 of about 200 at +0.4 dB, 50 % at
+    +2.65 dB, 90 % at +3.8 dB, 99 % at +5.0 dB. Mode 1a (interferer from
+    1800 us): 50 % at +2.9 dB, 99 % at +5.3 dB. The model is checked against
+    these within the measurement's SIR accuracy (about 1 dB): at the 50 %
+    points between 30 and 75 %, at the 99 % points at least 93 % (the fit is
+    1-2 dB conservative there, §4.1). Each point's rate also equals the
+    model's formula. The EM4 model, for comparison, loses nearly all frames
+    at +5 dB (it needed about 20 dB)."""
+    n = 200
+    m3_int = dict(M3, payload=b"i" * 120, at=M3_SHR + 153)
+    m3_bits = (M3_AIR - M3_SHR - 153) / (M3_AIR - M3_SHR)
+    # Mode 1a: the kits' 50-byte frame, 46-byte PSDU, 416 counted bits
+    a1 = {"payload": b"q" * 46}
+    a1_air = (10 + 2 + 46 + 4) * 8 * 1000000 // 50000
+    a1_int = {"payload": b"i" * 60, "at": 1800}
+    a1_bits = (a1_air - 1800) / (a1_air - SHR_US)
+    cases = [   # (name, wanted, interferer, share of the bits interfered, rate, SIR, low, high, opts)
+        ("mode 3", dict(M3, payload=M3_PSDU), m3_int, m3_bits, 150000, 0.4, 0, 0.05, []),
+        ("mode 3", dict(M3, payload=M3_PSDU), m3_int, m3_bits, 150000, 2.65, 0.30, 0.75, []),
+        ("mode 3", dict(M3, payload=M3_PSDU), m3_int, m3_bits, 150000, 3.8, 0.70, 0.97, []),
+        ("mode 3", dict(M3, payload=M3_PSDU), m3_int, m3_bits, 150000, 5.0, 0.93, 1, []),
+        ("mode 3", dict(M3, payload=M3_PSDU), m3_int, m3_bits, 150000, 8.0, 0.99, 1, []),
+        ("mode 3 em4", dict(M3, payload=M3_PSDU), m3_int, m3_bits, 150000, 5.0, 0, 0.05, ["--medium-model=em4"]),
+        ("mode 1a", a1, a1_int, a1_bits, 50000, 2.9, 0.30, 0.75, []),
+        ("mode 1a", a1, a1_int, a1_bits, 50000, 5.3, 0.93, 1, []),
+    ]
+    for name, wanted, intf, share, rate, sir, low, high, opts in cases:
+        p_a = -60
+        rx, xv = received_share(p_a, p_a - sir, n, wanted, dict(intf), 30000, opts)
+        bits = 8 * (2 + len(wanted.get("payload", PAYLOAD)) + 4)
+        if opts:
+            # em4 counts the bits over the whole airtime: the share after the interferer's start
+            air = M3_AIR if rate == 150000 else a1_air
+            at = intf["at"]
+            want = (1 - min(0.5, 0.5 * math.exp(-0.5 * sinr_db(p_a, p_a - sir)))) ** (bits * (air - at) / air)
+        else:
+            want = p_success_fg25([(1 - share, p_a, []), (share, p_a, [p_a - sir])], bits, rate)
+        sigma = math.sqrt(n * want * (1 - want))
+        check(low <= rx <= high, f"{name} at SIR {sir} dB: {rx:.2f} received, measured band {low}-{high}")
+        check(abs(rx * n - want * n) < max(4 * sigma, 0.5), f"{name} at SIR {sir} dB: {rx:.2f}, formula {want:.2f}")
+        print(f"     {name}, SIR {sir:+.2f} dB: {rx * 100:.0f} % received (formula {want * 100:.0f} %)")
+
+
+def capture_case(offset, p_b, wanted=None, opts=(), late=None):
+    """Node 1's frame at 2 from 1000 at -70 dBm, node 3's from 1000 +
+    offset at p_b (same fields). late: node 4 sends a frame at that time.
+    Returns 2's frames, its verdicts and the medium log."""
+    w = dict(wanted or {})
+    r = {1: Radio(1, {1000: [("tx", dict(w))]}), 2: Radio(2), 3: Radio(3, {1000 + offset: [("tx", dict(w))]})}
+    links = [(1, 2, -70), (3, 2, p_b)]
+    if late is not None:
+        r[4] = Radio(4, {late: [("tx", dict(w))]})
+        links.append((4, 2, -70))
+    d, out, rows = medium_run(r, links, opts=opts)
+    xx = [(t, m["src"]) for t, m in got(r[2], "xx")]
+    xv = [(t, m["frame_id"], m["ok"]) for t, m in got(r[2], "xv")]
+    return xx, xv, {(x[1], x[4]) for x in rows}, d
+
+
+def test_medium_calib_capture():
+    """Capture windows (COCHANNEL_RESULTS.md §4.2, §5, §6 item 3). A frame
+    from 3, 10 dB stronger than the one 2 receives from 1, starting
+    `offset` after it:
+    - mode 3 (preamble 640 us, SHR 746 us; early window 37 bits = 246 us):
+      captured at 0-245 us (measured: 0-200 us 100 %, 250 us 53-66 %), and
+      during the SFD, 640-745 us (measured 650-700 us 97-100 %); between
+      them both are lost (measured 300-550 us: 0 %): 2 gets 1's failed
+      verdict at once and not 3's frame; from the SHR's end no capture
+      (measured from 800 us: 0 %), 1's frame lost by interference at its end;
+    - mode 1a (preamble 1280 us, SHR 1600 us; early window 20 bits =
+      400 us): captured up to 399 us, both lost from 400 us to 1599 us,
+      SFD included (no late window measured), no capture after;
+    - the margin: 3 dB stronger needed (2 dB in the early window: no
+      capture, both lost by interference); 2.5 dB breaks the search (2 dB
+      does not: 1's frame then ends with its verdict); a weaker second frame
+      in the early window leaves the first (received);
+    - after a broken search the receiver locks the next frame;
+    - --medium-model=em4: captured anywhere in the SHR, as before EM5."""
+    m3 = dict(M3, payload=M3_PSDU)
+    air = {"m3": M3_AIR, "1a": AIRTIME}
+    cases = [   # (PHY, offset, P of 3's frame, opts, expected)
+        ("m3", 0, -60, [], "captured"), ("m3", 100, -60, [], "captured"), ("m3", 245, -60, [], "captured"),
+        ("m3", 246, -60, [], "broken"), ("m3", 400, -60, [], "broken"), ("m3", 639, -60, [], "broken"),
+        ("m3", 640, -60, [], "captured"), ("m3", 700, -60, [], "captured"), ("m3", 745, -60, [], "captured"),
+        ("m3", 746, -60, [], "none"), ("m3", 2000, -60, [], "none"),
+        ("m3", 100, -67, [], "captured"), ("m3", 100, -68, [], "none"),
+        ("m3", 400, -67.5, [], "broken"), ("m3", 400, -68, [], "none"),
+        ("m3", 100, -78, [], "kept"), ("m3", 400, -78, [], "kept"),
+        ("m3", 400, -60, ["--medium-model=em4"], "captured"), ("m3", 400, -65, ["--medium-model=em4"], "none"),
+        ("m3", 400, -60, ["--medium-break-db=off"], "none"),
+        ("m3", 700, -60, ["--medium-capture-sfd=3:off"], "broken"),
+        ("m3", 400, -60, ["--medium-capture-early-bits=3:96"], "captured"),
+        ("1a", 0, -60, [], "captured"), ("1a", 399, -60, [], "captured"), ("1a", 400, -60, [], "broken"),
+        ("1a", 1400, -60, [], "broken"), ("1a", 1600, -60, [], "none"),
+    ]
+    for phy, offset, p_b, opts, want in cases:
+        w = m3 if phy == "m3" else {}
+        xx, xv, log, d = capture_case(offset, p_b, w, opts)
+        tag = f"{phy} +{offset} us, {p_b} dBm {opts}"
+        b_end = 1000 + offset + air[phy]
+        if want == "captured":
+            check(xx == [(1000, 1), (1000 + offset, 3)] and [(t, f) for t, f, ok in xv] == [(b_end, 2)] and
+                  log in ({(1, "captured"), (3, "ok")}, {(1, "captured"), (3, "interference")}),
+                  f"{tag}: captured expected: {xx} {xv} {log}")
+        elif want == "broken":
+            check(xx == [(1000, 1)] and xv == [(1000 + offset, 1, 0)] and log == {(1, "interference"), (3, "busy")},
+                  f"{tag}: both lost at once expected: {xx} {xv} {log}")
+            check(not empty_wakes(d, 2), f"{tag}: empty wakes of 2 {empty_wakes(d, 2)}")
+        elif want == "none":
+            check(xx == [(1000, 1)] and xv == [(1000 + air[phy], 1, 0)] and log == {(1, "interference"), (3, "busy")},
+                  f"{tag}: no capture expected: {xx} {xv} {log}")
+        else:   # kept: the first frame, 8 dB stronger, is received
+            check(xx == [(1000, 1)] and xv == [(1000 + air[phy], 1, 1)] and log == {(1, "ok"), (3, "busy")},
+                  f"{tag}: first frame kept expected: {xx} {xv} {log}")
+    # After a broken search, 2 listens again: 4's frame, after 3's, is received
+    late = 1000 + 400 + M3_AIR + 10
+    xx, xv, log, d = capture_case(400, -60, m3, late=late)
+    check(xx == [(1000, 1), (late, 4)] and xv == [(1400, 1, 0), (late + M3_AIR, 3, 1)],
+          f"after a break: {xx} {xv} {log}")
+
+
+def test_medium_calib_adjacent():
+    """Adjacent channel (COCHANNEL_RESULTS.md §4.4): a frame on the next
+    channel interferes as a co-channel frame 10 dB weaker, two channels
+    away not at all; also an interferer that started before the lock (it
+    also counts against the lock threshold: 10 dB above 1's frame on the
+    next channel, 1's frame is not locked). 1's frame on channel 0 at
+    -60 dBm; 3's frame from 2000 us (or from 500 us, before 1's) on channel
+    `chan` at `p3`. --medium-adjacent-db sets it (off: no effect; 1a:30 for
+    the 50 kbit/s profile)."""
+    r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {500: [("tx", {"chan": 1})]})}
+    d, out, rows = medium_run(r, [(1, 2, -60), (3, 2, -45)])
+    log = {(x[1], x[4]): x[6] for x in rows}
+    check(not got(r[2], "xx") and abs(log.get((1, "below_lock"), 99) - sinr_db(-60, -55)) < 0.01,
+          f"adjacent before the lock: {rows}")
+    cases = [   # (chan, p3, t3, opts, ok, interferer power in the verdict's SINR)
+        (1, -45, 2000, [], 0, -55),
+        (1, -40, 2000, [], 0, -50), (1, -58, 500, [], 1, -68), (1, -62, 2000, [], 1, -72),
+        (2, -30, 2000, [], 1, None), (1, -45, 2000, ["--medium-adjacent-db=off"], 1, None),
+        (1, -45, 2000, ["--medium-adjacent-db=1a:30"], 1, -75), (1, -45, 2000, ["--medium-adjacent-db=3:30"], 0, -55),
+    ]
+    for chan, p3, t3, opts, ok, ieff in cases:
+        r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2), 3: Radio(3, {t3: [("tx", {"chan": chan})]})}
+        d, out, rows = medium_run(r, [(1, 2, -60), (3, 2, p3)], opts=opts)
+        xv = [m for t, m in got(r[2], "xv")]
+        want_sinr = sinr_db(-60) if ieff is None else sinr_db(-60, ieff)
+        check(len(xv) == 1 and xv[0]["ok"] == ok and abs(xv[0]["sinr_db"] - want_sinr) < 0.01,
+              f"chan {chan}, {p3} dBm at {t3} {opts}: {xv}, SINR {want_sinr:.2f} expected")
+        check((3, "not_listening") in {(x[1], x[4]) for x in rows}, f"chan {chan}: log {rows}")
+
+
+def test_medium_calib_options():
+    """The calibrated model's options: errors, and the profiles printed at
+    the start (the measured defaults; em4; a per-PHY override)."""
+    for args, msg in ((["--vtime=1", "--medium-model=x"], "fg25 or em4"),
+                      (["--vtime=1", "--medium=legacy", "--medium-model=em4"], "need the central medium"),
+                      (["--vtime=1", "--medium-int-curve=3:1"], "X0,B"),
+                      (["--vtime=1", "--medium-int-curve=3:1,0"], "above 0"),
+                      (["--vtime=1", "--medium-capture-early-bits=2a:5"], "expected [1a|1b|3|other:]VALUE"),
+                      (["--vtime=1", "--medium-capture-early-bits=3:1.5"], "whole number"),
+                      (["--vtime=1", "--medium-capture-sfd=yes"], "on|off"),
+                      (["--vtime=1", "--medium-break-db=abc"], "expected a number"),
+                      (["--vtime=1", "--medium-adjacent-db=3:"], "expected a number")):
+        srv = Server(args)
+        check(srv.wait() != 0 and msg in srv.output(), f"{args} accepted, or no \"{msg}\": {srv.output()[-300:]}")
+    for opts, lines in (([], ["model fg25",
+                              "PHY 1a: interference x0 -2.40 dB, b 0.90 dB, capture 3.0 dB in the first 20 bits, "
+                              "break 2.5 dB, adjacent channel 10.0 dB",
+                              "PHY 3: interference x0 -2.85 dB, b 0.90 dB, capture 3.0 dB in the first 37 bits and "
+                              "the SFD, break 2.5 dB, adjacent channel 10.0 dB",
+                              "PHY other: interference x0 -2.85 dB, b 0.90 dB, capture 3.0 dB in the first 37 bits "
+                              "and the SFD, break 2.5 dB, adjacent channel 10.0 dB"]),
+                        (["--medium-model=em4"], ["model em4",
+                                                  "PHY 3: interference as noise, capture 6.0 dB in the first SHR, "
+                                                  "break off, adjacent channel off"]),
+                        (["--medium-int-curve=1b:-1,2", "--medium-capture-early-bits=shr", "--medium-break-db=3:off"],
+                         ["PHY 1a: interference x0 -1.00 dB, b 2.00 dB, capture 3.0 dB in the first SHR, break 2.5 dB",
+                          "PHY 3: interference x0 -2.85 dB, b 0.90 dB, capture 3.0 dB in the first SHR and the SFD, "
+                          "break off"])):
+        srv = Server(["--vtime=1", "--vtime-end=0.001"] + opts)
+        d = Driver(ARGS.sock, {1: Script(1)})
+        d.connect()
+        d.run()
+        out = srv.output()
+        check(srv.wait() == 0, f"{opts}: server exit")
+        for ln in lines:
+            check(ln in out, f"{opts}: no \"{ln}\" in {out[:1500]}")
 
 
 def main():
@@ -998,6 +1290,10 @@ def main():
         ("medium_cut_drop", test_medium_cut_drop),
         ("medium_capture_margin", test_medium_capture_margin),
         ("medium_restart", test_medium_restart),
+        ("medium_calib_sir", test_medium_calib_sir),
+        ("medium_calib_capture", test_medium_calib_capture),
+        ("medium_calib_adjacent", test_medium_calib_adjacent),
+        ("medium_calib_options", test_medium_calib_options),
     ]
     for name, fn in tests:
         if ARGS.k not in name:

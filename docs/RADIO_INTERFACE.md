@@ -298,7 +298,8 @@ The welcome's `seed` is the run's base seed (`WSSIM_SEED`). For reproducible run
 
 Exceptions while a frame is held:
 
-- **Capture.** A new `"xx"` arrives before the verdict: a stronger frame captured the receiver during the first frame's preamble and sync word. The client drops the first frame and holds the new one; no verdict comes for the first.
+- **Capture.** A new `"xx"` arrives before the verdict: a stronger frame captured the receiver in a capture window of the first frame's SHR (the early part of its preamble, and in mode 3 its sync word; `docs/MEDIUM.md` §2.1, §3). The client drops the first frame and holds the new one; no verdict comes for the first.
+- **Broken search.** A frame clearly stronger than the held one starts in the rest of the held frame's SHR: the verdict `"xv"` with `ok` 0 (cause interference) comes at once, before the held frame's end, and the stronger frame is not delivered (the measured radio loses both). The client handles it as any failed verdict.
 - **Leaving.** If the client reports any state other than `RECEIVE` while it holds a frame (it turns the radio off, or starts to transmit), the frame is lost and no verdict comes. Transmitting while receiving is how half duplex appears: the medium records the outcome `tx_abort`.
 - A verdict for a frame the client does not hold is ignored.
 
@@ -324,7 +325,7 @@ Preamble sampling: a node turns its receiver on for a short window on one channe
 2. The server answers with one `"xd"` (§4.13), in a wake of the node at `t_us`:
    - at the **detection time**, the end of the first detection try that succeeds (`detected` = 1). A try observes a fixed number of bits of a frame's preamble (`--sniff-dwell-bits`, 16 by default), so a detection comes one try's duration or more after the later of the preamble's start and the window's start (after the settling time): 320 µs at 50 kbit/s with the defaults;
    - or at `t1` with `detected` = 0.
-3. With `LOCK`, a detection locks the receiver onto the frame if its sync word is still ahead and it passes the lock threshold (`docs/MEDIUM.md` §10.3): `locked` = 1 and the frame's `"xx"` (flag `MEDIUM`, and `LONG_PREAMBLE` if it was sent with `"xl"`) is the next message of the same wake. Its verdict `"xv"` comes at the frame's end, as for any lock (§6.5), and capture by a stronger frame applies until the end of its SHR.
+3. With `LOCK`, a detection locks the receiver onto the frame if its sync word is still ahead and it passes the lock threshold (`docs/MEDIUM.md` §10.3): `locked` = 1 and the frame's `"xx"` (flag `MEDIUM`, and `LONG_PREAMBLE` if it was sent with `"xl"`) is the next message of the same wake. Its verdict `"xv"` comes at the frame's end, as for any lock (§6.5), and the capture rules of `docs/MEDIUM.md` §3 apply until the end of its SHR.
 4. A frame that **starts** on `C` during the window locks the receiver at its start, as in §6.5: the client gets its `"xx"` then and reports `RECEIVE` (a report that keeps the sniff, below), and the sniff reports that frame later with `locked` = 2 if it detects it (with or without `LOCK`). If its verdict comes before the `"xd"`, the client reports `LISTEN` on `C` to go back to the sniff, which goes on, or `OFF` to end it (then no `"xd"` comes). If the window ends while the frame is still being received and the sniff did not detect it (a preamble shorter than one try, or a missed try), the `"xd"` has `detected` = 0 and the radio stays in `RECEIVE`.
 
 **Ordering in virtual time.** The `"xd"`, and the `"xx"` of a lock it made, are messages of a wake like frames and verdicts: they count in the `"xa"` count and come in the medium's order (§5.2), the `"xx"` right after its `"xd"`. A sniff that detects nothing costs the node one wake, at `t1`. A node has at most one sniff: a new `"xn"` replaces the one in progress, which then ends **without** `"xd"`. A frame the node sends during the window (`"xx"` or `"xl"`), a radio report that leaves the sniff (below) and the node's stop also end it without `"xd"`.
@@ -381,8 +382,8 @@ Both are FG25 figures: another radio or MCU needs its own profile (copy one and 
 | Who hears a frame at all: the topology (`-g`), cut links (`--vtime-cut`) | When to transmit, on which channel, with which PHY parameters and power |
 | Received power: the link's value (`-g A,B:RSSI`, `--vtime-link`), or the link's value plus the sender's power above `--medium-tx-ref` | When the receiver is on, on which channel, and when the radio is off |
 | Whether a listening node locks onto a frame: signal-to-noise-and-interference ratio at the frame's start ≥ the lock threshold (`--medium-lock-snr`, 0 dB) | What to do with a received frame, and with a lost one |
-| Capture: a frame at least `--medium-capture-db` (6 dB) stronger during the first frame's preamble and sync word | Whether and when to assess the channel, and the CCA threshold |
-| Interference: every overlapping frame on the same channel from a neighbour | Retransmissions, backoff, acknowledgements, addressing, routing: the whole protocol |
+| Capture: a frame at least `--medium-capture-db` (3 dB) stronger in the measured capture windows of the first frame's SHR; a stronger frame in the rest of the SHR makes both lost (`docs/MEDIUM.md` §2.1, §3) | Whether and when to assess the channel, and the CCA threshold |
+| Interference: every overlapping frame from a neighbour on the same channel, or on the next channel 10 dB weaker, with the error rates measured on the FG25 kits (`docs/MEDIUM.md` §2, §2.1) | Retransmissions, backoff, acknowledgements, addressing, routing: the whole protocol |
 | Success or loss of each frame: one seeded draw from the error model over the frame's segments of different SINR (`docs/MEDIUM.md` §2) | Its own clock's drift handling and its random numbers |
 | Half duplex: a node that transmits loses the frame it was receiving, and a node in `TX` hears nothing | Its radio state, which it must report |
 | The CCA energy | |
@@ -493,7 +494,8 @@ loop:
 | `exchange` | Three nodes, four windows: every frame is delivered through the medium at its end; virtual time reaches the last window; the power report has the exact TX and RX times, the radio on only in the windows, deep sleep the rest of the time, and the state times add up to the run time |
 | `determinism` | The same seed gives identical node logs and medium log |
 | `collision` | Two hidden nodes send at once: the receiver loses the frame to interference and the second frame is `busy`; their CCAs found the channel clear |
-| `capture` | A frame 20 dB stronger, inside the first frame's preamble, captures the receiver |
+| `capture` | A frame 20 dB stronger, in the early capture window of the first frame's preamble, captures the receiver |
+| `capture_break` | The same frame 1 ms later (past the early window, before the first frame's SHR ends): the first frame's failed verdict comes at once, the second frame is not received |
 | `half_duplex` | Two nodes send at once without CCA: the one receiving drops its frame (`tx_abort`), the other hears nothing |
 | `cca_busy` | With CCA, the second node finds the first frame on air (−60 dBm), does not send, and receives it |
 | `window_closed` | Frames sent while the receiver's radio is off are not heard (`not_listening`) |
@@ -532,7 +534,7 @@ python3 radio_if/test_ref_client.py build-vt/wssimserver      # about 3 s
 ## 14. Not in this interface
 
 - **Wall-clock mode and the legacy medium.** The interface needs virtual time and the central medium.
-- **Physical-layer details** listed in `docs/MEDIUM.md` §9: adjacent-channel interference, fading and shadowing, external interferers, node positions and path-loss models, RX/TX turnaround and settling times (except the sniff's settling time, §6.7), an error on the reported RSSI. A receiver also decodes frames whatever their bit rate.
+- **Physical-layer details** listed in `docs/MEDIUM.md` §9 and §9.1: fading and shadowing, external interferers, node positions and path-loss models, RX/TX turnaround and settling times (except the sniff's settling time, §6.7), an error on the reported RSSI. A receiver also decodes frames whatever their bit rate.
 - **The receive timestamp** is the frame's start (the time of the wake that delivers it); a radio that timestamps the end of the sync word adds `shr_len × 8 × 10⁶ / rate_bps` itself. After a sniff's lock, it is the detection time.
 - **MCU active time chosen by the client.** The power report models it from cycle counts (§7); code still runs in zero virtual time, so a slow MCU does not delay the protocol.
 - **Peripherals that keep the MCU out of deep sleep** (a UART, for example) cannot be reported yet.

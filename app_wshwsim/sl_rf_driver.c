@@ -230,7 +230,10 @@ uint32_t MAX_PACKET_SENDING_TIME = (uint32_t)(8000000/150000)*MAC_IEEE_802_15_4G
  * (PHY_EXTENSION_SET_RF_CONFIGURATION, from the PHY mode); phy_subghz's
  * 150 kbit/s only until then. User settings, in the nodes' environment:
  *   WSSIM_PHY_DATARATE=<bit/s>  this rate whatever the MAC configures
- *   WSSIM_PHY_PREAMBLE=<bytes>  default 8 (Wi-SUN FAN: at least 64 bits)
+ *   WSSIM_PHY_PREAMBLE=<bytes>  default 8 (Wi-SUN FAN: at least 64 bits);
+ *                               with the central medium, the FG25's per PHY
+ *                               mode: 12 in mode 3, 8 otherwise (firmware
+ *                               repo docs/COCHANNEL_RESULTS.md §2, §6 item 4)
  *   WSSIM_PHY_SFD=<bytes>       default 2 (SUN FSK, 16-bit SFD)
  *   WSSIM_PHY_PHR=<bytes>       default 2 (SUN FSK PHR)
  *   WSSIM_PHY_FCS=<2|4>         FCS this node sends, default 4 (FAN: CRC-32);
@@ -244,6 +247,7 @@ static uint32_t rf_datarate = 150000;   // bit/s, used for every airtime (phy_su
 static uint32_t rf_datarate_fixed;      // WSSIM_PHY_DATARATE, 0 if unset
 static bool rf_phy_legacy;
 static uint8_t rf_preamble_len = 8;
+static bool rf_preamble_fixed;          // WSSIM_PHY_PREAMBLE given
 static uint8_t rf_sfd_len = 2;
 static uint8_t rf_phr_len = 2;
 static uint8_t rf_fcs_len = 4;
@@ -343,6 +347,7 @@ static void rf_phy_settings_init(void)
     rf_phy_legacy = rf_phy_env("WSSIM_PHY_LEGACY", 0, 0, 1);
     rf_datarate_fixed = rf_phy_env("WSSIM_PHY_DATARATE", 0, 1000, 10000000);
     rf_preamble_len = rf_phy_env("WSSIM_PHY_PREAMBLE", 8, 0, 255);
+    rf_preamble_fixed = getenv("WSSIM_PHY_PREAMBLE") && *getenv("WSSIM_PHY_PREAMBLE");
     rf_sfd_len = rf_phy_env("WSSIM_PHY_SFD", 2, 0, 8);
     rf_phr_len = rf_phy_env("WSSIM_PHY_PHR", 2, 0, 8);
     rf_fcs_len = rf_phy_env("WSSIM_PHY_FCS", 4, 2, 4);
@@ -386,10 +391,27 @@ static uint8_t rf_phy_mode_of(const phy_rf_channel_configuration_s *config)
     }
 }
 
+// The preamble of a PHY mode with the central medium, unless
+// WSSIM_PHY_PREAMBLE fixes it: Silicon Labs' EU mode-3 PHY on the FG25
+// sends 12 bytes, its mode-1a PHY 8 (firmware repo docs/COCHANNEL_RESULTS.md
+// §2, §6 item 4); other modes keep FAN's minimum of 8 (not measured). The
+// legacy medium keeps 8, as the permanent reference runs.
+static void rf_phy_preamble(void)
+{
+    uint8_t len = rf_phy_mode == SIM_PHY_MODE_3 ? 12 : 8;
+
+    if (rf_preamble_fixed || !rf_medium || len == rf_preamble_len)
+        return;
+    rf_preamble_len = len;
+    rf_phy_timing_update();
+    INFO("PHY: preamble %u B for this PHY mode (central medium)", rf_preamble_len);
+}
+
 // The MAC's PHY configuration (PHY mode): its data rate, unless fixed.
 static void rf_phy_configure(const phy_rf_channel_configuration_s *config)
 {
     rf_phy_mode = rf_phy_mode_of(config);
+    rf_phy_preamble();
     if (rf_phy_legacy || rf_datarate_fixed || !config->datarate || config->datarate == rf_datarate)
         return;
     rf_datarate = config->datarate;

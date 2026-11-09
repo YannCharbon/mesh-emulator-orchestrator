@@ -242,14 +242,32 @@ def test_collision():
 
 
 def test_capture():
-    """Same as the collision, but 3 is 20 dB stronger and starts 1 ms after 2,
-    inside 2's preamble and sync word (8 bytes, 1.28 ms): 3 captures node 1."""
-    nodes = {1: [], 2: ["--tx", 10], 3: ["--tx", 11]}
+    """Same as the collision, but 3 is 20 dB stronger and starts 0.2 ms after
+    2, inside the early capture window of 2's preamble (50 kbit/s: 20 bits,
+    0.4 ms; docs/MEDIUM.md §2.1): 3 captures node 1. Before EM5 3 started
+    1 ms after 2 (the MVP captured during the whole SHR, 1.28 ms); at 1 ms
+    the measured radio loses both frames (test_capture_break)."""
+    nodes = {1: [], 2: ["--tx", 10], 3: ["--tx", 10.2]}
     r = Run("capture", nodes, [(1, 2, -80), (1, 3, -60)], 1.5)
     check([kv["src"] for t, kv in r.ev(1, "rx_start")] == ["2", "3"], f"node 1: {r.events[1]}")
     check([kv["src"] for t, kv in r.ev(1, "rx_ok")] == ["3"], f"node 1: {r.events[1]}")
     check(r.outcomes() == {(2, 1, "captured"): 1, (3, 1, "ok"): 1}, f"medium {r.outcomes()}")
     check(r.ev(1, "verdict_ignored") == [], "a verdict for the captured frame")
+
+
+def test_capture_break():
+    """3, 20 dB stronger, starts 1 ms after 2: past the early window, before
+    2's SHR ends. The measured radio loses its first sync word and finds no
+    second one (docs/MEDIUM.md §3): node 1 gets 2's frame lost at once (at
+    3's start) and never 3's."""
+    nodes = {1: [], 2: ["--tx", 10], 3: ["--tx", 11]}
+    r = Run("capture_break", nodes, [(1, 2, -80), (1, 3, -60)], 1.5)
+    check([kv["src"] for t, kv in r.ev(1, "rx_start")] == ["2"], f"node 1: {r.events[1]}")
+    lost = r.ev(1, "rx_lost")
+    start = r.ev(1, "rx_start")[0][0]
+    check(len(lost) == 1 and lost[0][1]["cause"] == "interference" and int(lost[0][0]) == int(start) + 1000 and
+          not r.ev(1, "rx_ok"), f"node 1: {r.events[1]}")
+    check(r.outcomes() == {(2, 1, "interference"): 1, (3, 1, "busy"): 1}, f"medium {r.outcomes()}")
 
 
 def test_half_duplex():

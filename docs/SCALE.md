@@ -101,6 +101,7 @@ The figures below are with the final server (§5), the power report on (`efr32fg
 | 2000 | light | 180 | 0.097 | 1.69 M | 10.3 | 2.2 / 5.0 | 11.8 | 22 MB | 229 MB |
 | 4000 | light | 60 | 0.28 | 1.45 M | 11.5 | 2.8 / 5.0 | 11.5 | 42 MB | 458 MB |
 
+- These figures were measured before the medium's calibration on the FG25 kits (EM5; `docs/MEDIUM.md` §2.1, §8: with it, about 28 % fewer interference losses and the same flood coverage and latencies with the light load; with the heavy load, every flood complete and shorter beacon latencies).
 - Every flood reached every node in these runs. With the light load at 1000 nodes, a beacon reached the whole building in 6 s (6 hops, one window per hop). With the heavy load, floods took up to 19 s, because CCA deferrals pushed relays to later windows.
 - Starting the clients takes 0.2 s for 1000 nodes and 0.8 s for 4000. This is not part of "wall s per virtual s".
 - The power report costs about 7 % of the wall time (1000 nodes, light load: 0.0317 without and 0.034 with). The medium log costs about 5 %.
