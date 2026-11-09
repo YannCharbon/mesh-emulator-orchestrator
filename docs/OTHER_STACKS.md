@@ -2,7 +2,7 @@
 
 This guide is the starting point for developers of a mesh stack that is not built on Nanostack and lives in its own repository. It explains how to test that stack in the emulator, observe it in the web application (`mesh-testbed-controller`) and then run it on the MTS bench. It gives the order of the work and the commands, and it links to the specifications for the details; it does not repeat them.
 
-Every command in this guide was run once on 2026-11-09, on emulator `main` at `1a6082a`, controller `9297149` and bootloader `12ea43af`, except those that need the bench, which are marked. The server-only build (§2), `run.sh` with relative client paths and large topologies (§3), and the web-app steps of §4 (on a test instance of controller `1c346d6`) were run again after the fixes of the same day. Paths are relative to the emulator checkout unless stated otherwise; `<root>` is the checkout of `mesh-emulator-rework`, which holds the emulator, the controller, the bootloader and the stack as sibling directories.
+Every command in this guide was run once on 2026-11-09, on emulator `main` at `1a6082a`, controller `9297149` and bootloader `12ea43af`, except those that need the bench, which are marked. The server-only build (§2), `run.sh` with relative client paths and large topologies (§3), and the web-app steps of §4 (on a test instance of controller `1c346d6`) were run again after the fixes of the same day; the plan of §4 with a relative topology file, on the emulator and on the simulated bench, was run again on controller `4cdfe18`. Paths are relative to the emulator checkout unless stated otherwise; `<root>` is the checkout of `mesh-emulator-rework`, which holds the emulator, the controller, the bootloader and the stack as sibling directories.
 
 ## 1. What the environment offers, and its limits
 
@@ -131,7 +131,7 @@ Plan the memory as the client's resident size × N ([SCALE.md](SCALE.md) §3–�
 
 The web app reads each client's `MOP1` lines and shows the nodes, their states, parents and links, counters and events ([STACK_NEUTRAL_MODEL.md](../../mesh-testbed-controller/docs/STACK_NEUTRAL_MODEL.md), "The emulator" and "Nodes of other stacks: clients of the radio interface"). Installation of .NET and the settings are in the controller's [README](../../mesh-testbed-controller/README.md).
 
-**Start an instance for the emulator only,** with the test profile, its own port and its own data directory. The test profile switches the real bench off whatever the other options say, keeps the configurations, event log, exports and runs under the data directory, uses no TUN device, and builds the program in `<data dir>/build` ([README](../../mesh-testbed-controller/README.md), "Extra instances"). Switch the simulated bench off too, so that the emulator is the instance's environment:
+**Start an instance for the emulator only,** with the test profile, its own port and its own data directory. The test profile switches the real bench off whatever the other options say, keeps the configurations, event log, exports and runs under the data directory, uses no TUN device, and builds the program in `<data dir>/build` ([README](../../mesh-testbed-controller/README.md), "Extra instances"). Switching the simulated bench off makes the emulator the instance's only environment; without `--Environments:MtsSimulated=false`, the simulated bench is shown first, and the emulator is chosen in the environment selector at the top of the Configuration page:
 
 ```bash
 cd <root>/mesh-testbed-controller
@@ -147,7 +147,7 @@ Every page then shows "Test instance: no real bench". Use a port of your own: an
 {
  "schema": 1, "name": "mystack48",
  "radio": {"txPowerDbm": 14},
- "topology": {"kind": "file", "file": "/abs/path/topo48.txt"},
+ "topology": {"kind": "file", "file": "topo48.txt"},
  "defaultStack": "my-stack",
  "stacks": {"my-stack": {"program": "/abs/path/to/my_client", "arguments": "", "settings": {}, "txPowerSetting": "tx-dbm"}},
  "run": {"durationS": 300, "seeds": [1], "virtualTime": true, "powerProfile": "examples/power/efr32fg25-lfn.ini"}
@@ -157,7 +157,7 @@ Every page then shows "Test instance: no real bench". Use a port of your own: an
 - `txPowerSetting` names the client's argument for the TX power: the neutral TX power `radio.txPowerDbm` is passed as `--tx-dbm 14`. Settings in `stacks.<name>.settings` and `nodes[i].settings` become `--name value` arguments; a value must not contain spaces or quotes.
 - `run.mediumTxRefDbm` makes the link values the received power at that TX power, so that a node's TX power changes what others receive.
 - `"program"` may use `$EMU`, the emulator checkout (for example `python3 $EMU/radio_if/ref_client.py`); otherwise give absolute paths.
-- `topology.file`: give an absolute path. The documentation allows a path relative to the configuration directory, but on controller `1c346d6` such a path was looked up in the controller's own directory (the plan says "no file ...").
+- `topology.file`: an absolute path, or a path relative to the configuration directory (`<dir>/configs` of a test instance; the Configuration page shows it next to the field). The example expects `topo48.txt` next to the configuration file.
 - The Configuration page can also import a topology file into the configuration's links (`"kind": "edges"`), and chooses the default stack and the power profile. A node keeps its own stack with an entry in `nodes` (`{"id": 0, "stack": "wisun"}` for a Nanostack border router).
 - `run.powerProfile` (an `.ini` of the emulator's `examples/power/`, or an absolute path) and `run.powerCell` (`mAh[:V[:efficiency]]`) are exported as `POWER` and `POWER_CELL` of `run.sh`; both are also on the Configuration page and the Runs page.
 
@@ -250,8 +250,8 @@ The simulated bench of the controller (`--Environments:MtsSimulated=true`, with 
 | The power report is missing from a web-app run | No power profile was chosen: set `run.powerProfile` on the Configuration page or choose one on the Runs page before **Start** (§4) |
 | A run made by hand cannot be opened | Open it by its path on the Runs page; it must lie under the export directory, the emulator's `runs/` or a directory of `Emulator:RunRoots`, and contain `if<i>.log` or `br.log` (§4) |
 | The run started from the web app is not the configuration expected | The Runs page starts the current configuration (shown at the top of every page, shared by all tabs) or the saved one chosen there; the **Start** button names it (§4) |
-| The plan says `topology.file: no file ...` | Give the topology file as an absolute path (§4) |
-| The Configuration page shows "Object reference not set to an instance of an object" after **Plan**, and **Apply selected steps** stays disabled | Seen when the plan targeted the simulated bench (the button reads "Apply to MTS bench (simulated)") with a configuration of other-stack nodes only: start the instance with `--Environments:MtsSimulated=false` (§4) or choose the Emulator environment at the top of the page |
+| The plan says `topology.file: no file ...` | The path in the message is the one read: a relative path is relative to the configuration directory (`<dir>/configs` of a test instance), not to the emulator checkout or the controller; move the file there or give an absolute path (§4) |
+| The plan lists no step to write files and warns "bench node(s) 0-12 run another stack ... but have no image" | The plan targets the simulated bench (the button reads "Apply to MTS bench (simulated)"): choose the Emulator environment at the top of the page, or start the instance with `--Environments:MtsSimulated=false` (§4). Controllers before `4cdfe18` showed "Object reference not set to an instance of an object" there instead |
 | A node is shown "unknown" | Its log has no `MOP1` report line, or the line's first word is not the virtual time in µs |
 | A second controller instance contacts the real bench | Start extra instances with `--profile test` (§4), which keeps the real bench off; an instance with the real bench warns on every page when another one uses it |
 | The power figures look like mode 1a at another bit rate | The client reports `phy_mode` 0: report the number matching its PHY ([RADIO_INTERFACE.md](RADIO_INTERFACE.md) §7) |
