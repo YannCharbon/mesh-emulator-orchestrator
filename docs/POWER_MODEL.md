@@ -240,6 +240,8 @@ All are sent only when the welcome has `NSIM_WELCOME_POWER`, which the conductor
 
 Recording does not change what the nodes do: the messages go to the conductor, which does not relay them, and nothing is printed in the nodes' logs.
 
+With the central medium, a preamble sniff (`"xn"`, [MEDIUM.md](MEDIUM.md) §10.4) also moves the radio in the ledger without an "xr": LISTEN for the window, the request's end state when nothing was detected, RECEIVE from a lock the sniff made.
+
 ## 9. Checks of part 1 (2026-10-28)
 
 `dag_simple`, 300 virtual seconds, seeds 1–10, `SETARCH=1`, campaigns on `tunvt*`:
