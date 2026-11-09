@@ -56,7 +56,7 @@ At 1000 nodes this gives a mean of 38 neighbours (15–52) and up to 6 hops from
 python3 radio_if/scale/gen_building.py --nodes 48 -o topo48.txt --positions topo48.pos
 # topology: {"nodes": 48, "floors": 1, "grid": "5x10", "links": 375, ...}   (on stderr)
 WSSIM_SEED=1 build-vt/wssimserver --vtime=48 --group-file=topo48.txt ... /tmp/sock    # by hand, or:
-TOPO=topo48.txt IF_NODES="$(seq -s ' ' 0 47)" IF_CMD=my_client sim_utils/vtime/run.sh build-vt . out 300
+TOPO=topo48.txt IF_NODES="$(seq -s ' ' 0 47)" IF_CMD=./my_client sim_utils/vtime/run.sh build-vt . out 300
 ```
 
 | Option | Meaning | Default |
@@ -123,7 +123,7 @@ For other loads, the wall time is roughly (wakes per node per virtual second) ×
 | Connections | `RLIMIT_NOFILE` hard limit (524 288 here); the server raises its soft limit itself | `increase_limit_fd()` |
 | Server log | one "node N connected" line per node; the per-connection "Connect fd" lines only with `-v` (since 2026-11-09). `--dump` prints the topology and RSSI matrices, N² entries each: `run.sh` adds it only up to 200 nodes (`DUMP=1` or `0` to choose), `run_scale.py` never | |
 | Processes | one per node; `ulimit -u` here is 299 236 | |
-| Command line | about 2000 nodes of a building with `-g` per link (ARG_MAX 2 MB, `E2BIG` at 4000); use `--group-file` | `run_scale.py` uses it |
+| Command line | about 2000 nodes of a building with `-g` per link (ARG_MAX 2 MB, `E2BIG` at 4000); use `--group-file` | `run_scale.py` and `sim_utils/vtime/run.sh` (since 2026-11-09) use it: `run.sh` prepares a 1000-node building in under 1 s (150 s before) and runs 4000 nodes |
 | Memory | server: 12 MB at 1000 nodes and 42 MB at 4000; load client: about 115 kB PSS each | |
 | Socket path | 107 bytes; the runner uses `/tmp/wssim-scale-*.sock` | |
 

@@ -14,7 +14,11 @@
 #                      skipped (sim_utils/vtime/README.md, "Topology files").
 #                      Node 0 is the border router, the node count is the
 #                      highest ID + 1. Default: dag_simple (15 nodes), the same
-#                      -g list as sim_utils/migration/headless_run.sh.
+#                      -g list as sim_utils/migration/headless_run.sh. The
+#                      cleaned file (<outdir>/topology.txt) goes to wssimserver
+#                      as --group-file, so any size up to 4096 node IDs works
+#                      (no command-line limit; a 1000-node building with
+#                      19 000 links is read in well under a second)
 #   SOCK=<path>        conductor socket (default: a new /tmp/wssim-vt-*.sock)
 #   TUN=<dev>          the border router's TUN device (default tun0). It must
 #                      exist, belong to the user and be up (tunup.sh). Two runs
@@ -97,9 +101,16 @@
 #                      if<i>.log. Their IDs may appear in TOPO but not among
 #                      the routers (they do not count in the router range
 #                      1..highest ID). E.g. IF_CMD="python3 radio_if/ref_client.py"
-#                      With node 0 in IF_NODES, the run has no Nanostack
-#                      program at all (no border router, no routers): every
-#                      node of TOPO must then be in IF_NODES
+#                      The programs run in <outdir>, so in IF_CMD, IF_CMD_<i>
+#                      and IF_OPTS_<i> a word with a '/' that names an existing
+#                      file or directory relative to the directory run.sh is
+#                      called from is made absolute (radio_if/ref_client.py,
+#                      ./my_client, sched/3.txt); a bare name (my_client) is
+#                      looked up on PATH, as by the shell. Other relative
+#                      paths (files the client creates) are relative to
+#                      <outdir>. With node 0 in IF_NODES, the run has no
+#                      Nanostack program at all (no border router, no
+#                      routers): every node of TOPO must then be in IF_NODES
 #
 # Output in <outdir>: simserver.log, br.log, node<i>.log (each line starts with
 # NSIM_EPOCH_S + virtual time, written by the simulation port), if<i>.log
@@ -138,28 +149,31 @@ if [ -n "${TOPO:-}" ]; then
 else
 	tr ' ' '\n' <<< "$DAG_SIMPLE" > "$OUT/topology.txt"
 fi
-TPG=()
-MAXID=0
 declare -A IFN      # clients of the radio interface
 for i in ${IF_NODES:-}; do IFN[$i]=1; done
-while read -r e; do
-	TPG+=(-g "$e")
-	for id in $(cut -d: -f1 <<< "$e" | tr ',-' '  '); do
-		[ -n "${IFN[$id]:-}" ] && continue
-		(( id > MAXID )) && MAXID=$id
-	done
-done < "$OUT/topology.txt"
+# One pass over the topology (a 1000-node building has about 19 000 lines):
+# the highest ID that is not a client, every ID of a group "a-b" included.
+# With node 0 a client, every ID must be a client. The server reads the same
+# file with --group-file (no -g per link: no command-line length limit).
+MAXID=$(awk -v ifn="${IF_NODES:-}" -v allif="${IFN[0]:+1}" '
+	BEGIN { n = split(ifn, a, " "); for (i = 1; i <= n; i++) isif[a[i] + 0] = 1; max = 0 }
+	{
+		sub(/:.*/, "")
+		k = split($0, t, ",")
+		for (j = 1; j <= k; j++) {
+			m = split(t[j], r, "-"); lo = r[1] + 0; hi = (m > 1 ? r[2] : r[1]) + 0
+			for (id = lo; id <= hi; id++) {
+				if (id in isif) continue
+				if (allif) { printf "run.sh: node 0 is in IF_NODES, so node %d of TOPO must be too\n", id > "/dev/stderr"; bad = 1; exit }
+				if (id > max) max = id
+			}
+		}
+	}
+	END { if (bad) exit 1; print max }' "$OUT/topology.txt") || exit 1
 NODES=$MAXID                    # routers 1..NODES; node 0 is the border router
 NSBR=1                          # 1: node 0 is the border router (wsbrd-inproc)
 if [ -n "${IFN[0]:-}" ]; then   # node 0 is a client: no Nanostack program in the run
 	NSBR=0
-	while read -r e; do
-		for id in $(cut -d: -f1 <<< "$e" | tr ',' ' '); do
-			for j in $(seq ${id%-*} ${id#*-}); do
-				[ -n "${IFN[$j]:-}" ] || { echo "run.sh: node 0 is in IF_NODES, so node $j of TOPO must be too" >&2; exit 1; }
-			done
-		done
-	done < "$OUT/topology.txt"
 	NODES=0
 fi
 if (( NSBR + NODES > 0 )); then  # Nanostack programs: their configurations
@@ -167,12 +181,33 @@ if (( NSBR + NODES > 0 )); then  # Nanostack programs: their configurations
 		[ -f "$f" ] || { echo "run.sh: no $f" >&2; exit 1; }
 	done
 fi
+# The programs run in <outdir>: a word of IF_CMD, IF_CMD_<i> or IF_OPTS_<i>
+# that is a relative path (it has a '/') naming a file or directory that
+# exists from the caller's directory is made absolute (CALLER). A bare
+# program name is looked up on PATH, as by the shell.
+CALLER=$PWD
+abs_words() {   # abs_words <words>: the words, relative paths made absolute
+	local - w out=()
+	set -f              # no globbing here: the words are expanded as before at start
+	for w in $1; do
+		[[ $w == */* && $w != /* && -e $CALLER/$w ]] && w=$CALLER/${w#./}
+		out+=("$w")
+	done
+	echo "${out[*]}"
+}
 NIF=0
+declare -A ICMD IOPT  # client node -> its command, its options
 for i in ${IF_NODES:-}; do
 	NIF=$((NIF + 1))
 	(( (i > NODES || (i == 0 && NSBR == 0)) && i < 4096 )) || { echo "run.sh: IF_NODES: $i is the border router or a router (0..$NODES)" >&2; exit 1; }
-	c="IF_CMD_$i"
+	c="IF_CMD_$i"; o="IF_OPTS_$i"
 	[ -n "${!c:-${IF_CMD:-}}" ] || { echo "run.sh: IF_NODES: no IF_CMD or IF_CMD_$i" >&2; exit 1; }
+	if [ -n "${!c:-}" ]; then ICMD[$i]=$(abs_words "${!c}")
+	else
+		[ -n "${if_cmd_abs+x}" ] || if_cmd_abs=$(abs_words "$IF_CMD")
+		ICMD[$i]=$if_cmd_abs
+	fi
+	[ -n "${!o:-}" ] && IOPT[$i]=$(abs_words "${!o}")
 done
 SEED=${WSSIM_SEED:-1}
 export WSSIM_SEED=$SEED
@@ -280,7 +315,7 @@ case ${DUMP:-auto} in
 1) DUMPOPT=(--dump) ;;
 auto) (( NODES + NSBR + NIF <= 200 )) && DUMPOPT=(--dump) ;;
 esac
-start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + NSBR + NIF)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" "${DUMPOPT[@]}" "$SOCK"
+start simserver "$BIN/wssimserver" --group-file="$OUT/topology.txt" --vtime=$((NODES + NSBR + NIF)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" "${DUMPOPT[@]}" "$SOCK"
 SIM_PID=$!
 for (( i = 0; i < 200; i++ )); do
 	[ -S "$SOCK" ] && break
@@ -299,8 +334,7 @@ for (( i = 1; i <= NODES; i++ )); do
 	start_node $i node$i
 done
 for i in ${IF_NODES:-}; do
-	c="IF_CMD_$i"; o="IF_OPTS_$i"
-	start "if$i" ${!c:-$IF_CMD} --sock "$SOCK" --id "$i" ${!o:-}
+	start "if$i" ${ICMD[$i]} --sock "$SOCK" --id "$i" ${IOPT[$i]:-}
 done
 # Later instances connect once the first instance of their node has: the
 # conductor takes a node's first hello as its first instance.
