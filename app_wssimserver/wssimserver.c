@@ -1229,6 +1229,24 @@ static bool vt_hears(struct ctxt *ctxt, int src, int dst, const struct sim_frame
            !bitmap_get(src, vt_cut[dst], MAX_NODES / 64) && !vt_drop(src, dst, hdr);
 }
 
+// The graph neighbours of src after node `after` (-1: the first), in
+// ascending order, or -1: the set bits of src's row. Every connected node is
+// in vt_nodes, so walking these instead of vt_nodes finds the same receivers
+// in the same order, without testing the nodes that cannot hear src.
+static int vt_next_neighbour(struct ctxt *ctxt, int src, int after)
+{
+    int i = after + 1;
+    uint64_t w;
+
+    while (i < MAX_NODES) {
+        w = ctxt->node_graph[src][i / 64] >> (i % 64);
+        if (w)
+            return i + __builtin_ctzll(w);
+        i = (i / 64 + 1) * 64;
+    }
+    return -1;
+}
+
 // Central medium (docs/MEDIUM.md §3): the frame goes on air; each receiver
 // that locks onto it gets it now ("xx" with SIM_FRAME_MEDIUM and its power)
 // and a verdict at its end.
@@ -1248,9 +1266,9 @@ static void vt_queue_frame_medium(struct ctxt *ctxt, int src, void *msg, int len
     f = med_frame_start_lp(src, hdr, vt_now, preamble_us);
     if (!f)
         return;
-    for (i = 0; i < vt_num_nodes; i++)
-        if (vt_hears(ctxt, src, vt_nodes[i], hdr))
-            med_add_rx(f, vt_nodes[i]);
+    for (i = vt_next_neighbour(ctxt, src, -1); i >= 0; i = vt_next_neighbour(ctxt, src, i))
+        if (vt_hears(ctxt, src, i, hdr))
+            med_add_rx(f, i);
     hdr->flags = SIM_FRAME_MEDIUM | (preamble_us ? SIM_FRAME_LONG_PREAMBLE : 0);
     hdr->frame_id = med_frame_id(f);
     for (i = 0; i < med_num_rx(f); i++) {
@@ -1324,9 +1342,9 @@ static void vt_queue_frame(struct ctxt *ctxt, int src, void *msg, int len, uint3
     frame->refs = 1;            // held until the loop below ends
     frame->len = len;
     memcpy(frame->data, msg, len);
-    for (i = 0; i < vt_num_nodes; i++)
-        if (vt_hears(ctxt, src, vt_nodes[i], hdr))
-            vt_push(vt_now, vt_nodes[i], frame);
+    for (i = vt_next_neighbour(ctxt, src, -1); i >= 0; i = vt_next_neighbour(ctxt, src, i))
+        if (vt_hears(ctxt, src, i, hdr))
+            vt_push(vt_now, i, frame);
     vt_unref(frame);
 }
 
