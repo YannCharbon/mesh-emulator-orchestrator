@@ -84,6 +84,10 @@
 #   DROP="<a>:<b>:<seq>:<s1>:<s2> ..." frames from a with MAC sequence number
 #                      seq are not delivered to b between s1 and s2 (a lost
 #                      frame and its MAC retries; --vtime-drop)
+#   DUMP=1|0|auto      print the topology and the RSSI map (row: receiver) at the
+#                      start of simserver.log (wssimserver --dump); auto, the
+#                      default: only for runs of at most 200 nodes (the maps
+#                      have N^2 entries)
 #   FRAMES=1           write every frame sent to <outdir>/frames.txt (time us,
 #                      sender, channel, PSDU in hex; --vtime-frames)
 #   IF_NODES="<i> ..." nodes that are clients of the stack-neutral radio
@@ -271,7 +275,12 @@ for k in ${LINK:-}; do CTL+=(--vtime-link="$k"); done
 for k in ${DROP:-}; do CTL+=(--vtime-drop="$k"); done
 [ "${FRAMES:-0}" = 1 ] && CTL+=(--vtime-frames="$OUT/frames.txt")
 [ ${#CTL[@]} -gt 0 ] && echo "events=${CTL[*]}" >> "$OUT/run_info.txt"
-start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + NSBR + NIF)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" --dump "$SOCK"
+DUMPOPT=()          # the topology and RSSI matrices in simserver.log: N^2 entries each
+case ${DUMP:-auto} in
+1) DUMPOPT=(--dump) ;;
+auto) (( NODES + NSBR + NIF <= 200 )) && DUMPOPT=(--dump) ;;
+esac
+start simserver "$BIN/wssimserver" "${TPG[@]}" --vtime=$((NODES + NSBR + NIF)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" "${DUMPOPT[@]}" "$SOCK"
 SIM_PID=$!
 for (( i = 0; i < 200; i++ )); do
 	[ -S "$SOCK" ] && break
