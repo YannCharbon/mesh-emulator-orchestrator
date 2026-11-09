@@ -21,8 +21,8 @@ Every command in this guide was run once on 2026-11-09, on emulator `main` at `1
 | Limit | Effect on results |
 | --- | --- |
 | Preamble detection figures (probability, dwell, settling time) are model values; the FG25 datasheet gives none | Sniffing results are indicative until the kits measure them ([MEDIUM.md](MEDIUM.md) §10.5–§10.6) |
-| Interference is treated like noise in the loss curve, which needs about 20 dB of SINR for 1 % loss on a 50-byte frame; the FG25 datasheet gives a co-channel rejection of −4.4 to −7.2 dB | Collision losses are upper bounds until the kits measure FSK-on-FSK behaviour |
-| No adjacent-channel interference, fading, external interferers, node positions or RX/TX turnaround times ([MEDIUM.md](MEDIUM.md) §9) | Topologies give fixed link values; channel plans are not penalised for adjacent channels |
+| Collisions, capture and adjacent-channel interference follow FG25 kit measurements (EU modes 3 and 1a, wanted signal far above sensitivity, no fading; [MEDIUM.md](MEDIUM.md) §2.1); capture and break are steps at their margins, other PHYs take the mode-3 values | Collision losses are close to the kits' for strong links; near sensitivity they are slightly optimistic, and in the 0–3 dB band the medium loses both frames where the radio often keeps the stronger one ([MEDIUM.md](MEDIUM.md) §9.1). `--medium-model=em4` gives the earlier, pessimistic model for comparison |
+| No fading, external interferers, node positions or RX/TX turnaround times ([MEDIUM.md](MEDIUM.md) §9) | Topologies give fixed link values |
 | Code runs in zero virtual time; MCU time is modelled from cycle counts in the profile | A slow MCU does not delay the protocol in the emulator |
 | The power profiles are measured on the FG25 kits (an always-listening router and our low-power firmware) | Another radio or MCU needs its own profile ([POWER_MODEL.md](POWER_MODEL.md) §6.1) |
 | One process per node; each wake is a round trip between two processes | Wall time grows with the number of wakes, not with the network's size alone |
@@ -238,7 +238,7 @@ The simulated bench of the controller (`--Environments:MtsSimulated=true`, with 
 
 - **No copied code.** The stack and its client are written from the specifications. Nothing is copied from the emulator, from Nanostack or our generic stack, from the reference clients, from the probe image or from `libmtsbl`, and none of these is linked into the stack's image. The emulator, the controller and the bench are test tools that the stack runs against; only knowledge crosses (interfaces, measured figures).
 - **Reproducibility.** No wall-clock time and no random source other than the welcome's seed in the client. Each reported result names the emulator commit, the client's commit, the seed(s), the topology file or generator options, the server options, the power profile and the duration. Keep the topology file with the results.
-- **What to report** for a result: the setup above; the figures with their range over seeds and the number of runs; delivery from the node logs and the medium log; power from `power.json` with the profile named; the limits of §1 that apply (sniffing model values, pessimistic collisions, the profile's hardware).
+- **What to report** for a result: the setup above; the figures with their range over seeds and the number of runs; delivery from the node logs and the medium log; power from `power.json` with the profile named; the limits of §1 that apply (sniffing model values, the collision model's limits, the profile's hardware).
 - **Settings** change at a virtual time in the configuration, never during a run from outside.
 - **The bench** is used through the controller, with the owner's agreement, and left as found (Wi-SUN images on every node unless agreed otherwise).
 
