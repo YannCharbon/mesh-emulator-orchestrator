@@ -134,13 +134,13 @@ The `"xd"` then has `locked = 1` and is followed, in the same wake, by `F`'s `"x
 
 Without `SIM_SNIFF_LOCK`, the detection is reported only; the client decides (a new sniff with the flag at that time detects again after one dwell and locks if the preamble lasts). A radio that turns its receiver on without a sniff still locks only at a frame's start (§3 unchanged): `"xn"` is how a client says "my receiver is on now, acquire a frame already on air".
 
-**During the window the radio is in RX.** It writes LISTEN and the channel in its shared-memory entry (§5) as any radio, so a frame that **starts** during the window locks it at its start by §3; its sniff then reports that frame with `locked = 2` when its dwell detects it.
+**During the window the radio is in RX.** It writes LISTEN and the channel in its shared-memory entry (§5) as any radio (for a client of the stack-neutral radio interface, which writes no shared memory, the conductor writes the states of the sniff for it: LISTEN at `t_on`, the end state at `t1`, RECEIVE on a lock; [RADIO_INTERFACE.md](RADIO_INTERFACE.md) §6.7), so a frame that **starts** during the window locks it at its start by §3; its sniff then reports that frame with `locked = 2` when its dwell detects it.
 
 **Half duplex.** A sniff asked while the node's own frame is on air starts when that frame ends (`t_on`; `t0` in the sniff log adds the settling time). A frame the node sends during the window ends the sniff (outcome `tx_abort`, no `"xd"`).
 
 ### 10.4 Messages
 
-All in `app_wssimserver/sim_proto.h`, central mode only (the legacy medium drops them with a warning). New message types; no existing message changed.
+All in `app_wssimserver/sim_proto.h`, central mode only (the legacy medium drops them with a warning). New message types; no existing message changed. Clients of the radio interface use them from its version 2, which the welcome announces with `SIM_WELCOME_SNIFF` ([RADIO_INTERFACE.md](RADIO_INTERFACE.md) §6.7, §13); a version-1 client's `"xn"` and `"xl"` are dropped with a warning and counted.
 
 | Message | From | Struct | Content |
 | --- | --- | --- | --- |
@@ -172,7 +172,7 @@ The run's end prints the number of sniffs per outcome, the locks made by a sniff
 
 - **What the kits should measure (EM5, FA2):** the detection probability against the input level, with no interferer, for one sense window of a given length and for each PHY mode used (the table form of `--sniff-curve`, converted from power to SINR by adding 119.93 dB, and `--sniff-dwell-bits` from the shortest window that detects at a strong level); the same with a co-channel FSK interferer at a few U/D ratios (the SINR axis); the time from the window's start to the detection event, against how much preamble is left; how much preamble must remain after detection for the frame to be received (the SFD rule). Until then detection figures are model values.
 - Detection is per frame: interferers only lower a frame's SINR. A detector that triggers on the summed energy of several frames (for example on a collision whose frames are each too weak) is not modelled.
-- The settling time (`--sniff-settle-us`) is 0 by default, as elsewhere in the medium (§9). A frame that starts during the settling time still locks the receiver at its start by §3 if the client wrote LISTEN in its shared-memory entry.
+- The settling time (`--sniff-settle-us`) is 0 by default, as elsewhere in the medium (§9). A frame that starts during the settling time still locks the receiver at its start by §3 if LISTEN is in its shared-memory entry (the radio writes it, or the conductor for a client of the radio interface).
 - No false detection: a window with no frame on air never detects (the curve at very low SINR gives `2^-16` per try with `ber:16`, and only for a frame on air). Real preamble detectors trigger falsely on noise now and then, which keeps the receiver on until the client's timeout; that charge is not modelled.
 - **Energy carrier sense** is approximated, not modelled: `--sniff-detect=frame` with `--sniff-threshold` and a table curve detects a frame from its own power, while an energy detector compares the total energy on the channel with its threshold.
 - **Several channels in sequence:** one `"xn"` per channel, each answered by its own `"xd"` in a wake of the node, so a scan of `n` channels costs `n` wakes in the ledger; a radio that hops between sense windows in hardware (RAIL's RX channel hopping) wakes the MCU only on a detection.

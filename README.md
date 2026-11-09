@@ -157,7 +157,7 @@ The following table presents the probability of packet loss of a 100 bytes frame
 
 With `--vtime=N`, `wssimserver` is also the conductor of a virtual-time run (EM3, design in `docs/VIRTUAL_TIME.md`): it waits for N nodes built on the simulation port, then wakes them one at a time in virtual-time order, and the run takes no account of the host clock.
 
-**Other stacks** (EM7): a program that is not built on Nanostack can be a node of a virtual-time run through the stack-neutral radio interface, `docs/RADIO_INTERFACE.md` (frames through the central medium, timed TX and RX windows, radio off, CCA, the node's clock, the power report). `radio_if/` holds a reference client in Python and its tests: `python3 radio_if/test_ref_client.py build-vt/wssimserver`.
+**Other stacks** (EM7): a program that is not built on Nanostack can be a node of a virtual-time run through the stack-neutral radio interface, `docs/RADIO_INTERFACE.md` (frames through the central medium, timed TX and RX windows, radio off, CCA, preamble sniffing and long-preamble frames from interface version 2, the node's clock, the power report). `radio_if/` holds a reference client in Python and its tests: `python3 radio_if/test_ref_client.py build-vt/wssimserver`.
 
 Build: the nodes run on the stack's simulation port, in a separate build directory. They need the mbedtls built without platform entropy (section "Compile mbedtls"; here in `mbedtls/install`), or TLS reads `/dev/urandom` and runs are not reproducible.
 

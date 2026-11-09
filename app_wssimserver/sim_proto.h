@@ -40,9 +40,17 @@ static inline int sim_node_id(const uint8_t eui64[8])
 #define SIM_HELLO_RADIO_IF 0x0002
 #define SIM_HELLO_KNOWN (SIM_HELLO_VTIME | SIM_HELLO_RADIO_IF)
 
-// Versions of the radio interface this server speaks (hello's version)
+// Versions of the radio interface this server speaks (hello's version).
+// Version 2 adds preamble sniffing ("xn", "xd", "xl"); a version-1 client
+// gets the same server behaviour as before, and its "xn" and "xl" are dropped.
 #define SIM_RADIO_IF_VERSION_MIN 1
-#define SIM_RADIO_IF_VERSION_MAX 1
+#define SIM_RADIO_IF_VERSION_MAX 2
+
+// Welcome flag for clients of the radio interface, next to the conductor's
+// NSIM_WELCOME_* (ns_port_sim.h, which leaves this bit unused): the server
+// serves "xn" and "xl" for this client (interface version 2 or later, central
+// medium). Never set in a Nanostack node's welcome.
+#define SIM_WELCOME_SNIFF 0x0004
 
 struct sim_hello {
     char magic[2];              // "xh"

@@ -1027,12 +1027,13 @@ static uint8_t *vt_cca_shm;                     // the CCA shared memory (SIM_SH
  * a frame is sent only while the reported state is tx, and not before the end
  * of the node's previous frame. Frames that break these rules are not sent.
  */
-enum { RI_ERR_TX_STATE, RI_ERR_TX_OVERLAP, RI_ERR_TX_EARLY, RI_ERR_REPORT, RI_ERR_COUNT };
+enum { RI_ERR_TX_STATE, RI_ERR_TX_OVERLAP, RI_ERR_TX_EARLY, RI_ERR_REPORT, RI_ERR_VERSION, RI_ERR_COUNT };
 static const char *const ri_err_names[RI_ERR_COUNT] = {
     "frames sent while the reported radio state was not tx",
     "frames sent before the end of the node's previous frame",
     "radio reports leaving tx before the end of the node's frame",
     "malformed radio reports",
+    "sniff messages (\"xn\", \"xl\") refused: they need interface version 2",
 };
 static struct {
     uint8_t state;              // enum sim_radio_state, from its last "xr"
@@ -1056,6 +1057,30 @@ static void vt_shm_radio(int node, uint8_t state, uint16_t chan)
     e[0] = ri_drvstate[state];
     memcpy(e + 1, &chan, 2);
     e[3] = state;
+}
+
+// A radio state the conductor applies itself, for a sniff (docs/MEDIUM.md
+// §10): the power ledger records it, and for a client of the radio interface,
+// which writes no shared memory, its stored state and shared-memory entry
+// follow, so that the medium sees its receiver as the ledger does.
+// chan < 0 keeps the channel of the node's entry.
+static void vt_sniff_radio(int node, uint64_t t, uint8_t state, int chan, bool ledger)
+{
+    uint16_t c;
+
+    if (ledger && pwr_enabled()) {
+        struct sim_radio_report r = { .magic = "xr", .state = state, .channel = chan < 0 ? 0 : chan };
+
+        pwr_radio(node, t, &r);
+    }
+    if (!vt_radio_if(node))
+        return;
+    if (chan < 0)
+        memcpy(&c, vt_cca_shm + node * SIM_SHM_CCA_STRIDE + 1, 2);
+    else
+        c = chan;
+    vt_ri[node].state = state;
+    vt_shm_radio(node, state, c);
 }
 
 static void vt_ri_error(int node, int kind, const char *what)
@@ -1275,7 +1300,8 @@ static void vt_queue_frame(struct ctxt *ctxt, int src, void *msg, int len, uint3
             vt_ri_error(src, RI_ERR_TX_OVERLAP, "frame sent before the end of the previous one: not sent");
             return;
         }
-        vt_ri[src].tx_end = vt_now + airtime;
+        // An "xl" is on air for its long preamble, then the frame
+        vt_ri[src].tx_end = vt_now + preamble_us + airtime;
     }
     hdr->src = src;
     vt_frames_in++;
@@ -1335,7 +1361,16 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
         }
         if (len >= 2 && !memcmp(buf, "xx", 2)) {
             vt_queue_frame(ctxt, node, buf, len, 0);
-        } else if (med_central() && len >= 2 && !memcmp(buf, "xl", 2)) {
+        } else if (len >= 2 && (!memcmp(buf, "xl", 2) || !memcmp(buf, "xn", 2)) &&
+                   (!med_central() || (vt_radio_if(node) && conns[slot_of_node[node]].radio_if < 2))) {
+            // Sniffing needs the central medium, and for a client of the
+            // radio interface, version 2 (docs/RADIO_INTERFACE.md §6.7)
+            if (vt_radio_if(node))
+                vt_ri_error(node, RI_ERR_VERSION, "\"xn\" or \"xl\" from a version-1 client: dropped (needs version 2)");
+            else
+                WARN("node %d: \"%.2s\" needs the central medium (preamble sniffing, docs/MEDIUM.md §10): dropped",
+                     node, buf);
+        } else if (!memcmp(buf, "xl", 2)) {
             // A frame with a long preamble (§10): the "xx" that follows
             const struct sim_lp_frame *lp = (const struct sim_lp_frame *)buf;
 
@@ -1343,7 +1378,7 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
                 WARN("node %d: \"xl\" of %zd bytes, dropped", node, len);
             else
                 vt_queue_frame(ctxt, node, buf + sizeof(*lp), len - sizeof(*lp), lp->preamble_us);
-        } else if (med_central() && len == sizeof(struct sim_sniff) && !memcmp(buf, "xn", 2)) {
+        } else if (len == sizeof(struct sim_sniff) && !memcmp(buf, "xn", 2)) {
             // A sniff (§10): its receiver is on from now; checks queued
             const struct sim_sniff *req = (const struct sim_sniff *)buf;
             uint64_t check;
@@ -1352,13 +1387,10 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
 
             vt_sniffs_in++;
             vt_push_ev((struct vt_event){ .t = check, .node = node, .kind = VT_EV_SNIFF, .sniff = serial });
-            // The ledger: listening from now, or once its own frame has
-            // ended (then at a check event)
-            if (med_sniff_rx_on(node, serial, vt_now, &chan) && pwr_enabled()) {
-                struct sim_radio_report r = { .magic = "xr", .state = SIM_RADIO_LISTEN, .channel = chan };
-
-                pwr_radio(node, vt_now, &r);
-            }
+            // Listening from now, or once its own frame has ended (then at
+            // a check event): the ledger, and a client's radio state
+            if (med_sniff_rx_on(node, serial, vt_now, &chan))
+                vt_sniff_radio(node, vt_now, SIM_RADIO_LISTEN, chan, true);
         } else if (med_central() && len == sizeof(struct sim_sense) && !memcmp(buf, "xs", 2)) {
             // CCA: answered at once, the node waits for it
             struct sim_sense *sense = (struct sim_sense *)buf;
@@ -1448,25 +1480,21 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
             int flen;
             uint16_t chan;
 
-            if (med_sniff_rx_on(node, ev.sniff, t, &chan) && pwr_enabled()) {
-                struct sim_radio_report r = { .magic = "xr", .state = SIM_RADIO_LISTEN, .channel = chan };
-
-                pwr_radio(node, t, &r);
-            }
+            if (med_sniff_rx_on(node, ev.sniff, t, &chan))
+                vt_sniff_radio(node, t, SIM_RADIO_LISTEN, chan, true);
             if (!med_sniff_check(node, ev.sniff, t, &msgs[num].result, &lock, &fmsg, &flen, &rx_dbm, &next)) {
                 if (next != MED_SNIFF_NONE)
                     vt_push_ev((struct vt_event){ .t = next, .node = node, .kind = VT_EV_SNIFF, .sniff = ev.sniff });
                 continue;
             }
-            if (pwr_enabled()) {
-                struct sim_radio_report r = { .magic = "xr", .channel = 0 };
-
+            {
                 // Nothing detected: the radio goes to the request's end
-                // state; locked: it receives (§10)
-                r.state = !msgs[num].result.detected ? med_sniff_end_state(node, t) :
-                          lock ? SIM_RADIO_RECEIVE : SIM_RADIO_LISTEN;
-                if (r.state != SIM_RADIO_LISTEN && r.state < SIM_RADIO_STATES)
-                    pwr_radio(node, t, &r);
+                // state; locked: it receives, on the frame's channel (§10)
+                uint8_t state = !msgs[num].result.detected ? med_sniff_end_state(node, t) :
+                                lock ? SIM_RADIO_RECEIVE : SIM_RADIO_LISTEN;
+
+                if (state != SIM_RADIO_LISTEN && state < SIM_RADIO_STATES)
+                    vt_sniff_radio(node, t, state, lock ? ((const struct sim_frame_hdr *)fmsg)->chan : -1, true);
             }
             msgs[num].sniff = true;
             msgs[num++].frame = NULL;
@@ -1633,6 +1661,8 @@ static int vt_welcome(int node, const struct nsim_welcome *welcome)
 
     if (vt_radio_if(node)) {
         w.version = conns[slot_of_node[node]].radio_if;
+        if (w.version >= 2 && med_central())
+            w.flags |= SIM_WELCOME_SNIFF;
         vt_ri_reset(node);
     }
     return vt_send(node, &w, sizeof(w));

@@ -2,7 +2,7 @@
 
 This document specifies how a program connects to the emulator as a radio node, sends and receives frames through the emulated radio medium, keeps time and sleeps. It is written for developers who implement a client in their own stack, in any language, from this document alone: no emulator code, no Nanostack code and no header of this repository is needed.
 
-**Interface version 1.** The server side is `wssimserver` in virtual-time mode (`--vtime`) with the central radio medium (the default in that mode). A reference client in Python and an example client in C are in `radio_if/` (§12); they are examples, and this document is normative.
+**Interface version 2** (version 1 is still served, §13). The server side is `wssimserver` in virtual-time mode (`--vtime`) with the central radio medium (the default in that mode). A reference client in Python and an example client in C are in `radio_if/` (§12); they are illustrations, and this document is normative: a client is written from this document, not copied from them.
 
 ## 1. Model
 
@@ -27,7 +27,8 @@ first run at virtual time start:
   "xs" CCA queries (answered at once) -------->
 "xi" idle {next deadline} ------------------->
                                      <-------- "xa" wake {now = t, count = k}
-                                     <-------- k messages: "xx" frames received, "xv" verdicts
+                                     <-------- k messages: "xx" frames received, "xv" verdicts,
+                                               "xd" sniff results (version 2)
 work at time t (messages, then own timers) ...
 "xi" idle {next deadline} ------------------->
 ...
@@ -38,8 +39,8 @@ close the connection and exit
 1. **Connect.** The server listens on a UNIX socket of type `SOCK_SEQPACKET`; its path is the last argument of `wssimserver`. Linux limits such paths to 107 bytes.
 2. **Hello** (`"xh"`, §4.2). It gives the node ID, the flags `VTIME | RADIO_IF` and the interface version. The server refuses a hello it cannot serve by closing the connection (§9).
 3. **Welcome** (`"xw"`, §4.3). The server sends the welcomes once all the nodes of the run (`--vtime=N`) have said hello, one node at a time in ascending ID order. Each welcome starts the node's **first run**, at virtual time `start_us` (0, unless the node is powered up later, §6.3).
-4. **Run.** During a run the client may send radio-state reports, frames and CCA queries. A run ends when the client sends `"xi"` (idle) with its next deadline.
-5. **Wake** (`"xa"`, §4.4). The server wakes the node at the time of its deadline, or earlier when a frame or a verdict arrives for it. The `"xa"` gives the new time and the number of messages that follow it; the client reads exactly that many. The client then does its work at that time and sends `"xi"` again.
+4. **Run.** During a run the client may send radio-state reports, frames and CCA queries, and from version 2 sniff requests and long-preamble frames (§6.7). A run ends when the client sends `"xi"` (idle) with its next deadline.
+5. **Wake** (`"xa"`, §4.4). The server wakes the node at the time of its deadline, or earlier when a frame, a verdict or a sniff result arrives for it. The `"xa"` gives the new time and the number of messages that follow it; the client reads exactly that many. The client then does its work at that time and sends `"xi"` again.
 6. **End.** At the end of the run the server sends `"xq"`. The client closes the connection and exits with status 0. A node stopped during the run (`--vtime-kill`) sees its connection closed by the server, without `"xq"`; it exits too.
 
 The client never waits for anything other than the server. It must not sleep, poll a wall clock or read other inputs while it waits, because the server waits for the client's `"xi"` before anything else happens in the network.
@@ -75,7 +76,7 @@ The client never waits for anything other than the server. It must not sleep, po
 | 0 | 2 | magic | `"xh"` |
 | 2 | 2 | node_id | 0 to 4095 |
 | 4 | 2 | flags | `0x0003`: `VTIME` (0x0001, the node runs on virtual time) and `RADIO_IF` (0x0002, a client of this interface). Other bits are refused |
-| 6 | 2 | version | the interface version the client implements: 1 |
+| 6 | 2 | version | the interface version the client implements: 1 or 2 (§13) |
 
 ### 4.3 Welcome `"xw"`: server → client, 32 bytes
 
@@ -83,7 +84,7 @@ The client never waits for anything other than the server. It must not sleep, po
 | --- | --- | --- | --- |
 | 0 | 2 | magic | `"xw"` |
 | 2 | 2 | version | the interface version in use: the one in the hello |
-| 4 | 4 | flags | `POWER` (0x0001): the server records power, so the client may send `"xc"` (§7). `MEDIUM` (0x0002): the central medium decides reception; always set for clients of this interface. Ignore unknown bits |
+| 4 | 4 | flags | `POWER` (0x0001): the server records power, so the client may send `"xc"` (§7). `MEDIUM` (0x0002): the central medium decides reception; always set for clients of this interface. `SNIFF` (0x0004): the server serves preamble sniffing for this client, `"xn"` and `"xl"` (§6.7); set only for version 2 or later. Ignore unknown bits |
 | 8 | 8 | seed | the run's base seed (§6.4) |
 | 16 | 4 | drift_ppb | the node's clock error, signed (§6.3) |
 | 20 | 4 | reserved | |
@@ -96,7 +97,7 @@ The welcome is also the first wake: the node's current time is `start_us`.
 | Offset | Size | Field | Value |
 | --- | --- | --- | --- |
 | 0 | 2 | magic | `"xa"` |
-| 2 | 2 | count | number of messages that follow (frames and verdicts), 0 to 65535 |
+| 2 | 2 | count | number of messages that follow (frames, verdicts and, in version 2, sniff results), 0 to 65535 |
 | 4 | 4 | reserved | |
 | 8 | 8 | now_us | the new virtual time; never earlier than the previous one |
 
@@ -123,7 +124,7 @@ The `count` messages are separate packets; the client reads each of them with a 
 | 11 | 1 | fcs_len | bytes of checksum after the PSDU | the same |
 | 12 | 1 | phr_len | bytes of PHY header | the same |
 | 13 | 1 | tx_dbm | transmit power, `int8` | the same |
-| 14 | 1 | flags | 0 | `0x01` (`MEDIUM`): the medium locked this receiver onto the frame |
+| 14 | 1 | flags | 0 | `0x01` (`MEDIUM`): the medium locked this receiver onto the frame. `0x02` (`LONG_PREAMBLE`, version 2): the sender sent it with a long preamble (`"xl"`, §4.14) |
 | 15 | 1 | reserved | 0 | |
 | 16 | 4 | rate_bps | bit rate | the same |
 | 20 | 4 | frame_id | 0 | the run-wide identifier of the frame, from 1 |
@@ -178,11 +179,51 @@ Sent just before `"xi"`, only when the welcome has `POWER`. The server ignores i
 
 The run is over. The client closes the connection and exits with status 0.
 
+### 4.12 Sniff request `"xn"`: client → server, 16 bytes, version 2
+
+| Offset | Size | Field | Value |
+| --- | --- | --- | --- |
+| 0 | 2 | magic | `"xn"` |
+| 2 | 2 | channel | the channel to sniff |
+| 4 | 4 | duration_us | the length of the sniff window, from now |
+| 8 | 4 | sniff_id | the client's own tag, echoed in the `"xd"` |
+| 12 | 1 | flags | `0x01` (`LOCK`): on a detection, lock the receiver onto the frame if it can still be received. Other bits: 0 |
+| 13 | 1 | end_state | the radio state (§4.8 numbering) at the window's end when nothing is detected; `OFF` if above 4 |
+| 14 | 2 | reserved | |
+
+Not answered at once: one `"xd"` comes in a later wake (§6.7).
+
+### 4.13 Sniff result `"xd"`: server → client, 32 bytes, version 2
+
+| Offset | Size | Field | Value |
+| --- | --- | --- | --- |
+| 0 | 2 | magic | `"xd"` |
+| 2 | 1 | detected | 1: a frame was detected; 0: nothing in the window |
+| 3 | 1 | locked | 0: no lock (not asked, or the frame can no longer be received); 1 (`LOCKED`): the medium locked the receiver onto the frame now, and its `"xx"` is the next message of this wake; 2 (`RECEIVING`): the receiver was already locked onto that frame, whose `"xx"` came at its start |
+| 4 | 4 | sniff_id | the request's tag |
+| 8 | 4 | frame_id | the frame detected; 0 if none |
+| 12 | 2 | src | its sender's node ID; 0 if none |
+| 14 | 2 | reserved | |
+| 16 | 8 | t_us | the detection time, or the window's end if nothing was detected; always the time of this wake |
+| 24 | 4 | rssi_dbm | the detected frame's received power; if none, the energy on the channel at the window's end (as `"xs"` would answer), `float32` |
+| 28 | 4 | sinr_db | the lowest SINR over the detecting dwell (0 if none), `float32` |
+
+### 4.14 Long-preamble frame `"xl"`: client → server, 8 bytes + a complete `"xx"`, version 2
+
+| Offset | Size | Field | Value |
+| --- | --- | --- | --- |
+| 0 | 2 | magic | `"xl"` |
+| 2 | 2 | reserved | |
+| 4 | 4 | preamble_us | the wake-up preamble on air before the frame's own SHR, in µs |
+| 8 | 28 + len | frame | a complete `"xx"` message as sent by the client (§4.6) |
+
+One message: the 8-byte header and the `"xx"` in a single `send()`. Receivers get the frame as an ordinary `"xx"` with the `LONG_PREAMBLE` flag.
+
 ## 5. Sequencing in virtual time
 
 ### 5.1 How the server orders the network
 
-- The server holds a queue of events: each node's deadline (from its last `"xi"`; a new `"xi"` replaces it) and messages due to a node (frames at their start, verdicts at their end).
+- The server holds a queue of events: each node's deadline (from its last `"xi"`; a new `"xi"` replaces it) and messages due to a node (frames at their start, verdicts at their end, sniff results at their time).
 - It takes the earliest event by **time, then node ID, then queue order**, and wakes that node with every event due to it at that time: one `"xa"` carries them all. Nodes at the same time run in ascending ID order.
 - Until the client's `"xi"`, nothing else happens in the network. Frames the client sends during its run start at the current time.
 - A deadline earlier than the current time is moved to the current time, with a warning in the server's log. A deadline equal to the current time wakes the node again at that time, after the nodes with lower IDs that are due then.
@@ -212,6 +253,7 @@ The client reports **every change of its radio's state** with `"xr"`, at the tim
 | `TX` | sending, at `tx_dbm` | no |
 
 - **The radio starts `OFF`** at each start (welcome) of a node.
+- **During a sniff** (§6.7) the server applies the states the sniff implies; the client reports only the others.
 - A channel change is a report with the new channel; the state may stay the same.
 - Report `RECEIVE` in the wake that delivers a locked frame (§6.5), and leave it when the verdict comes. The medium gives the verdict only to a node whose reported state is `RECEIVE` at the frame's end: a client that stays in `LISTEN` gets no verdict, and the frame is lost (outcome `left`).
 - A report applies from the current time. A frame already on air when the node starts listening is not received (the receiver missed its preamble), but it does count as interference and as CCA energy.
@@ -226,6 +268,8 @@ To send a frame at time `t` ("timed TX"), the client sets a deadline at `t` and,
 
    `airtime_us = (shr_len + phr_len + len + fcs_len) × 8 × 1 000 000 / rate_bps`, with integer division, the formula the medium uses;
 4. at the end, reports the next state (`LISTEN`, `IDLE` or `OFF`).
+
+A long-preamble frame (`"xl"`, §6.7) follows the same steps; its transmission lasts `preamble_us + airtime_us`, and that is its end for every rule below.
 
 Rules, checked by the server: a frame is sent only while the node's reported state is `TX`, and not before the end of the node's previous frame. A frame that breaks a rule is **not sent**; the server logs a warning and counts it in its end-of-run summary. A frame always stays on air until its computed end: the node must stay in `TX` until then. A report that leaves `TX` earlier is applied (the node may then hear frames while its own is on air, and the power report charges the new state), but the server warns about it and counts it.
 
@@ -258,6 +302,8 @@ Exceptions while a frame is held:
 - **Leaving.** If the client reports any state other than `RECEIVE` while it holds a frame (it turns the radio off, or starts to transmit), the frame is lost and no verdict comes. Transmitting while receiving is how half duplex appears: the medium records the outcome `tx_abort`.
 - A verdict for a frame the client does not hold is ignored.
 
+A frame sent with a long preamble (`"xl"`) is received in the same way by a node that is listening when its transmission starts: its `"xx"` comes at the start of the long preamble and its verdict at the end of the frame. A node that turns its receiver on later can still receive it with a sniff (§6.7).
+
 A receive window that closes while a frame is being received normally waits for the verdict, as a real radio's driver does; the client chooses.
 
 ### 6.6 Clear-channel assessment
@@ -266,15 +312,49 @@ The client sends `"xs"` with a channel and receives the energy at its antenna on
 
 A CCA needs the receiver on: report `LISTEN` on the channel at least the CCA duration before the query (a radio needs that time anyway). The server answers a query whatever the reported state, and the power report cuts the CCA to the length of the interval before it, so a receiver turned on in the same wake as the query charges no CCA time.
 
-### 6.7 Preamble and energy sniff (reserved)
+### 6.7 Preamble sniffing (version 2)
 
-> **Reserved for a later revision.** Detection of a preamble or of energy during a short listen, without receiving a frame, is being added to the medium separately. Its messages and rules will be specified in this section. Until then, a client can test the channel with a CCA query (§6.6) or open a short receive window (§6.5).
+Preamble sampling: a node turns its receiver on for a short window on one channel, the medium tells it whether a preamble was on air, and on a detection the node can receive the frame that follows. Senders put a wake-up preamble longer than the receivers' sniff period before their frames (`"xl"`). The detection and lock rules are the medium's, specified in `docs/MEDIUM.md` §10 (§10.2 detection, §10.3 receiving after a detection, §10.5 the server's settings); this section gives what a client sends, receives and must do.
+
+**Availability.** Only for a client whose hello asked for version 2 and whose welcome has `SNIFF` (§4.3). A version-1 client's `"xn"` and `"xl"` are dropped with a warning and counted (§9).
+
+**A sniff.** The client sends `"xn"` (§4.12) during its run at time `t`, with channel `C`, duration `d`, a tag, the `LOCK` flag or not, and an end state:
+
+1. The receiver is on, on `C`, from `t_on` to `t1 = t + d`. `t_on` is `t`, or the end of the node's own frame if one is still on air (half duplex). Detection starts after the receiver's settling time (server option `--sniff-settle-us`, 0 by default), counted from `t_on`; the settling time counts as listening.
+2. The server answers with one `"xd"` (§4.13), in a wake of the node at `t_us`:
+   - at the **detection time**, the end of the first detection try that succeeds (`detected` = 1). A try observes a fixed number of bits of a frame's preamble (`--sniff-dwell-bits`, 16 by default), so a detection comes one try's duration or more after the preamble or the window starts: 320 µs at 50 kbit/s with the defaults;
+   - or at `t1` with `detected` = 0.
+3. With `LOCK`, a detection locks the receiver onto the frame if its sync word is still ahead and it passes the lock threshold (`docs/MEDIUM.md` §10.3): `locked` = 1 and the frame's `"xx"` (flag `MEDIUM`, and `LONG_PREAMBLE` if it was sent with `"xl"`) is the next message of the same wake. Its verdict `"xv"` comes at the frame's end, as for any lock (§6.5), and capture by a stronger frame applies until the end of its SHR.
+4. A frame that **starts** on `C` during the window locks the receiver at its start, as in §6.5: the client gets its `"xx"` then, and the sniff reports it later with `locked` = 2.
+
+**Ordering in virtual time.** The `"xd"`, and the `"xx"` of a lock it made, are messages of a wake like frames and verdicts: they count in the `"xa"` count and come in the medium's order (§5.2), the `"xx"` right after its `"xd"`. A sniff that detects nothing costs the node one wake, at `t1`. A node has at most one sniff: a new `"xn"` replaces the one in progress, which then ends **without** `"xd"`. A frame the node sends during the window (`"xx"` or `"xl"`) also ends the sniff without `"xd"`, and so does the node's stop.
+
+**Radio states during a sniff.** The server applies the states a sniff implies, in the power report and in the state the medium uses for the node, so the client does not report them:
+
+| When | State applied by the server |
+| --- | --- |
+| `t_on` | `LISTEN` on `C` |
+| `t1`, nothing detected | the request's `end_state`, on `C`; nothing if the receiver is locked onto a frame (case 4) |
+| detection with `locked` = 1 | `RECEIVE`, on the frame's channel |
+
+The client reports every other change with `"xr"`, as in §6.1:
+
+- after `"xd"` with `detected` = 1 and `locked` = 0, the radio stays in `LISTEN` until the client reports otherwise (for example `OFF`);
+- after `locked` = 2, the client has already reported `RECEIVE` when the frame's `"xx"` came (§6.5);
+- after the verdict of a frame it received, its next state, as for any frame;
+- a report of the state the server applied is harmless (the power report ignores a report of the current state).
+
+A report during the window is applied (the medium and the power report use it) but does not end the sniff: the detection goes on, and the server applies the end state at `t1`. A client therefore reports nothing during a window except a transmission, which ends the sniff. A client that sends `"xn"` while its own frame is on air stays in `TX` until the frame's end, as §6.2 requires; the server then switches it to `LISTEN` on `C`, and the client reports nothing else at that end (or `LISTEN` on `C`).
+
+**Sending with a long preamble.** `"xl"` (§4.14) is a frame for every rule of §6.2: the client reports `TX` before it, the server refuses it otherwise or while the node's previous frame is on air, and the transmission ends at `t + preamble_us + airtime_us`, until which the client stays in `TX`. The power report charges the long preamble from the client's `TX` report, as the rest of the frame. Receivers that lock onto it get the frame's PSDU only; the preamble is not delivered.
+
+**Choosing the parameters.** For a sniff every `T` µs of `d` µs each, a long preamble of at least `T + d` µs makes every neighbour's sniff fall at least once wholly inside it. The detection rate per try depends on the received power and on interference (`docs/MEDIUM.md` §10.2); the server's `--sniff-*` options set the model, and its `--sniff-log` has one line per sniff.
 
 ## 7. Power report
 
 With `--power=PROFILE` the server keeps a charge ledger per node and writes `power.json` at the end of the run (`docs/POWER_MODEL.md` §7). It takes everything from this interface:
 
-- **Radio:** the states of the `"xr"` reports, each charged with the profile's current for that state (`TX` per `tx_dbm`), the transitions between them, and the CCA events.
+- **Radio:** the states of the `"xr"` reports and those a sniff implies (§6.7), each charged with the profile's current for that state (`TX` per `tx_dbm`), the transitions between them, and the CCA events.
 - **MCU:** a wake starts at each `"xa"` (and at the welcome) and ends at the next `"xi"`. Its active time is modelled from the profile's cycle counts: a fixed cost per wake, plus a cost per frame delivered, per frame received (`RECEIVE` reports) and sent (`TX` reports), per unit of work and per timer expiry of each cause given in `"xc"`. The rest of the interval until the next wake is sleep. The sleep is deep when the radio is `OFF` (or `IDLE`, if the profile says an idle radio does not keep the fast clock) and the idle time is long enough to make deep sleep cheaper; otherwise it is light sleep.
 - **`"xc"` is optional.** Without it each wake costs the fixed cost plus its frames.
 - **`phy_mode`:** with 0, the profile's common values apply; a profile may hold values per Wi-SUN FSK PHY mode (1 = mode 1a … 8 = mode 5, `docs/POWER_MODEL.md` §6.2), selected when the client reports the mode it runs.
@@ -293,6 +373,7 @@ Every current, time and cycle count is in the profile, which the user chooses (`
 | Success or loss of each frame: one seeded draw from the error model over the frame's segments of different SINR (`docs/MEDIUM.md` §2) | Its own clock's drift handling and its random numbers |
 | Half duplex: a node that transmits loses the frame it was receiving, and a node in `TX` hears nothing | Its radio state, which it must report |
 | The CCA energy | |
+| Whether a sniff detects a frame, when, and whether it locks onto it (`docs/MEDIUM.md` §10) | When to sniff, for how long, on which channel, and the wake-up preamble of its frames |
 
 Links are directional and given in dBm. A link without a value (`-g A,B` alone) is a perfect link at 0 dBm, which destroys any frame it overlaps; give values when collisions matter. Without any `-g` option every node hears every other one, at 0 dBm.
 
@@ -301,7 +382,7 @@ Links are directional and given in dBm. A link without a value (`-g A,B` alone) 
 | Case | What the server does |
 | --- | --- |
 | Hello of the wrong size or magic, node ID above 4095, unknown flag bits | closes the connection; warning |
-| Interface version outside the server's range (1 to 1) | closes the connection; warning with the supported range |
+| Interface version outside the server's range (1 to 2) | closes the connection; warning with the supported range |
 | `RADIO_IF` without `VTIME`, or with `--medium=legacy`, or a server without `--vtime` | closes the connection; warning |
 | A node ID already connected, or more hellos than `--vtime=N` | closes the connection; warning |
 | A node disconnects before the run starts | drops it and waits for another hello |
@@ -310,6 +391,8 @@ Links are directional and given in dBm. A link without a value (`-g A,B` alone) 
 | Frame while the node's reported state is not `TX`, or before the end of its previous frame | does not send it; warning (at the 1st, 2nd, 4th, 8th… occurrence) and a count per node at the end |
 | `"xr"` that leaves `TX` before the end of the node's frame | applies it; warning and count, as above |
 | `"xr"` with an unknown state | ignores it; warning and count |
+| `"xn"` or `"xl"` from a version-1 client | drops it; warning and count |
+| `"xl"` shorter than its header and a frame header | drops it; warning |
 | `"xi"` of the wrong size | stops the run; exit status 1 |
 | Any other unknown message | drops it; warning |
 | Deadline in the past | moves it to the current time; warning |
@@ -330,11 +413,13 @@ for n in 1 2 3; do my_client --sock /tmp/radio_sock --id $n & done
 wait
 ```
 
-Useful server options (all in `wssimserver --help`): `--vtime-end`, `-g` (topology and link values), `--vtime-link`, `--vtime-cut`, `--vtime-kill`, `--vtime-start`, `--vtime-power-up`, `--drift`, `--drift-random`, `--medium-*` (thresholds, the per-frame log, §8), `--power*`, `--vtime-frames` (every frame sent, with its PSDU in hex). `--vtime-drop` reads the PSDU as an IEEE 802.15.4 frame (its sequence number) and is meaningful only for such frames. `--power` cannot be combined with `--vtime-kill` or `--vtime-start`.
+Useful server options (all in `wssimserver --help`): `--vtime-end`, `-g` (topology and link values), `--vtime-link`, `--vtime-cut`, `--vtime-kill`, `--vtime-start`, `--vtime-power-up`, `--drift`, `--drift-random`, `--medium-*` (thresholds, the per-frame log, §8), `--sniff-*` (the detection model and the per-sniff log, §6.7), `--power*`, `--vtime-frames` (every frame sent, with its PSDU in hex). `--vtime-drop` reads the PSDU as an IEEE 802.15.4 frame (its sequence number) and is meaningful only for such frames. `--power` cannot be combined with `--vtime-kill` or `--vtime-start`.
 
 The server's log ends with the virtual time reached, the wake and frame counts, the medium's outcome counts and, with `--power`, one line per node. The medium log (`--medium-log`) has one line per frame and receiver: `t_end_us src dst frame_id outcome rx_dbm sinr_min_db`, with outcome `ok`, `noise`, `interference`, `captured`, `below_lock`, `busy`, `not_listening`, `tx_abort` or `left`.
 
 Clients of this interface and Nanostack nodes (`wsnode-inproc`, `wsbrd-inproc`) can share a run, since they share the medium: each locks onto the other's frames, which collide with its own, and receives them as foreign bytes. A client must therefore accept any PSDU, of any length up to 4096 bytes. `sim_utils/vtime/run.sh` starts such runs with `IF_NODES` (the clients' IDs) and `IF_CMD` (the command, given `--sock` and `--id`); `radio_if/test_mixed.sh` is the test (§12).
+
+**A stack developed elsewhere.** The emulator is a test tool for a client: the client runs against the server's binaries, and its code stays in its own repository. The clients in `radio_if/` (§12) illustrate the interface; a client is written from this document, not copied from them or from any other code of this repository.
 
 ## 11. A minimal client
 
@@ -364,9 +449,9 @@ loop:
 
 ## 12. The reference client and its tests
 
-`radio_if/ref_client.py` (Python standard library only) implements this interface (`RadioIf`) and a small protocol on top of it (`WindowNode`): periodic receive windows on the node's own clock, the radio off between them, frames at given offsets in the window with CCA before each.
+`radio_if/ref_client.py` (Python standard library only) implements this interface, version 2 (`RadioIf`; `--if-version=1` asks for version 1), and two small protocols on top of it: `WindowNode`, periodic receive windows on the node's own clock, the radio off between them, frames at given offsets in the window with CCA before each; and `SniffNode`, preamble sampling (§6.7): a sniff of `--sniff-us` every `--sniff-period-ms` with the lock flag, the radio off in between, and frames sent with a wake-up preamble (`--lp-tx`, `--lp-preamble-ms`).
 
-`radio_if/c_example/rif_node.c` is a second client, in C, written from this document alone (its message structures come from §4, with no header of this repository): a frame every period at a given offset on the node's own clock, CCA before each, the receiver on between frames (`--listen`) or turned on only for the CCA. It builds with `cc -O2 -o rif_node rif_node.c`.
+`radio_if/c_example/rif_node.c` is a second client, in C, of interface version 1 (it shows that version-1 clients keep working), written from this document alone (its message structures come from §4, with no header of this repository): a frame every period at a given offset on the node's own clock, CCA before each, the receiver on between frames (`--listen`) or turned on only for the CCA. It builds with `cc -O2 -o rif_node rif_node.c`.
 
 `radio_if/test_ref_client.py` runs them against `wssimserver`:
 
@@ -381,28 +466,38 @@ loop:
 | `window_closed` | Frames sent while the receiver's radio is off are not heard (`not_listening`) |
 | `drift_power_up` | A node 100 ppm fast and powered up at 0.5 s opens its windows at the virtual times the clock formula gives and still receives |
 | `c_client` | The C client and the Python client in one run exchange every frame; a C node with its radio off between frames has its CCAs charged inside its short listens |
-| `hello_refused` | The server refuses an unknown version, unknown flags, the interface without virtual time (also for a later instance, `--vtime-start`), and the legacy medium |
+| `hello_refused` | The server refuses an unknown version (0 and 3), unknown flags, the interface without virtual time (also for a later instance, `--vtime-start`), and the legacy medium |
+| `sniff_lp` | A sender with a 105 ms wake-up preamble and two receivers sniffing 1 ms every 100 ms: each receiver detects each preamble one dwell into its first sniff inside it, is locked onto the frame and receives it; its other sniffs find the noise floor; the server applies the sniff states (the clients report none), and the power report has exactly the listening, receiving and TX times |
+| `sniff_frame_starts` | A frame with an ordinary preamble that starts inside a sniff locks the receiver at its start (the server put the client in `LISTEN`), and the sniff reports it with `locked` = 2 |
 | `tx_rules` | Frames outside `TX` and overlapping frames are not sent and are counted; leaving `TX` while the frame is on air is counted |
+| `sniff_version` | A version-2 welcome has `SNIFF` and the server answers its `"xn"`; a version-1 welcome does not, and its `"xn"` and `"xl"` are dropped and counted; leaving `TX` after the frame's airtime but before the end of the long preamble plus the frame is counted |
 
 ```bash
-python3 radio_if/test_ref_client.py build-vt/wssimserver      # about 2 s
+python3 radio_if/test_ref_client.py build-vt/wssimserver      # about 3 s
 ```
 
 `radio_if/test_mixed.sh <bindir> <workdir> <outdir>` runs `dag_simple` (15 Nanostack nodes) with three clients (two C, one Python) near four of its routers, on one of the Wi-SUN nodes' channels, for 600 virtual seconds, and the same seed without the clients. It checks that every router joins as in the baseline, that the clients receive each other's frames and Wi-SUN frames and the Wi-SUN nodes the clients' frames (each client's log against the medium log), that collisions between the two kinds of node occur and are applied by the medium, that the power report covers every node with exact state sums and each client's TX time, and that the server logged no interface error (about 10 s).
 
 ## 13. Versioning
 
-- The interface version is negotiated in the hello; the welcome confirms it. The server supports a range of versions and refuses others.
-- Additions that a version-1 client can ignore do not change the version: new welcome flags, new server options, new optional client messages. A client ignores unknown welcome flags.
-- Any change that a version-1 client would misread (a field's meaning or a message's layout, a new message the server sends during a wake) gives a new version. The server will keep version 1 for as long as clients use it.
+- The interface version is negotiated in the hello; the welcome confirms it. The server supports a range of versions (today 1 to 2) and refuses others by closing the connection.
+- Additions that a client of an older version can ignore do not change the version: new welcome flags, new server options, new optional client messages. A client ignores unknown welcome flags.
+- Any change that a client of an older version would misread (a field's meaning or a message's layout, a new message the server sends during a wake) gives a new version. The server keeps the older versions for as long as clients use them.
 
-## 14. Not in version 1
+| Version | Adds |
+| --- | --- |
+| 1 | §1–§12 without §6.7 |
+| 2 | Preamble sniffing (§6.7): the client messages `"xn"` and `"xl"`, the server message `"xd"` in a wake, the welcome flag `SNIFF` and the frame flag `LONG_PREAMBLE` |
+
+**Discovering sniffing.** A client that needs sniffing asks for version 2 and checks `SNIFF` in its welcome before it sends `"xn"` or `"xl"`. A server that serves only version 1 refuses the version-2 hello by closing the connection: the client may then connect again with version 1 and run without sniffing, or stop. A version-1 client is served exactly as before: its welcome has no `SNIFF`, it never receives `"xd"` or `LONG_PREAMBLE`, and its `"xn"` and `"xl"` are dropped with a warning and counted (§9), so it cannot wait for an answer that never comes without the server's log saying why.
+
+## 14. Not in this interface
 
 - **Wall-clock mode and the legacy medium.** The interface needs virtual time and the central medium.
-- **Physical-layer details** listed in `docs/MEDIUM.md` §9: adjacent-channel interference, fading and shadowing, external interferers, node positions and path-loss models, RX/TX turnaround and settling times, an error on the reported RSSI. A receiver also decodes frames whatever their bit rate.
-- **The receive timestamp** is the frame's start (the time of the wake that delivers it); a radio that timestamps the end of the sync word adds `shr_len × 8 × 10⁶ / rate_bps` itself.
+- **Physical-layer details** listed in `docs/MEDIUM.md` §9: adjacent-channel interference, fading and shadowing, external interferers, node positions and path-loss models, RX/TX turnaround and settling times (except the sniff's settling time, §6.7), an error on the reported RSSI. A receiver also decodes frames whatever their bit rate.
+- **The receive timestamp** is the frame's start (the time of the wake that delivers it); a radio that timestamps the end of the sync word adds `shr_len × 8 × 10⁶ / rate_bps` itself. After a sniff's lock, it is the detection time.
 - **MCU active time chosen by the client.** The power report models it from cycle counts (§7); code still runs in zero virtual time, so a slow MCU does not delay the protocol.
 - **Peripherals that keep the MCU out of deep sleep** (a UART, for example) cannot be reported yet.
 - **Changes during a reception:** the medium checks the node's state at the frame's end only. A channel change reported while in `RECEIVE` does not lose the frame, nor does a short excursion out of `RECEIVE` reported back before the end (unless another frame reaches the node meanwhile); a client that follows §6.5 does neither.
 - **One radio per node.**
-- **Preamble and energy sniff** (§6.7).
+- **Sniffing limits** (`docs/MEDIUM.md` §10.6): no false detection on noise, detection per frame and not on summed energy, one channel per `"xn"` (a scan of `n` channels costs `n` wakes), no hardware channel hopping between sense windows, and default detection figures that are model values until measured on hardware.

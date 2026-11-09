@@ -279,6 +279,73 @@ def test_c_client():
     return r
 
 
+def test_sniff_lp():
+    """Preamble sampling (version 2, §6.7). Node 1 sends two frames with a
+    105 ms wake-up preamble ("xl") at 250 ms and 650 ms; nodes 2 and 3 sniff
+    for 1 ms every 100 ms (at 0 and 37 ms in the period) with the radio off in
+    between. Each receiver detects each preamble one dwell (16 bits at
+    50 kbit/s, 320 us) into the first sniff that falls in it, is locked onto
+    the frame, receives it, and finds the channel empty in its other sniffs.
+    The server applies the sniff states for the clients (they report none of
+    them), and the power report has exactly those times."""
+    pre = 105000
+    nodes = {1: ["--lp-tx", 250, "--lp-tx", 650, "--lp-preamble-ms", pre / 1000],
+             2: ["--sniff-period-ms", 100, "--sniff-us", 1000],
+             3: ["--sniff-period-ms", 100, "--sniff-us", 1000, "--sniff-phase-ms", 37]}
+    r = Run("sniff_lp", nodes, [(1, 2, -70), (1, 3, -75), (2, 3, -75)], 0.95)
+    check(r.ev(1, "start")[0][1]["can_sniff"] == "1", "the welcome did not offer sniffing")
+    check([t for t, kv in r.ev(1, "lp_tx")] == [250000, 650000] and
+          all(kv["total_us"] == str(pre + AIR) for t, kv in r.ev(1, "lp_tx")), f"node 1: {r.events[1]}")
+    ends = [250000 + pre + AIR, 650000 + pre + AIR]
+    detect = {2: [300320, 700320], 3: [337320, 737320]}
+    for nid in (2, 3):
+        d = r.ev(nid, "sniff_detect")
+        check([int(kv["t_us"]) for t, kv in d] == detect[nid] == [t for t, kv in d] and
+              all(kv["locked"] == "1" and kv["src"] == "1" for t, kv in d), f"node {nid} detections: {d}")
+        st = r.ev(nid, "rx_start")
+        check([t for t, kv in st] == detect[nid] and all(kv["via"] == "sniff" and kv["lp"] == "1" for t, kv in st),
+              f"node {nid}: {st}")
+        ok = r.ev(nid, "rx_ok")
+        check([t for t, kv in ok] == ends and [kv["psdu"] for t, kv in ok] == ["L1S1", "L1S2"], f"node {nid}: {ok}")
+        none = r.ev(nid, "sniff_none")
+        check(len(r.ev(nid, "sniff")) == 10 and len(none) == 8 and
+              all(abs(float(kv["rssi_dbm"]) - NOISE_DBM) < 0.01 for t, kv in none), f"node {nid}: {r.events[nid]}")
+        check(not r.ev(nid, "anomaly") and not r.ev(nid, "rx_lost"), f"node {nid}: anomalies")
+        radio = r.node_power(nid)["radio"]["states"]
+        rx_us = sum(e - t for t, e in zip(detect[nid], ends))
+        check(radio["receive"]["time_us"] == rx_us and radio["listen"]["time_us"] == 8 * 1000 + 2 * 320 and
+              radio["tx"]["time_us"] == 0, f"node {nid} radio: {radio}")
+        c = r.node_power(nid)["check"]
+        check(abs(c["radio_time_us"] - 0.95e6) < 1, f"node {nid}: the state times do not add up: {c}")
+    check(abs(r.node_power(1)["radio"]["states"]["tx"]["time_us"] - 2 * (pre + AIR)) < 1, "node 1 TX time")
+    # the receivers' radios were off at each frame's start (not_listening),
+    # then the sniff's lock received it (ok)
+    check(r.outcomes() == {(1, 2, "not_listening"): 2, (1, 3, "not_listening"): 2, (1, 2, "ok"): 2, (1, 3, "ok"): 2},
+          f"medium {r.outcomes()}")
+    check("20 sniffs requested, 20 sniff results delivered" in r.out and "radio interface:" not in r.out,
+          f"server log: {r.out[-1500:]}")
+
+
+def test_sniff_frame_starts():
+    """A frame with an ordinary 8-byte preamble that starts inside a sniff:
+    node 1 sends at 1002 ms; node 2 sniffs for 1 ms every 100 ms from 1.5 ms,
+    so its sniff at 1001.5 ms is on when the frame starts. The server put the
+    client's radio in LISTEN for the sniff, so the medium locks it at the
+    frame's start ("xx" at 1002 ms); the sniff then reports that frame as
+    already being received (locked = 2). No other sniff detects anything."""
+    nodes = {1: ["--tx", 2, "--no-cca"], 2: ["--sniff-period-ms", 100, "--sniff-us", 1000, "--sniff-phase-ms", 1.5]}
+    r = Run("sniff_frame_starts", nodes, [(1, 2, -70)], 1.45)
+    check([t for t, kv in r.ev(2, "rx_start")] == [1002000] and "via" not in r.ev(2, "rx_start")[0][1],
+          f"node 2: {r.events[2]}")
+    d = r.ev(2, "sniff_detect")
+    check([(t, kv["locked"]) for t, kv in d] == [(1002320, "2")], f"node 2: {d}")
+    check([t for t, kv in r.ev(2, "rx_ok")] == [1002000 + AIR] and len(r.ev(2, "sniff_none")) == 14,
+          f"node 2: {r.events[2]}")
+    check(r.outcomes() == {(1, 2, "ok"): 1}, f"medium {r.outcomes()}")
+    radio = r.node_power(2)["radio"]["states"]
+    check(radio["receive"]["time_us"] == AIR and radio["listen"]["time_us"] == 14 * 1000 + 500, f"node 2: {radio}")
+
+
 # --- Interface rules, with raw messages ------------------------------------
 
 def raw_server(name, n, opts=()):
@@ -311,7 +378,8 @@ def test_hello_refused():
     """Hellos the server refuses: an unknown interface version, unknown flags,
     the interface without virtual time, and with the legacy medium."""
     srv, sock, log, lf = raw_server("hello", 1)
-    check(refused(sock, 3, 2), "interface version 2 accepted")
+    check(refused(sock, 3, 3), "interface version 3 accepted")
+    check(refused(sock, 3, 0), "interface version 0 accepted")
     check(refused(sock, 3 | 0x80, 1), "unknown flag accepted")
     check(refused(sock, 2, 1), "interface without virtual time accepted")
     srv.terminate()
@@ -375,6 +443,55 @@ def test_tx_rules():
           "1 frames sent before the end of the node's previous frame" in out and
           "1 radio reports leaving tx before the end of the node's frame" in out and
           "1 frames sent," in out, f"server log: {out[-1500:]}")
+
+
+def test_sniff_version():
+    """Capability discovery: a version-2 client's welcome has SNIFF and its
+    "xn" is answered; a version-1 client's welcome does not, and its "xn" and
+    "xl" are dropped and counted. The TX of an "xl" lasts its preamble plus
+    the frame: leaving TX after the frame's airtime alone is counted."""
+    sys.path.insert(0, HERE)
+    import ref_client as rc
+    srv, sock, log, lf = raw_server("sniff_version", 2)
+    nodes = {}
+    for nid, ver in ((1, 1), (2, 2)):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        s.connect(sock)
+        s.send(rc.HELLO.pack(b"xh", nid, 3, ver))
+        nodes[nid] = s
+    w = rc.WELCOME.unpack(nodes[1].recv(64))
+    check(w[1] == 1 and not w[2] & rc.WELCOME_SNIFF, f"version-1 welcome {w}")
+    frame = rc.FRAME.pack(b"xx", 4, 0, 0, 0, 8, 2, 2, 0, 0, 0, 50000, 0, 0.0) + b"abcd"
+    nodes[1].send(rc.SNIFF.pack(b"xn", 0, 2000, 7, rc.SNIFF_LOCK, rc.OFF, 0))
+    nodes[1].send(rc.REPORT.pack(b"xr", rc.TX, 0, 0, 0, 0))
+    nodes[1].send(rc.LP_FRAME.pack(b"xl", 0, 1000) + frame)
+    nodes[1].send(rc.REPORT.pack(b"xr", rc.OFF, 0, 0, 0, 0))
+    nodes[1].send(rc.IDLE.pack(b"xi", 0, 0, 0, rc.NEVER))
+    w = rc.WELCOME.unpack(nodes[2].recv(64))
+    check(w[1] == 2 and w[2] & rc.WELCOME_SNIFF, f"version-2 welcome {w}")
+    nodes[2].send(rc.SNIFF.pack(b"xn", 0, 2000, 9, rc.SNIFF_LOCK, rc.OFF, 0))
+    nodes[2].send(rc.IDLE.pack(b"xi", 0, 0, 0, rc.NEVER))
+    nodes[2].settimeout(10)
+    a = rc.ADVANCE.unpack(nodes[2].recv(64))
+    d = rc.SNIFF_RESULT.unpack(nodes[2].recv(64))
+    check(a[1] == 1 and a[4] == 2000 and d[1] == 0 and d[3] == 9 and d[7] == 2000, f"wake {a}, result {d}")
+    # an "xl": 1000 us of preamble, then 2560 us of frame
+    nodes[2].send(rc.REPORT.pack(b"xr", rc.TX, 0, 0, 0, 0))
+    nodes[2].send(rc.LP_FRAME.pack(b"xl", 0, 1000) + frame)
+    nodes[2].send(rc.IDLE.pack(b"xi", 0, 0, 0, 2000 + 2560))
+    a = rc.ADVANCE.unpack(nodes[2].recv(64))
+    nodes[2].send(rc.REPORT.pack(b"xr", rc.OFF, 0, 0, 0, 0))     # 1000 us early
+    nodes[2].send(rc.IDLE.pack(b"xi", 0, 0, 0, rc.NEVER))
+    for s in nodes.values():
+        s.settimeout(10)
+        check(s.recv(64)[:2] == b"xq", "no end of run")
+        s.close()
+    srv.wait(10)
+    lf.close()
+    with open(log) as f:
+        out = f.read()
+    check("node 1: 2 sniff messages" in out and "1 frames sent," in out and
+          "node 2: 1 radio reports leaving tx" in out, f"server log: {out[-1500:]}")
 
 
 def main():
