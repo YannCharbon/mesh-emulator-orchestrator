@@ -14,16 +14,21 @@
 #     kept it (one discovery, no parent loss);
 #   - unicast both ways, for every LFN: the requests from 15 s after it became
 #     operational (and TRAFFIC_FROM) to the end (less 30 s) arrived and were
-#     echoed. A request or echo lost on the FFN backbone is accepted (and
-#     printed apart) when a node of its path, from the LFN's parent through
-#     each router's FHSS parent ("synch to parent") to the border router,
-#     reports its MAC retries exhausted ("MCPS Data fail") to the next node
+#     echoed. At most BACKBONE_MAX (1) requests or echoes per run, both
+#     directions together, may be lost on the FFN backbone (printed apart):
+#     a node of the packet's path, from the LFN's parent through each
+#     router's FHSS parent ("synch to parent") to the border router, must
+#     report its MAC retries exhausted ("MCPS Data fail") to the next node
 #     of the path, in the right direction, within BACKBONE_WIN (30) s of
 #     the packet's departure, with no such failure on the LFN hop (the LFN
-#     to its parent, or the parent to the LFN), and while the echoes in
-#     each direction stay at 99 % or more of the requests (FAN 1.0 routers
-#     hidden from each other can collide in lock-step at the border router
-#     until their retries run out). Any other loss fails;
+#     to its parent, or the parent to the LFN). Routers hidden from each
+#     other can still collide at a common parent until their retries run
+#     out, but rarely since the stack's GS12 fix (8c5677e, its
+#     docs/MAC_RETRY.md: retries no longer in lock-step). SCALE=mesh, about
+#     590 requests and as many echoes per run: 0, 2 and 2 backbone losses
+#     on seeds 1-3 with the fix off (NANOSTACK_MAC_RETRY_SUN_BACKOFF=OFF,
+#     so seeds 2 and 3 fail), none on seeds 1-9 with it. Any other loss
+#     fails;
 #   - group: every GROUP request reached every LFN once;
 #   - every frame each LFN received started inside one of its windows (ACKs
 #     to its own frames aside) and each received at least MIN_RX frames;
@@ -38,7 +43,7 @@
 # mesh), WSSIM_SEED (1), TUN (none), BR_PERIOD (120 star, 300 mesh), GAP_MS
 # (1000 star, 2000 mesh), LFN_PERIOD (as BR_PERIOD), TRAFFIC_FROM (600 star,
 # 1200 mesh), JOIN_MAX (900 star, 1500 mesh), GROUP (ff05::1234), MIN_RX
-# (20), DELAY_MAX (60), SIM_OPTS (--drift-random=20), LFN_EXTRA,
+# (20), DELAY_MAX (60), BACKBONE_MAX (1), SIM_OPTS (--drift-random=20), LFN_EXTRA,
 # ROUTER_EXTRA, KEEP, SPREAD.
 # SPREAD (10): the LFNs power up at offsets in [0, SPREAD) s drawn from
 # the seed (run.sh SPREAD); 0 starts them all at 0, in step: their LPAS
@@ -56,7 +61,7 @@ mesh) D=(50 3000 300 2000 1200 1500) ;;
 esac
 LFNS=${LFNS:-${D[0]}}; DUR=${DUR:-${D[1]}}; BR_PERIOD=${BR_PERIOD:-${D[2]}}; GAP_MS=${GAP_MS:-${D[3]}}
 LFN_PERIOD=${LFN_PERIOD:-$BR_PERIOD}; TRAFFIC_FROM=${TRAFFIC_FROM:-${D[4]}}; JOIN_MAX=${JOIN_MAX:-${D[5]}}
-MIN_RX=${MIN_RX:-20}; DELAY_MAX=${DELAY_MAX:-60}
+MIN_RX=${MIN_RX:-20}; DELAY_MAX=${DELAY_MAX:-60}; BACKBONE_MAX=${BACKBONE_MAX:-1}
 (( LFNS < 64 )) || { echo "test_lfn_scale: at most 63 LFNs (test_udp_dst)" >&2; exit 2; }
 (( (LFNS + 1) * GAP_MS < BR_PERIOD * 1000 )) || { echo "test_lfn_scale: a round of requests must fit in BR_PERIOD" >&2; exit 2; }
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -89,7 +94,7 @@ RC=$?
 rm -f "$OUT.topo"
 [ $RC = 0 ] || { echo "test_lfn_scale: run failed ($OUT.run)"; exit 1; }
 
-PYTHONPATH=$HERE python3 - "$OUT" "$SCALE" "$FIRST" "$LAST" "$DUR" "$JOIN_MAX" "$TRAFFIC_FROM" "$GROUP" "$MIN_RX" "$DELAY_MAX" "$ROUTERS" <<'PY'
+PYTHONPATH=$HERE python3 - "$OUT" "$SCALE" "$FIRST" "$LAST" "$DUR" "$JOIN_MAX" "$TRAFFIC_FROM" "$GROUP" "$MIN_RX" "$DELAY_MAX" "$ROUTERS" "$BACKBONE_MAX" <<'PY'
 import ipaddress, re, statistics, sys
 from lfn_lib import Checks, lines, udp, exchange, lfn_reception, eui_node, lfn_addr, listen_interval_s, mpl_seq_of_requests, mpl_received
 out, scale = sys.argv[1], sys.argv[2]
@@ -98,6 +103,7 @@ dur, join_max, t_from = float(sys.argv[5]), float(sys.argv[6]), float(sys.argv[7
 group = str(ipaddress.ip_address(sys.argv[8]))
 min_rx, delay_max = int(sys.argv[9]), float(sys.argv[10])
 routers = [int(x) for x in sys.argv[11].split()]
+backbone_max = int(sys.argv[12])
 ck = Checks(f'test_lfn_scale ({scale})')
 edges = set()
 for l in open(f'{out}/topology.txt'):
@@ -231,11 +237,10 @@ ck(not bad['join'], f'{N - len(bad["join"])} of {N} LFNs joined by {join_max:.0f
    + (f' (operational {min(opers):.0f}-{max(opers):.0f} s)' if opers else '') + show(bad['join']))
 ck(not bad['down'], f'BR -> LFN unicast complete for {N - len(bad["down"])} of {N} LFNs' + show(bad['down']))
 ck(not bad['up'], f'LFN -> BR unicast complete for {N - len(bad["up"])} of {N} LFNs' + show(bad['up']))
-for way, name in (('down', 'BR -> LFN'), ('up', 'LFN -> BR')):
-    nq, nb = totals[way]
-    if backbone[way]:
-        ck(nb >= 0.99 * nq, f'{name}: {len(backbone[way])} lost on the FFN backbone (MAC retries exhausted on a router hop), '
-           f'{nb} of {nq} echoed (at least 99 %): ' + '; '.join(backbone[way][:6]))
+nbb = len(backbone['down']) + len(backbone['up'])
+ck(nbb <= backbone_max, f'{nbb} lost on the FFN backbone (MAC retries exhausted on a router hop; at most {backbone_max}), '
+   + ', '.join(f'{name} {totals[w][1]} of {totals[w][0]} echoed' for w, name in (('down', 'BR -> LFN'), ('up', 'LFN -> BR')))
+   + (': ' + '; '.join((backbone['down'] + backbone['up'])[:6]) if nbb else ''))
 if ffn_lost:
     ck.info(f'{group}: requests a parent router never got by MPL (FFN loss, not counted against the LFNs): '
             + '; '.join(f'LFN {n} under {p}: {len(l)}' for n, (p, l) in sorted(ffn_lost.items())))
