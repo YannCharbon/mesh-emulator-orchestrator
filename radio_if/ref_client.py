@@ -50,6 +50,16 @@ CAUSES = ("ok", "noise", "interference")
 CAUSE_RADIO, CAUSE_OTHER = 4, 5          # timer causes of the "xc" report
 
 
+def printable(psdu):
+    """A PSDU for the log: as text if it is printable ASCII without spaces (this
+    protocol's frames, without their padding), else in hex (another stack's
+    frames, which a node of a mixed run hears too)."""
+    p = psdu.rstrip(b".")
+    if p and all(0x21 <= b < 0x7f for b in p):
+        return p.decode()
+    return "hex:" + psdu.hex()
+
+
 class Closed(Exception):
     """The run ended: "xq", or the server closed the connection."""
 
@@ -253,7 +263,7 @@ class WindowNode:
             return
         h, self.held = self.held, None
         if v["ok"]:
-            self.log("rx_ok", src=h["src"], frame=v["frame_id"], psdu=h["psdu"].rstrip(b".").decode(),
+            self.log("rx_ok", src=h["src"], frame=v["frame_id"], psdu=printable(h["psdu"]),
                      sinr_db=f"{v['sinr_db']:.1f}")
         else:
             self.log("rx_lost", src=h["src"], frame=v["frame_id"], cause=CAUSES[v["cause"]],

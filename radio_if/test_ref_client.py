@@ -24,6 +24,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 CLIENT = os.path.join(HERE, "ref_client.py")
+C_SRC = os.path.join(HERE, "c_example", "rif_node.c")
 PROFILE = os.path.join(ROOT, "examples/power/efr32fg25-lfn.ini")
 NOISE_DBM = -119.93
 ARGS = None
@@ -44,7 +45,8 @@ def sock_path(name):
 
 
 class Run:
-    """A server and its nodes. nodes: {id: [client options]}; links: [(a, b, rssi)]."""
+    """A server and its nodes. nodes: {id: [client options]}; links: [(a, b, rssi)].
+    Options starting with "@c" run the C example client instead of the Python one."""
 
     def __init__(self, name, nodes, links, end_s, opts=(), seed="1"):
         self.dir = os.path.join(ARGS.logdir, name)
@@ -68,8 +70,10 @@ class Run:
             procs = {}
             for nid, nopts in nodes.items():
                 out = open(os.path.join(self.dir, f"node{nid}.log"), "w")
-                procs[nid] = (subprocess.Popen([sys.executable, CLIENT, "--sock", self.sock, "--id", str(nid),
-                                                *map(str, nopts)], stdout=out, stderr=subprocess.STDOUT), out)
+                cmd = [ARGS.cbin] if nopts[:1] == ["@c"] else [sys.executable, CLIENT]
+                nopts = nopts[1:] if nopts[:1] == ["@c"] else nopts
+                procs[nid] = (subprocess.Popen([*cmd, "--sock", self.sock, "--id", str(nid), *map(str, nopts)],
+                                               stdout=out, stderr=subprocess.STDOUT), out)
             try:
                 self.status = srv.wait(60)
             except subprocess.TimeoutExpired:
@@ -245,6 +249,36 @@ def test_drift_power_up():
     check(len(r.ev(2, "rx_ok")) == 2, f"node 2: {r.events[2]}")
 
 
+def test_c_client():
+    """The C example client (radio_if/c_example, written from the document
+    alone) with the Python one in one run. Node 1 (Python) sends at 2 ms in
+    its 30 ms window each second; node 2 (C) listens all the time and sends at
+    10 ms; node 3 (C) has its radio off, turns the receiver on 1 ms before
+    each frame for its CCA and sends at 20 ms. 1 and 2 receive every frame of
+    the others in their windows; 3 receives nothing; the power report has
+    3's CCAs inside its short listens."""
+    nodes = {1: ["--tx", 2], 2: ["@c", "--listen", "--offset-ms", 1010], 3: ["@c", "--offset-ms", 1020]}
+    r = Run("c_client", nodes, [(1, 2, -70), (1, 3, -70), (2, 3, -75)], 3.5)
+    srcs = lambda nid: sorted(int(kv["src"]) for t, kv in r.ev(nid, "rx_ok"))
+    check(srcs(1) == [2, 2, 2, 3, 3, 3], f"node 1: {r.events[1]}")
+    check(srcs(2) == [1, 1, 1, 3, 3, 3], f"node 2: {r.events[2]}")
+    check(not r.ev(3, "rx_start") and len(r.ev(3, "tx")) == 3, f"node 3: {r.events[3]}")
+    for nid in nodes:
+        check(not r.ev(nid, "rx_lost") and not r.ev(nid, "anomaly") and not r.ev(nid, "cca_busy"),
+              f"node {nid}: losses or anomalies")
+    # frames at their offsets, received at their end; the PSDUs are intact
+    for t, kv in r.ev(1, "rx_ok"):
+        off = {2: 10000, 3: 20000}[int(kv["src"])]
+        check((t - off - AIR) % 1000000 == 0 and kv["psdu"].startswith(f"C{kv['src']}S"), f"node 1: {t} {kv}")
+    check(r.outcomes() == {(1, 2, "ok"): 3, (1, 3, "not_listening"): 3, (2, 1, "ok"): 3, (2, 3, "not_listening"): 3,
+                           (3, 1, "ok"): 3, (3, 2, "ok"): 3}, f"medium {r.outcomes()}")
+    p = r.node_power(3)["radio"]["states"]
+    check(p["cca"]["count"] == 3 and abs(p["listen"]["time_us"] + p["cca"]["time_us"] - 3 * 1000) < 1 and
+          abs(p["tx"]["time_us"] - 3 * AIR) < 1 and p["receive"]["time_us"] == 0, f"node 3 radio: {p}")
+    check(r.node_power(2)["radio"]["states"]["receive"]["time_us"] == 6 * AIR, "node 2 receive time")
+    return r
+
+
 # --- Interface rules, with raw messages ------------------------------------
 
 def raw_server(name, n, opts=()):
@@ -283,6 +317,17 @@ def test_hello_refused():
     srv.terminate()
     srv.wait()
     lf.close()
+    # a later instance (--vtime-start) is checked as the first one
+    srv, sock, log, lf = raw_server("hello_later", 1, ["--vtime-start=1:0.005"])
+    first = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    first.connect(sock)
+    first.send(struct.pack("<2sHHH", b"xh", 1, 3, 1))
+    time.sleep(0.2)
+    check(refused(sock, 2, 1), "a later instance with the interface but without virtual time accepted")
+    first.close()
+    srv.terminate()
+    srv.wait()
+    lf.close()
     srv, sock, log, lf = raw_server("hello_legacy", 1, ["--medium=legacy"])
     check(refused(sock, 3, 1), "interface with the legacy medium accepted")
     srv.terminate()
@@ -294,7 +339,8 @@ def test_hello_refused():
 
 def test_tx_rules():
     """A frame sent while the reported state is not tx, and one sent before the
-    end of the previous one, are not sent; the server says so."""
+    end of the previous one, are not sent; a report that leaves tx while the
+    frame is on air is applied but counted; the server says so."""
     sys.path.insert(0, HERE)
     import ref_client as rc
     srv, sock, log, lf = raw_server("tx_rules", 2)
@@ -311,6 +357,7 @@ def test_tx_rules():
     nodes[1].send(rc.REPORT.pack(b"xr", rc.TX, 0, 0, 0, 0))
     nodes[1].send(frame)                                    # sent
     nodes[1].send(frame)                                    # overlaps the previous: refused
+    nodes[1].send(rc.REPORT.pack(b"xr", rc.LISTEN, 0, 0, 0, 0))   # its frame is still on air
     nodes[1].send(rc.IDLE.pack(b"xi", 0, 0, 0, rc.NEVER))
     nodes[2].recv(64)
     nodes[2].send(rc.REPORT.pack(b"xr", rc.LISTEN, 0, 0, 0, 0))
@@ -326,6 +373,7 @@ def test_tx_rules():
         out = f.read()
     check("1 frames sent while the reported radio state was not tx" in out and
           "1 frames sent before the end of the node's previous frame" in out and
+          "1 radio reports leaving tx before the end of the node's frame" in out and
           "1 frames sent," in out, f"server log: {out[-1500:]}")
 
 
@@ -341,6 +389,8 @@ def main():
     ARGS.bin = os.path.join(ARGS.logdir, "wssimserver-radio-if")
     ARGS.sockdir = tempfile.mkdtemp(prefix="rif_", dir="/tmp")
     shutil.copy2(ARGS.server, ARGS.bin)
+    ARGS.cbin = os.path.join(ARGS.logdir, "rif_node")
+    subprocess.run(["cc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-o", ARGS.cbin, C_SRC], check=True)
     tests = [(n[5:], f) for n, f in globals().items() if n.startswith("test_")]
     failed = 0
     for name, fn in tests:

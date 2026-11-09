@@ -776,7 +776,8 @@ static void conn_hello(int slot, const void *buf, int len, int vtime_nodes)
         WARN("fd %d: node %d: radio interface version %u, this server speaks %d to %d: refused", fds[slot].fd,
              hello->node_id, hello->version, SIM_RADIO_IF_VERSION_MIN, SIM_RADIO_IF_VERSION_MAX);
         conn_close(slot);
-    } else if ((hello->flags & SIM_HELLO_RADIO_IF) && (!vtime || !med_central())) {
+    } else if ((hello->flags & SIM_HELLO_RADIO_IF) &&
+               (!vtime || !med_central() || !(hello->flags & SIM_HELLO_VTIME))) {
         WARN("fd %d: node %d: the radio interface needs virtual time and the central medium "
              "(--vtime, not --medium=legacy): refused", fds[slot].fd, hello->node_id);
         conn_close(slot);
@@ -979,10 +980,11 @@ static uint8_t *vt_cca_shm;                     // the CCA shared memory (SIM_SH
  * a frame is sent only while the reported state is tx, and not before the end
  * of the node's previous frame. Frames that break these rules are not sent.
  */
-enum { RI_ERR_TX_STATE, RI_ERR_TX_OVERLAP, RI_ERR_REPORT, RI_ERR_COUNT };
+enum { RI_ERR_TX_STATE, RI_ERR_TX_OVERLAP, RI_ERR_TX_EARLY, RI_ERR_REPORT, RI_ERR_COUNT };
 static const char *const ri_err_names[RI_ERR_COUNT] = {
     "frames sent while the reported radio state was not tx",
     "frames sent before the end of the node's previous frame",
+    "radio reports leaving tx before the end of the node's frame",
     "malformed radio reports",
 };
 static struct {
@@ -1293,6 +1295,11 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
                     vt_ri_error(node, RI_ERR_REPORT, "radio report with an unknown state: ignored");
                     continue;
                 }
+                // The frame stays on air to its end whatever the node
+                // reports: a radio that leaves TX earlier would hear while
+                // it sends. Applied, but warned about and counted.
+                if (vt_ri[node].state == SIM_RADIO_TX && r->state != SIM_RADIO_TX && vt_now < vt_ri[node].tx_end)
+                    vt_ri_error(node, RI_ERR_TX_EARLY, "radio left tx before the end of its frame");
                 vt_ri[node].state = r->state;
                 vt_shm_radio(node, r->state, r->channel);
             }
