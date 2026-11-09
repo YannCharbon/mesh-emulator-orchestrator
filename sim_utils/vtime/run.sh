@@ -19,7 +19,8 @@
 #                      as --group-file, so any size up to 4096 node IDs works
 #                      (no command-line limit; a 1000-node building with
 #                      19 000 links is read in well under a second)
-#   SOCK=<path>        conductor socket (default: a new /tmp/wssim-vt-*.sock)
+#   SOCK=<path>        conductor socket (default: a new /tmp/wssim-vt-*.sock);
+#                      at most 107 bytes (the limit of a UNIX socket path)
 #   TUN=<dev>          the border router's TUN device (default tun0). It must
 #                      exist, belong to the user and be up (tunup.sh). Two runs
 #                      at the same time need two TUN devices. TUN=none: no
@@ -62,6 +63,12 @@
 #   POWER_OPTS         more wssimserver options (e.g. --power-node=3:<profile>)
 #   SIM_OPTS           more wssimserver options, with or without POWER (e.g.
 #                      --drift-random=20, --drift=3:-15: clock drift, EM3 step 5)
+#                      In POWER_OPTS and SIM_OPTS, the files the server reads
+#                      (--power, --power-node=IDS:PROFILE, --group-file) are
+#                      relative to the directory run.sh is called from, as
+#                      POWER and TOPO, and must exist; the files it writes
+#                      (--medium-log, --sniff-log, --power-out, --power-log,
+#                      --vtime-frames) are relative to <outdir>
 #   KILL="<i>:<s> ..."  stop node i outright at virtual second s (wssimserver
 #                      --vtime-kill: no more wakes or frames, its connection
 #                      closed; the program then exits with "conductor closed
@@ -196,6 +203,51 @@ abs_words() {   # abs_words <words>: the words, relative paths made absolute
 	done
 	echo "${out[*]}"
 }
+# The input files that POWER_OPTS and SIM_OPTS name (--power=FILE,
+# --power-node=IDS:FILE, --group-file=FILE, also as two words) are relative
+# to the caller's directory, as POWER and TOPO: made absolute here, and
+# checked. The files that the server writes (--power-out, --power-log,
+# --medium-log, --sniff-log, --vtime-frames) stay relative to <outdir>, where
+# the server runs: each run keeps its own.
+abs_input() {   # abs_input <option> <file>: the file's absolute path
+	local f=$2
+	[[ $f == /* ]] || f=$CALLER/${f#./}
+	if [ ! -f "$f" ] || [ ! -r "$f" ]; then
+		echo "run.sh: $1: no file $2 (a relative path is relative to the directory run.sh is called from, $CALLER)" >&2
+		return 1
+	fi
+	realpath "$f"
+}
+abs_opt_value() {   # abs_opt_value <option> <value>: the value, its file made absolute
+	case $1 in
+	--power-node)
+		[[ $2 == *:* ]] || { echo "run.sh: --power-node: expected IDS:PROFILE, got $2" >&2; return 1; }
+		local f; f=$(abs_input "$1" "${2#*:}") || return 1
+		echo "${2%%:*}:$f" ;;
+	*) abs_input "$1" "$2" ;;
+	esac
+}
+abs_server_opts() {   # abs_server_opts <words>: the words, input files made absolute
+	local - w o next= out=()
+	set -f
+	for w in $1; do
+		if [ -n "$next" ]; then
+			w=$(abs_opt_value "$next" "$w") || return 1
+			next=
+		else
+			case $w in
+			--power=*|--power-node=*|--group-file=*)
+				o=${w%%=*}; w=$o=$(abs_opt_value "$o" "${w#*=}") || return 1 ;;
+			--power|--power-node|--group-file) next=$w ;;
+			esac
+		fi
+		out+=("$w")
+	done
+	[ -z "$next" ] || { echo "run.sh: $next: no value" >&2; return 1; }
+	echo "${out[*]}"
+}
+POWER_OPTS=$(abs_server_opts "${POWER_OPTS:-}") || exit 1
+SIM_OPTS=$(abs_server_opts "${SIM_OPTS:-}") || exit 1
 NIF=0
 declare -A ICMD IOPT  # client node -> its command, its options
 for i in ${IF_NODES:-}; do
@@ -214,6 +266,12 @@ SEED=${WSSIM_SEED:-1}
 export WSSIM_SEED=$SEED
 SOCK=${SOCK:-$(mktemp -u --suffix=.sock /tmp/wssim-vt-XXXXXXXX)}
 TUN=${TUN:-tun0}
+# A UNIX socket path is at most 107 bytes (struct sockaddr_un)
+if (( $(printf '%s' "$SOCK" | wc -c) > 107 )); then
+	echo "run.sh: SOCK is $(printf '%s' "$SOCK" | wc -c) bytes long, and a UNIX socket path is at most 107: $SOCK" >&2
+	echo "run.sh: give a shorter SOCK (e.g. SOCK=/tmp/<name>.sock), or leave SOCK unset for a new /tmp/wssim-vt-*.sock" >&2
+	exit 1
+fi
 if [ -e "$SOCK" ]; then
 	echo "run.sh: $SOCK exists (another run?)" >&2; exit 1
 fi
@@ -252,6 +310,19 @@ cleanup() {
 	for p in "${!ACTIVE[@]}"; do kill -KILL "$p" 2>/dev/null; done
 	rm -f "$SOCK"
 }
+server_failed() {   # server_failed <status>: the end of simserver.log, the server's own error
+	echo "run.sh: wssimserver failed (status $1); the end of $OUT/simserver.log:" >&2
+	tail -n 4 "$OUT/simserver.log" 2>/dev/null | sed 's/^/    /' >&2
+}
+sim_ended() {   # wssimserver has exited (a zombie not yet reaped included), within 0.5 s
+	local st k
+	for (( k = 0; k < 10; k++ )); do
+		st=$(sed 's/.*) //' /proc/$SIM_PID/stat 2>/dev/null | cut -d' ' -f1)
+		[ -z "$st" ] || [ "$st" = Z ] && return 0
+		sleep 0.05
+	done
+	return 1
+}
 abort() {
 	echo "run.sh: $1; stopping this run's processes" >&2
 	echo "aborted: $1" >> "$OUT/run_info.txt"
@@ -280,7 +351,7 @@ if [ -n "${POWER:-}" ]; then
 	[ "${POWER_LOG:-0}" = 1 ] && PWR+=(--power-log="$OUT/power_log.txt")
 	[ -n "${POWER_CELL:-}" ] && PWR+=(--power-cell="$POWER_CELL")
 	PWR+=(${POWER_OPTS:-})
-	echo "power=$POWER log=${POWER_LOG:-0} cell=${POWER_CELL:-}" >> "$OUT/run_info.txt"
+	echo "power=$POWER log=${POWER_LOG:-0} cell=${POWER_CELL:-} power_opts=${POWER_OPTS:-}" >> "$OUT/run_info.txt"
 fi
 CTL=()
 declare -A STOPPED  # node -> number of its instances that KILL/RESTART stop
@@ -311,6 +382,7 @@ for k in ${LINK:-}; do CTL+=(--vtime-link="$k"); done
 for k in ${DROP:-}; do CTL+=(--vtime-drop="$k"); done
 [ "${FRAMES:-0}" = 1 ] && CTL+=(--vtime-frames="$OUT/frames.txt")
 [ ${#CTL[@]} -gt 0 ] && echo "events=${CTL[*]}" >> "$OUT/run_info.txt"
+[ -n "${SIM_OPTS:-}" ] && echo "sim_opts=$SIM_OPTS" >> "$OUT/run_info.txt"
 DUMPOPT=()          # the topology and RSSI matrices in simserver.log: N^2 entries each
 case ${DUMP:-auto} in
 1) DUMPOPT=(--dump) ;;
@@ -320,7 +392,10 @@ start simserver "$BIN/wssimserver" --group-file="$OUT/topology.txt" --vtime=$((N
 SIM_PID=$!
 for (( i = 0; i < 200; i++ )); do
 	[ -S "$SOCK" ] && break
-	kill -0 $SIM_PID 2>/dev/null || abort "wssimserver exited at start (simserver.log)"
+	if ! kill -0 $SIM_PID 2>/dev/null; then
+		wait $SIM_PID; server_failed $?
+		abort "wssimserver exited at start"
+	fi
 	sleep 0.05
 done
 [ -S "$SOCK" ] || abort "no socket $SOCK after 10 s"
@@ -401,6 +476,16 @@ while (( ${#ACTIVE[@]} > 0 )); do
 		continue
 	fi
 	if [ "$RC" != 0 ]; then
+		# A client that fails because the server failed: the server's error
+		if sim_ended; then
+			wait $SIM_PID; SIM_RC=$?
+			unset "ACTIVE[$SIM_PID]"
+			echo "simserver $SIM_RC" >> "$OUT/exit_codes.txt"
+			if [ "$SIM_RC" != 0 ]; then
+				server_failed $SIM_RC
+				abort "wssimserver failed, then ${NAME[$DONE]} exited with status $RC"
+			fi
+		fi
 		kill -TERM $SIM_PID 2>/dev/null      # "xq" to the others
 		sleep 2
 		abort "${NAME[$DONE]} exited with status $RC before the end of the run"
@@ -439,8 +524,9 @@ while read -r n rc; do
 	stopped_ok "$n" || BAD+="$n:$rc "
 done < <(awk '$1 != "simserver" && $2 != 0' "$OUT/exit_codes.txt")
 echo "run finished: $OUT (wssimserver status ${SIM_RC:-?})"
+[ "${SIM_RC:-1}" != 0 ] && server_failed "${SIM_RC:-?}"
 if [ -n "$BAD" ]; then
-	echo "run.sh: non-zero exit status: $BAD(exit_codes.txt)" >&2
+	echo "run.sh: non-zero exit status: $BAD(exit_codes.txt)${SIM_RC:+$([ "$SIM_RC" != 0 ] && echo "; wssimserver failed, see above")}" >&2
 	echo "failed: non-zero exit status: $BAD" >> "$OUT/run_info.txt"
 	exit 1
 fi
