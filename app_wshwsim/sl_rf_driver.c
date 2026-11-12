@@ -260,6 +260,24 @@ static uint8_t rf_fcs_len = 4;
 static uint32_t rf_rx_ts_jitter_us;
 static uint64_t rf_jitter_state;
 
+/* RX/TX turnaround (docs/MEDIUM.md §9.2), off (0) by default:
+ * WSSIM_PHY_TX_DELAY_US: from the decision to send (clear CCA, or no CCA) to
+ *   the frame's first bit on air; the radio neither listens nor sends then
+ *   (driver busy, IDLE in the shared memory and the power ledger).
+ * WSSIM_PHY_RX_DELAY_US: from the end of the radio's own frame to its
+ *   receiver being on; frames that start in that time are not received.
+ * RAIL's state timings: RAILtest's defaults rxToTx 130 µs, txToRx 100 µs;
+ * the FG25 firmware's rxToTx 192 µs, txToRx 182 µs (its rail_phy.c).
+ * The timers are registered only when the option is set, so runs without it
+ * are those of the radio before the option. */
+static uint32_t rf_tx_delay_us;
+static uint32_t rf_rx_delay_us;
+static int tx_delay_timer = -1;
+static int rx_delay_timer = -1;
+static bool rf_tx_turnaround;           // waiting for the frame to go on air
+static bool rf_rx_turnaround;           // after its own frame, receiver not yet on
+static unsigned long rf_frames_lost_turnaround;
+
 /* Functions */
 static void _rf_set_off(void);
 static void _rf_stop_csma_timeout_timer();
@@ -352,6 +370,8 @@ static void rf_phy_settings_init(void)
     rf_phr_len = rf_phy_env("WSSIM_PHY_PHR", 2, 0, 8);
     rf_fcs_len = rf_phy_env("WSSIM_PHY_FCS", 4, 2, 4);
     rf_rx_ts_jitter_us = rf_phy_env("WSSIM_PHY_RX_TS_JITTER_US", 0, 0, 100000);
+    rf_tx_delay_us = rf_phy_env("WSSIM_PHY_TX_DELAY_US", 0, 0, 100000);
+    rf_rx_delay_us = rf_phy_env("WSSIM_PHY_RX_DELAY_US", 0, 0, 100000);
     FATAL_ON(rf_fcs_len == 3, 2, "WSSIM_PHY_FCS=3: expected 2 or 4");
     FATAL_ON(rf_phy_legacy && rf_datarate_fixed, 2, "WSSIM_PHY_LEGACY and WSSIM_PHY_DATARATE together");
     FATAL_ON(rf_preamble_len + rf_sfd_len > 255, 2, "WSSIM_PHY_PREAMBLE + WSSIM_PHY_SFD above 255 bytes");
@@ -367,6 +387,9 @@ static void rf_phy_settings_init(void)
              rf_preamble_len, rf_sfd_len, rf_phr_len, rf_fcs_len);
     if (rf_rx_ts_jitter_us)
         INFO("PHY: RX timestamps off by up to +-%u us (WSSIM_PHY_RX_TS_JITTER_US)", rf_rx_ts_jitter_us);
+    if (rf_tx_delay_us || rf_rx_delay_us)
+        INFO("PHY: turnaround, TX on air %u us after the decision to send (WSSIM_PHY_TX_DELAY_US), "
+             "receiver on %u us after its own frame (WSSIM_PHY_RX_DELAY_US)", rf_tx_delay_us, rf_rx_delay_us);
 }
 
 // The PHY mode the MAC configured (sim_proto.h, SIM_PHY_MODE_*), for the
@@ -442,7 +465,7 @@ static uint8_t rf_power_state(void)
     case DRVSTATE_RX:
         return SIM_RADIO_RECEIVE;
     case DRVSTATE_TX:
-        return SIM_RADIO_TX;
+        return rf_tx_turnaround ? SIM_RADIO_IDLE : SIM_RADIO_TX;
     }
     return SIM_RADIO_IDLE;
 }
@@ -500,8 +523,10 @@ void set_shm_cca_state()
 {
     int pos = g_rf_host.node_id * SIM_SHM_CCA_STRIDE;
     uint8_t hw_state = rf_power_state();
+    // Not yet on air: the legacy medium's CCA (byte 0) must not see a TX
+    uint8_t drv = rf_tx_turnaround ? DRVSTATE_IDLE : driver_state;
 
-    memcpy(shm_ptr+pos, (uint8_t *)&driver_state, 1);
+    memcpy(shm_ptr+pos, &drv, 1);
     memcpy(shm_ptr+pos+1, &channel, 2);
     memcpy(shm_ptr+pos+3, &hw_state, 1);
     // Central medium: the radio left RX without a verdict (e.g. the MAC
@@ -864,6 +889,12 @@ void phy_rf_rx_now(void)
              rf_frames_lost_off);
         goto CANCEL_RX;
     }
+    if (rf_rx_turnaround && driver_state == DRVSTATE_IDLE) {
+        rf_frames_lost_turnaround++;
+        INFO("rf rx lost: TX-to-RX turnaround, chan=%d len=%d rxseq=%d (%lu lost)", pkt_chan, pkt_len, pkt_seq,
+             rf_frames_lost_turnaround);
+        goto CANCEL_RX;
+    }
     if ((channel != pkt_chan) && !fhss_on) {
         WARN("YET FHSS OFF & WRONG CHANNEL ... rf rx: chan=%d, curr chan=%d len=%d rxseq=%d", pkt_chan, channel, pkt_len, pkt_seq);
     }
@@ -1113,9 +1144,26 @@ static void _rf_tx_sleep_timeout_timer_cb(int timer_id, uint16_t slots)
                                                         mac_tx_handle, PHY_LINK_TX_SUCCESS, 0, 0);
     rx_thread_blokcked = false;
     driver_state = rf_off_pending ? DRVSTATE_OFF : DRVSTATE_IDLE_WAITING_RX;
+    if (driver_state == DRVSTATE_IDLE_WAITING_RX && rf_rx_delay_us) {
+        // Receiver not on yet (WSSIM_PHY_RX_DELAY_US)
+        driver_state = DRVSTATE_IDLE;
+        rf_rx_turnaround = true;
+        eventOS_callback_timer_start_usec(rx_delay_timer, rf_rx_delay_us);
+    }
     rf_off_pending = false;
     set_shm_cca_state();
     //_rf_set_rx();
+}
+
+// End of the TX-to-RX turnaround: the receiver is on, unless the MAC did
+// something else with the radio meanwhile (off, a new TX, its own RX start)
+static void _rf_rx_delay_timer_cb(int timer_id, uint16_t slots)
+{
+    rf_rx_turnaround = false;
+    if (driver_state != DRVSTATE_IDLE)
+        return;
+    driver_state = DRVSTATE_IDLE_WAITING_RX;
+    set_shm_cca_state();
 }
 
 static void _rf_rx_sleep_timeout_timer_cb(int timer_id, uint16_t slots)
@@ -1191,9 +1239,18 @@ static bool _rf_check_cca(){
  *
  * @note The return value can be casted to @ref RAIL_Status_t to get the exact error code.
  */
+static int _rf_tx_on_air(void);
 static int _rf_execute_tx(){
     // TX FIFO must be pre-filled with TX data
+    if (ringbufindex_peek_get(&output_ringbuf) == -1) {
+        driver_state = DRVSTATE_TX;
+        set_shm_cca_state();
+        rx_thread_blokcked = true;
+        return -1;
+    }
 
+    // RX/idle-to-TX turnaround (WSSIM_PHY_TX_DELAY_US): busy, not yet on air
+    rf_tx_turnaround = rf_tx_delay_us != 0;
     driver_state = DRVSTATE_TX;
     set_shm_cca_state();
 
@@ -1201,14 +1258,21 @@ static int _rf_execute_tx(){
 
     // block the RX thread
     rx_thread_blokcked = true;
-    // Get the next packet to transmit but do not remove it yet from ring buffer
+    if (rf_tx_delay_us) {
+        eventOS_callback_timer_start_usec(tx_delay_timer, rf_tx_delay_us);
+        return 0;
+    }
+    return _rf_tx_on_air();
+}
+
+// The frame goes on air; its end is the TX-done callback
+static int _rf_tx_on_air(void)
+{
     int16_t output_index = ringbufindex_peek_get(&output_ringbuf);
     if (output_index == -1) {
         return -1;
     }
-    struct output_packet *current_output = &output_array[output_index];
-    uint16_t data_len = current_output->data_len;
-
+    uint16_t data_len = output_array[output_index].data_len;
     unsigned int sleep_time = rf_airtime_us(data_len, rf_preamble_len + rf_sfd_len, rf_fcs_len); // tx duration
     // Do tx now and signal to do callback later after sleep
     phy_rf_tx_now();
@@ -1219,6 +1283,24 @@ static int _rf_execute_tx(){
     _rf_start_backup_timer(MAX_PACKET_SENDING_TIME);
 
     return 0;
+}
+
+static void _rf_tx_delay_timer_cb(int timer_id, uint16_t slots)
+{
+    rf_tx_turnaround = false;
+    if (driver_state != DRVSTATE_TX)
+        return;
+    if (_rf_tx_on_air() != 0) {
+        WARN("TX fail");
+        driver_state = rf_off_pending ? DRVSTATE_OFF : DRVSTATE_IDLE_WAITING_RX;
+        rf_off_pending = false;
+        rx_thread_blokcked = false;
+        set_shm_cca_state();
+        if (device_driver.phy_tx_done_cb)
+            device_driver.phy_tx_done_cb(rf_radio_driver_id, mac_tx_handle, PHY_LINK_TX_FAIL, 0, 0);
+        return;
+    }
+    set_shm_cca_state();
 }
 
 /**
@@ -1780,6 +1862,10 @@ void rf_driver_local_init(void)
     if (getenv("WSSIM_RADIO_OFF"))
         rf_off_state_enabled = strtol(getenv("WSSIM_RADIO_OFF"), NULL, 0) != 0;
     rf_phy_settings_init();
+    if (rf_tx_delay_us)
+        tx_delay_timer = eventOS_callback_timer_register(_rf_tx_delay_timer_cb);
+    if (rf_rx_delay_us)
+        rx_delay_timer = eventOS_callback_timer_register(_rf_rx_delay_timer_cb);
 
     driver_state = DRVSTATE_IDLE;
     set_shm_cca_state();

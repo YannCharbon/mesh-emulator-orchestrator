@@ -47,7 +47,9 @@
 #   WSSIM_PHY_*        the emulated PHY's data rate and overhead, for every
 #                      node (docs/POWER_MODEL.md §6.1): WSSIM_PHY_DATARATE,
 #                      _PREAMBLE, _SFD, _PHR, _FCS; WSSIM_PHY_LEGACY=1 for the
-#                      PHY before them (150 kbit/s, PSDU-only airtime)
+#                      PHY before them (150 kbit/s, PSDU-only airtime); WSSIM_PHY_TX_DELAY_US and
+#                      WSSIM_PHY_RX_DELAY_US the radio's RX/TX turnaround
+#                      (docs/MEDIUM.md §9.2, 0 by default)
 #   BR_ENV, NODE_ENV_<i> environment for the border router / node i only, e.g.
 #                      NODE_ENV_3="WSSIM_PHY_PREAMBLE=16"
 #   BR_OPTS, NODE_OPTS extra arguments for wsbrd-inproc / every wsnode-inproc

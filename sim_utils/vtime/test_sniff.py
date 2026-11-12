@@ -81,13 +81,23 @@ class Sniffer(Behaviour):
         return self.out, min(later) if later else NEVER
 
 
-def sniff_run(radios, links, opts=(), seed="1"):
+# The model's settings before the kit calibration (docs/MEDIUM.md §10.5):
+# the tests below check the mechanics with them (16-bit dwells of 320 us at
+# 50 kbit/s, the 16-bit SFD and no margin, no settling time, the BER curve over 16 bits);
+# test_sniff_kit_defaults checks the defaults.
+MODEL_OPTS = ["--sniff-dwell-bits=16", "--sniff-sfd-bits=16", "--sniff-margin-bits=0", "--sniff-settle-us=0",
+              "--sniff-curve=ber:16"]
+
+
+def sniff_run(radios, links, opts=(), seed="1", model=True):
     """Like test_conductor.medium_run(), with --sniff-log. Returns the
-    driver, the server output, the medium log and the sniff log (dicts)."""
+    driver, the server output, the medium log and the sniff log (dicts).
+    model: the settings of MODEL_OPTS first (opts may override them)."""
     slog = os.path.join(tc.ARGS.logdir, "sniff.log")
     if os.path.exists(slog):
         os.unlink(slog)
-    d, out, rows = tc.medium_run(radios, links, opts=[f"--sniff-log={slog}", *opts], seed=seed)
+    d, out, rows = tc.medium_run(radios, links, opts=[f"--sniff-log={slog}", *(MODEL_OPTS if model else []), *opts],
+                                 seed=seed)
     keys = ("t_req", "node", "id", "chan", "t0", "t1", "outcome", "t", "frame_id", "src", "rssi", "sinr", "locked")
     sniffs = []
     with open(slog) as f:
@@ -418,6 +428,22 @@ def test_sniff_many_frames():
 
 
 
+def test_sniff_kit_defaults():
+    """The defaults from the FG25 kits (docs/MEDIUM.md §10.5): settling 225
+    us, dwell 7 bits (140 us at 50 kbit/s), a margin of 22 bits before the 16-bit SFD (760 us at the SHR's end)
+    that no dwell may reach. 1 sends at 1000 (SHR to 2600, detectable to
+    1840). 2 sniffs at 1100: detects from 1325, at 1465. 4 sniffs at 1470:
+    its dwell ends at 1835, detected. 3 sniffs at 1480: its dwell would end
+    at 1845, after 1840: nothing, the result at its window's end (3480)."""
+    r = {1: Sniffer(1, {1000: [("tx", {})]}), 2: Sniffer(2, {1100: [("sniff", 0, 2000)]}),
+         3: Sniffer(3, {1480: [("sniff", 0, 2000)]}), 4: Sniffer(4, {1470: [("sniff", 0, 2000)]})}
+    d, out, rows, sn = sniff_run(r, [(1, 2, -60), (1, 3, -60), (1, 4, -60)], model=False)
+    check(results(r[2]) == [(1465, 1, 0, 1, 1465)], f"2: {r[2].results}")
+    check(results(r[4]) == [(1835, 1, 0, 1, 1835)], f"4: {r[4].results}")
+    check(results(r[3]) == [(3480, 0, 0, 0, 3480)], f"3: {r[3].results}")
+    check([(s["node"], s["t0"]) for s in sn if s["node"] == 2] == [(2, 1325)], f"log {sn}")
+
+
 def test_sniff_options():
     for args, msg in ((["--vtime=1", "--medium=legacy", "--sniff-dwell-bits=8"], "need the central medium"),
                       (["--vtime=1", "--sniff-detect=x"], "preamble or frame"),
@@ -427,7 +453,9 @@ def test_sniff_options():
                       (["--vtime=1", "--sniff-dwell-bits=2.5"], "whole number"),
                       (["--vtime=1", "--sniff-curve=nan:0.5"], "bad SINR"),
                       (["--vtime=1", "--sniff-settle-us=-1"], "--sniff-settle-us"),
-                      (["--vtime=1", "--sniff-settle-us=2.5"], "whole number")):
+                      (["--vtime=1", "--sniff-settle-us=2.5"], "whole number"),
+                      (["--vtime=1", "--sniff-margin-bits=2.5"], "whole number"),
+                      (["--vtime=1", "--medium=legacy", "--sniff-margin-bits=8"], "need the central medium")):
         srv = Server(args)
         check(srv.wait() != 0 and msg in srv.output(), f"{args} accepted, or no \"{msg}\"")
 

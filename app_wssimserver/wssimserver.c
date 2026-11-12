@@ -374,13 +374,16 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "                            frame_id outcome rx_dbm sinr_min_db)\n");
     fprintf(stream, "  Preamble sniffing (central medium, docs/MEDIUM.md §10):\n");
     fprintf(stream, "  --sniff-detect=preamble|frame  what part of a frame a sniff can detect (preamble)\n");
-    fprintf(stream, "  --sniff-dwell-bits=N      bits of a frame a sniff must observe for one detection try (16)\n");
+    fprintf(stream, "  --sniff-dwell-bits=N      bits of a frame a sniff must observe for one detection try (7)\n");
     fprintf(stream, "  --sniff-threshold=DBM|off lowest received power a sniff detects (off)\n");
     fprintf(stream, "  --sniff-curve=ber:N|SINR:P,...  detection probability of one try against its lowest\n");
-    fprintf(stream, "                            SINR: the medium's bit error rate over N bits, or a table (ber:16)\n");
+    fprintf(stream, "                            SINR: the medium's bit error rate over N bits, or a table\n");
+    fprintf(stream, "                            (-2.8:0,0.6:0.002,3.9:0.65,5.4:1)\n");
     fprintf(stream, "  --sniff-sfd-bits=N        bits of SFD at the end of each SHR (16)\n");
+    fprintf(stream, "  --sniff-margin-bits=N     preamble bits a detection must leave before the SFD for the\n");
+    fprintf(stream, "                            frame to be received (22)\n");
     fprintf(stream, "  --sniff-settle-us=N       receiver settling time: a sniff detects from N us after its\n");
-    fprintf(stream, "                            receiver is on (0)\n");
+    fprintf(stream, "                            receiver is on (225)\n");
     fprintf(stream, "  --sniff-log=FILE          one line per sniff (t_req node id chan t0 t1 outcome t frame_id\n");
     fprintf(stream, "                            src rssi_dbm sinr_db locked)\n");
     prop_print_help(stream);
@@ -425,6 +428,7 @@ enum {
     OPT_SNIFF_CURVE,
     OPT_SNIFF_SFD,
     OPT_SNIFF_SETTLE,
+    OPT_SNIFF_MARGIN,
     OPT_SNIFF_LOG,
     OPT_CHAN,                   // the options of sim_channel.c, by name
     OPT_INTF,                   // the options of sim_interf.c (intf_option_names)
@@ -612,6 +616,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "sniff-curve", required_argument, 0, OPT_SNIFF_CURVE },
         { "sniff-sfd-bits", required_argument, 0, OPT_SNIFF_SFD },
         { "sniff-settle-us", required_argument, 0, OPT_SNIFF_SETTLE },
+        { "sniff-margin-bits", required_argument, 0, OPT_SNIFF_MARGIN },
         { "sniff-log", required_argument, 0, OPT_SNIFF_LOG },
         // Interference and spectrum (docs/MEDIUM.md §13): sim_interf.c
         { "interferer", required_argument, 0, OPT_INTF },
@@ -841,6 +846,9 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
                 break;
             case OPT_INTF:
                 intf_option(all_opts[longindex].name, optarg);
+                break;
+            case OPT_SNIFF_MARGIN:
+                med_set_sniff_margin(optarg);
                 break;
             case OPT_SNIFF_LOG:
                 med_set_sniff_log(optarg);

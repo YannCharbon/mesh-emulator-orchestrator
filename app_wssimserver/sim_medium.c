@@ -290,6 +290,7 @@ static struct {
     int curve_n;
     float curve_x[SN_CURVE_MAX], curve_p[SN_CURVE_MAX];
     unsigned int sfd_bits;
+    unsigned int margin_bits;   // --sniff-margin-bits: preamble left after a detection
     uint32_t settle_us;         // --sniff-settle-us: receiver on, not yet detecting
     const char *log_path;
     FILE *log;
@@ -310,9 +311,18 @@ static struct {
     uint64_t det_energy, det_false, det_ext, det_adj;
 } sn = {
     .energy_us = 107,
-    .dwell_bits = 16,
-    .curve_ber_bits = 16,
+    // FG25 kits, EU mode 3 (docs/MEDIUM.md §10.5): detection 7 bits after
+    // the receiver can detect, 225 us after it is on; the frame is received
+    // only if the detection leaves 22 preamble bits before the 16-bit SFD
+    .dwell_bits = 7,
+    // Detection of one try against the SIR of a co-channel FSK interferer
+    .curve_ber_bits = 0,
+    .curve_n = 4,
+    .curve_x = { -2.8, 0.6, 3.9, 5.4 },
+    .curve_p = { 0, 0.002, 0.65, 1 },
     .sfd_bits = 16,
+    .margin_bits = 22,
+    .settle_us = 225,
 };
 
 /* ---- options */
@@ -776,6 +786,13 @@ void med_set_sniff_sfd(const char *arg)
     FATAL_ON(sn.sfd_bits != strtof(arg, NULL), 1, "--sniff-sfd-bits: expected a whole number: %s", arg);
 }
 
+void med_set_sniff_margin(const char *arg)
+{
+    med.given = med.tuning = true;
+    sn.margin_bits = med_number("--sniff-margin-bits", arg, 0, 100000);
+    FATAL_ON(sn.margin_bits != strtof(arg, NULL), 1, "--sniff-margin-bits: expected a whole number: %s", arg);
+}
+
 void med_set_sniff_settle(const char *arg)
 {
     float v = med_number("--sniff-settle-us", arg, 0, 1000000);
@@ -1210,7 +1227,7 @@ struct med_frame *med_frame_start_lp(int src, const struct sim_frame_hdr *hdr, u
     struct med_frame *f;
     struct sim_frame_hdr *copy;
     uint64_t bytes = (uint64_t)hdr->shr_len + hdr->phr_len + hdr->len + hdr->fcs_len;
-    uint64_t sfd_us;
+    uint64_t sfd_us, det_us;
 
     if (!hdr->rate_bps) {
         WARN("node %d: frame without a data rate: not on the medium", src);
@@ -1228,10 +1245,12 @@ struct med_frame *med_frame_start_lp(int src, const struct sim_frame_hdr *hdr, u
     f->t_end = f->t_bits + bytes * 8 * 1000000 / hdr->rate_bps;
     f->shr_us = preamble_us + (uint64_t)hdr->shr_len * 8 * 1000000 / hdr->rate_bps;
     sfd_us = (uint64_t)sn.sfd_bits * 1000000 / hdr->rate_bps;
+    // A detection must leave the margin and the SFD (§10.2); capture uses the SFD alone
+    det_us = (uint64_t)(sn.sfd_bits + sn.margin_bits) * 1000000 / hdr->rate_bps;
     f->phy = med_phy_of(hdr->rate_bps);
     f->own_shr_us = f->shr_us - preamble_us;
     f->own_pre_us = f->own_shr_us > sfd_us ? f->own_shr_us - sfd_us : 0;
-    f->pre_end = f->shr_us > sfd_us ? now + f->shr_us - sfd_us : now;
+    f->pre_end = f->shr_us > det_us ? now + f->shr_us - det_us : now;
     f->bits = 8 * ((unsigned int)hdr->phr_len + hdr->len + hdr->fcs_len);
     f->rate_bps = hdr->rate_bps;
     // The message as a receiver locked by a sniff gets it (§10)
@@ -1890,9 +1909,10 @@ uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, ui
 
     if (!sn.next_serial)
         INFO("medium: sniffing: %s detection, dwell %u bits, threshold %s%.1f dBm, curve %s%d, SFD %u bits, "
-             "settling %u us", sn.frame_mode ? "frame" : "preamble", sn.dwell_bits, sn.has_threshold ? "" : "off ",
+             "margin %u bits, settling %u us", sn.frame_mode ? "frame" : "preamble", sn.dwell_bits, sn.has_threshold ? "" : "off ",
              sn.has_threshold ? sn.threshold : 0.0, sn.curve_ber_bits ? "ber:" : "table of ",
-             sn.curve_ber_bits ? sn.curve_ber_bits : sn.curve_n, sn.sfd_bits, sn.settle_us);
+             sn.curve_ber_bits ? sn.curve_ber_bits : sn.curve_n, sn.sfd_bits, sn.margin_bits,
+             sn.settle_us);
     if (!x) {
         x = sn.s[node] = calloc(1, sizeof(*x));
         FATAL_ON(!x, 1, "calloc: %m");

@@ -100,6 +100,7 @@ void med_set_sniff_dwell(const char *arg);      // --sniff-dwell-bits=N
 void med_set_sniff_threshold(const char *arg);  // --sniff-threshold=DBM|off
 void med_set_sniff_curve(const char *arg);      // --sniff-curve=ber:N|SINR:P,...
 void med_set_sniff_sfd(const char *arg);        // --sniff-sfd-bits=N
+void med_set_sniff_margin(const char *arg);     // --sniff-margin-bits=N
 void med_set_sniff_settle(const char *arg);     // --sniff-settle-us=N
 void med_set_sniff_log(const char *path);       // --sniff-log=FILE
 
