@@ -22,6 +22,7 @@
 #include "sim_channel.h"
 #include "sim_interf.h"
 #include "sim_medium.h"
+#include "sim_describe.h"
 #include "sim_propagation.h"
 
 #define MAX_NODES SIM_MAX_NODES
@@ -317,6 +318,8 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --group-file=FILE         -g options from FILE, one per line, with or without \"-g\"\n");
     fprintf(stream, "                            (blank lines and # comments skipped): for topologies too\n");
     fprintf(stream, "                            large for the command line\n");
+    fprintf(stream, "  --describe=json           print every option (type, default, preset values, help) as\n");
+    fprintf(stream, "                            JSON and exit (docs/MEDIUM.md §11.12)\n");
     fprintf(stream, "  -v, --verbose             also log each connection's fd and the fd limit\n");
     fprintf(stream, "  -l, --dump                print the topology and the RSSI map\n");
     fprintf(stream, "  -f, --fpath[=FILE]        with -l, also write the edges to FILE (/tmp/graph.txt)\n");
@@ -434,6 +437,7 @@ enum {
     OPT_MEDIUM_ADJACENT_DB,
     OPT_MEDIUM_LOG,
     OPT_MEDIUM_PRESET,
+    OPT_DESCRIBE,
     OPT_GROUP_FILE,
     OPT_SNIFF_DETECT,
     OPT_SNIFF_DWELL,
@@ -652,6 +656,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "medium-adjacent-db", required_argument, 0, OPT_MEDIUM_ADJACENT_DB },
         { "medium-log", required_argument, 0, OPT_MEDIUM_LOG },
         { "medium-preset", required_argument, 0, OPT_MEDIUM_PRESET },
+        { "describe", required_argument, 0, OPT_DESCRIBE },
         { "group-file", required_argument, 0, OPT_GROUP_FILE },
         { "sniff-detect", required_argument, 0, OPT_SNIFF_DETECT },
         { "sniff-dwell-bits", required_argument, 0, OPT_SNIFF_DWELL },
@@ -756,6 +761,15 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         switch (opt) {
             case OPT_MEDIUM_PRESET:
                 break;          // the first pass applied it
+            case OPT_DESCRIBE: {
+                struct describe_preset dp[ARRAY_SIZE(med_presets)];
+
+                FATAL_ON(strcmp(optarg, "json"), 1, "--describe: expected json: %s", optarg);
+                for (size_t k = 0; k < ARRAY_SIZE(med_presets); k++)
+                    dp[k] = (struct describe_preset){ med_presets[k].name, med_presets[k].opts };
+                describe_json(stdout, all_opts, dp, ARRAY_SIZE(med_presets), MED_PRESET_DEFAULT);
+                exit(0);
+            }
             case OPT_CHAN:
                 chan_set_option(all_opts[longindex].name, optarg);
                 break;

@@ -356,7 +356,7 @@ The FG25 datasheet (Rev. 1.2, Tables 4.23 and 4.24) gives an RSSI resolution of 
 ### 11.7 Outputs
 
 - At the start, the server's log gives the model and its parameters, the shadowing, and the graph among the positioned nodes: the pairs in it, how many of them come from the model and how many from `-g` options alone (below the cutoff), the degree (mean, minimum, maximum; both kinds of pairs), the pairs at −100 dBm or more, the asymmetric pairs, the directions set by `-g`, and the time the computation took.
-- `--prop-dump=FILE`: the links at start-up, one line per direction of every pair in the graph among the positioned nodes: `rx tx dist_m floors walls pl_db shadow_db gains_db mean_dbm heard given`, `mean_dbm` at `--prop-tx-dbm`, `heard` 1 if the model puts the pair in the graph (0: a `-g` option alone does), `given` 1 if a `-g` value sets that direction (the medium then uses the `-g` value, not `mean_dbm`). Later changes by `--vtime-link` are not in it. The file grows with the square of the number of nodes: about 0.5 GB for the 4000-node building of §11.3. `--prop-dump-node=ID` keeps only the lines of one node.
+- `--prop-dump=FILE`: the links at start-up, one line per direction of every pair in the graph among the positioned nodes: `rx tx dist_m floors walls pl_db shadow_db gains_db mean_dbm heard given`, `mean_dbm` at `--prop-tx-dbm`, `heard` 1 if the model puts the pair in the graph (0: a `-g` option alone does), `given` 1 if a `-g` value sets that direction (the medium then uses the `-g` value, not `mean_dbm`). Later changes by `--vtime-link` are not in it. The file grows with the square of the number of nodes: about 0.5 GB for the 4000-node building of §11.3. `--prop-dump-node=ID` keeps only the lines of one node. With a floor plan, four more columns give the walls crossed and the wall and floor terms (§11.11).
 - `-l`/`--dump` prints the full map as before; for large buildings, `--prop-dump` is more practical.
 
 ### 11.8 Options
@@ -378,13 +378,16 @@ The FG25 datasheet (Rev. 1.2, Tables 4.23 and 4.24) gives an RSSI resolution of 
 | `--prop-cutoff=DBM`, `--prop-margin=DB` | −125, 10 | hearing graph (§11.5) |
 | `--prop-dump=FILE` | none | the computed links at start-up (§11.7) |
 | `--prop-dump-node=ID` | none | with `--prop-dump`, only the links of this node |
+| `--prop-floorplan=FILE` | none | walls and slabs with materials (§11.11) |
+| `--prop-floor-model=cost231\|slabs\|table` | `cost231` | with a floor plan, the floor term (§11.11) |
+| `--prop-floor-b=B` | 0.46 | `b` of the `cost231` floor term |
 | `--rssi-offset=DB`, `--rssi-noise=DB` | 0 (`realistic` preset: offset 0.9), 0 | reported RSSI error (§11.6), central medium only |
 
-The `--prop-*` options need `--positions`.
+The `--prop-*` options need `--positions`; `--prop-floor-model` and `--prop-floor-b` need `--prop-floorplan`. `wssimserver --describe=json` lists every option (§11.12).
 
 ### 11.9 Checks
 
-`sim_utils/vtime/test_propagation.py <wssimserver>` (fake nodes and `--prop-dump`): option errors and malformed positions (a non-integer ID, non-finite or out-of-range values, extra columns), lines of any length; each model against hand computation (floors from the column and from `Z`, the floor table and its extrapolation, the wall grid, the per-metre walls, the minimum distance, the gains, the nominal TX power); shadowing reproducible by seed and different with another seed, its standard deviation over 44 850 pairs, reciprocal by default, the per-direction and per-node parts and their correlation; the graph cutoff and margin, in the dump and in the medium (no lock and no log line beyond the cutoff); a `-g` link without value below the cutoff, with the model's level; the frame's TX power applied to a modelled link, a `-g` value overriding it with `--medium-tx-ref`, `--vtime-link` replacing it (frames sent below the nominal TX power, so that the model's value would differ) and adding a positioned pair below the cutoff to the graph; `--prop-dump-node`; the RSSI map at the nominal TX power with `--medium=legacy`; the `gen_building.py` model reproduced link for link; a 4000-node building built in under a second (0.53–0.89 s); the reported RSSI (offset fixed per receiver, noise per frame with its standard deviation, the same value in `"xx"` and `"xv"`, the true power in the medium log, reproducible by seed; with `--positions`, the model's level plus the error; the same value in a detection's `"xd"` and its frame's `"xx"`).
+`sim_utils/vtime/test_propagation.py <wssimserver>` (fake nodes and `--prop-dump`; the floor plan has its own checks, §11.11): option errors and malformed positions (a non-integer ID, non-finite or out-of-range values, extra columns), lines of any length; each model against hand computation (floors from the column and from `Z`, the floor table and its extrapolation, the wall grid, the per-metre walls, the minimum distance, the gains, the nominal TX power); shadowing reproducible by seed and different with another seed, its standard deviation over 44 850 pairs, reciprocal by default, the per-direction and per-node parts and their correlation; the graph cutoff and margin, in the dump and in the medium (no lock and no log line beyond the cutoff); a `-g` link without value below the cutoff, with the model's level; the frame's TX power applied to a modelled link, a `-g` value overriding it with `--medium-tx-ref`, `--vtime-link` replacing it (frames sent below the nominal TX power, so that the model's value would differ) and adding a positioned pair below the cutoff to the graph; `--prop-dump-node`; the RSSI map at the nominal TX power with `--medium=legacy`; the `gen_building.py` model reproduced link for link; a 4000-node building built in under a second (0.53–0.89 s); the reported RSSI (offset fixed per receiver, noise per frame with its standard deviation, the same value in `"xx"` and `"xv"`, the true power in the medium log, reproducible by seed; with `--positions`, the model's level plus the error; the same value in a detection's `"xd"` and its frame's `"xx"`).
 
 Without the new options, the outputs are unchanged: `nonreg_dag_simple.sh` against the permanent reference runs, `medium_gate_star.sh` (seed 1, hidden, central) with node logs and medium log identical to a build without the model, `test_conductor.py`, `test_sniff.py`, `radio_if/test_ref_client.py` and `lfn_suite.sh quick` pass.
 
@@ -405,12 +408,149 @@ With the default model, every node of this building hears every other one, and m
 
 ### 11.10 Limits
 
-- **Walls are not geometric.** The model knows no floor plan: the walls are an average (the exponent, a loss per metre) or a regular grid. Paths through windows, stairwells or around corners, and corridor guiding, are not modelled.
+- **Walls are not geometric without a floor plan.** Without `--prop-floorplan` (§11.11), the walls are an average (the exponent, a loss per metre) or a regular grid. Paths through windows, stairwells or around corners, and corridor guiding, are not modelled, with or without a floor plan.
 - **One site-general model per run.** Every pair uses the same parameters; a building with mixed construction needs the parameters of its dominant part, or `-g` values for the pairs that differ.
 - **Static mean.** The values are fixed for the run (apart from `--vtime-link`); time variation is the business of a separate layer.
 - **Nominal TX power for the graph and for the legacy medium** (§11.2, §11.5).
 - **Memory.** The model uses the server's existing RSSI map (4096 × 4096 values in shared memory) and a bitmap of 2 MB; nothing grows with the number of frames. Runs with very dense graphs (thousands of neighbours per node) cost more per frame in the medium, in proportion to the number of receivers: the 4000-node building of §11.3 runs 3 to 4 times slower than the same building with the `gen_building.py` links (§14.4).
 - **Reported RSSI:** a normal error only; no quantisation to the 0.25 dB resolution or to the integer dBm the MAC stores, no saturation outside −100 to −30 dBm, and no error on the CCA energy.
+
+### 11.11 Floor plan
+
+`--prop-floorplan=FILE` adds the walls and slabs of a known building, each with a material, to the model of §11.3: every wall that the straight path between two nodes crosses, and every slab between their floors, adds its material's loss. The web application (MTS controller) writes this file from a drawn building. The positions file (§11.1) still places the nodes; the option needs `--positions`.
+
+#### File format
+
+One directive per line, words separated by spaces or tabs, metres and dB. A `#` starts a comment anywhere on a line. Lines may have any length, and the directives may come in any order (a material may be defined after a wall that uses it).
+
+| Directive | Meaning |
+| --- | --- |
+| `floorheight H` | metres between floors (0.1 to 1000); without it, `--prop-floor-height` (3.5). It also sets the floor of a node without a `FLOOR` column (§11.1). At most once |
+| `material NAME LOSS_DB [COLOR]` | a material: its loss per crossing (0 to 200 dB) at the run's frequency. `COLOR` (`#rrggbb`) is for the web application; it starts with `#`, so the server reads it as a comment. A `material` line with the name of a built-in material replaces its value. A name defined twice in the file is an error |
+| `wall FLOOR X1 Y1 X2 Y2 MATERIAL` | a vertical wall segment on storey `FLOOR`, the full height of the storey |
+| `slab FLOOR MATERIAL` | the slab between `FLOOR` and `FLOOR + 1`, over the whole floor. A floor without a `slab` line has `concrete-slab`. At most one per floor |
+| `outline FLOOR X1 Y1 X2 Y2 ... Xn Yn [MATERIAL]` | the outer contour of the floor (a closed polygon, at least 3 points). With `MATERIAL`, each of its edges is an exterior wall of that material; without it, the outline is for the web application only and adds nothing. Several outlines per floor are allowed |
+
+`FLOOR` is an integer from −10 000 to 10 000 (negative floors are basements); coordinates are finite numbers within ±10⁶ m; a material name has at most 63 characters, letters, digits and `_ - . +`, and starts with a letter or `_`. A wall or an outline edge shorter than 1 mm, an unknown directive or material, or a wrong number of words is an error that names the file and the line.
+
+```
+floorheight 3.2
+material drywall-double 2.6 #d0c8b0
+outline 0 0 0 40 0 40 20 0 20 brick-240
+wall 0 10 0 10 20 concrete
+wall 0 10 8 22 8 drywall-double
+wall 0 22 8 22 9 wood          # a door in the wall above
+slab 0 reinforced-concrete
+```
+
+#### Geometry
+
+- A node's storey is its `FLOOR` column, or `Z / H` rounded (§11.1). Its height within the storey is `u = (Z − F·H) / H`, brought into [0.02, 0.98]; a `Z` outside its storey (a height given relative to the floor, for example) is placed at the nearest end. The 3-D distance of §11.3 still uses the given coordinates.
+- Along the straight path from `a` to `b`, the storey coordinate `s = F + u` changes linearly. A wall of storey `F` is counted when the path crosses it in the horizontal plane at a point where `floor(s) = F`: a path between floors meets the walls of each storey only on the part of its length that lies on that storey.
+- The path crosses `|F_a − F_b|` slabs, those of the floors from the lower one up to the floor below the higher one.
+- A crossing inside both segments counts 1. A contact at an end of the wall, or at an end of the path (a node standing on a wall), counts 1/2, and 1/4 at both; two walls that meet on the path (a T or a corner) therefore count once in all. A wall along the path's line, a parallel wall, and any wall for a vertical path (no horizontal extent) count 0. A point within 1 µm of a line is on it.
+- External interferers with `pos=` (§13.1) use the same geometry, their storey from `z` as for a node without `FLOOR`.
+
+#### Model
+
+The COST 231 multi-wall model (COST 231 Final Report, chapter 4, §4.7.2, Eq. 4.7.2):
+
+    L = L_FS + L_c + Σ k_wi · L_wi + k_f^((k_f + 2)/(k_f + 1) − b) · L_f
+
+with `L_FS` the free-space loss, `L_c` a constant (0 here), `k_wi` the number of walls of type `i` crossed, `L_wi` their loss, `k_f` the number of floors crossed, `L_f` the loss between adjacent floors and `b` an empirical parameter. In the emulator:
+
+    PL = PL0 + 10 · n · log10(d) + w · d_h + L_wall · walls_grid + Σ c_j · L_j + L_floor
+
+- Without `--prop-model`, a floor plan sets free space: `PL0` the free-space loss at 1 m (31.7 dB at 915 MHz) and `n` = 2; the server prints the model as `multi-wall (floor plan)`. `--prop-pl0` and `--prop-exp` change them. An explicit `--prop-model` keeps that model's values and adds the floor plan's walls; the `indoor` exponent already includes walls, so it counts them twice.
+- `Σ c_j · L_j`: each wall crossed, with its weight `c_j` (1, 1/2 or 1/4 above) and its material's loss.
+- `L_floor`, `--prop-floor-model`:
+  - `cost231` (default): `L_f · k^((k + 2)/(k + 1) − b)` with `k` the slabs crossed, `L_f` the mean loss of those slabs, and `b` = `--prop-floor-b` (0.46, COST 231 Table 4.7.2). With `concrete-slab` (15 dB): 15.0, 27.5, 35.7, 41.8, 46.8 dB for 1 to 5 floors.
+  - `slabs`: the sum of the losses of the slabs crossed (15, 30, 45 dB ...).
+  - `table`: `--prop-floor-db` as in §11.3, by number of floors.
+  The default is `cost231` because measured losses grow more slowly than one slab loss per floor: Seidel and Rappaport measured 12.9, 18.7, 24.4 and 27.0 dB for 1 to 4 floors at 914 MHz in one office building, and 16.2, 27.5 and 31.6 dB for 1 to 3 in another (signals also go around the slabs, through stairwells and windows).
+- `--prop-wall-db-per-m` and `--prop-walls` still add their terms when given; static shadowing (§11.4), the hearing graph (§11.5) and everything else in this section are unchanged.
+
+#### Built-in materials
+
+Losses per crossing at normal incidence, one value for both 868 and 915 MHz (the two differ by less than 0.3 dB for each row). `--describe=json` (§11.12) lists them with a colour for the web application.
+
+| Name | Construction assumed | Loss (dB) | Status | Basis |
+| --- | --- | --- | --- | --- |
+| `plasterboard` | stud wall, 12.5 mm board / 75 mm air / 12.5 mm board | 2.0 | measured | Plasterboard wall at 900 MHz, 2.1 dB (Törnevik et al. 1993, quoted in COST 231 §4.7.2); COST 231's light wall (3.4 dB at 1800 MHz) less the 1.5 dB difference it reports at 900 MHz gives 1.9 dB |
+| `partition` | light office partition, cloth-covered | 1.4 | measured | Soft partition, 1.39 dB at 914 MHz (Seidel and Rappaport 1992) |
+| `wood` | 40 mm solid door | 2.8 | measured | 38 mm dry lumber, 2.69 / 2.77 dB (NISTIR 6055) |
+| `glass` | single 6 mm pane | 0.7 | measured | 6 mm glass, 0.65 / 0.70 dB (NISTIR 6055) |
+| `double-glazing` | 4 mm / 16 mm air / 4 mm | 0.5 | computed | ITU-R P.2040-4, three layers: 0.49 / 0.52 dB |
+| `low-e-glazing` | metallised (low-emissivity) double glazing | 20 | assumed | A conductive coating of 15–20 Ω/sq gives 20–23 dB (thin-sheet formula); the frame's leakage limits the real loss. COST 231 §4.6.2: metallised glass "considerably greater than 10 dB" |
+| `brick` | 115 mm (half-brick) | 3.8 | measured | Interpolated between 89 mm (3.17 / 3.35 dB) and 178 mm (4.99 / 5.17 dB) of NISTIR 6055; P.2040-4 gives 3.53 / 3.71 dB |
+| `brick-240` | 240 mm (full brick) | 6.0 | measured | Interpolated between 178 mm and 267 mm (6.18 / 6.44 dB) of NISTIR 6055; P.2040-4 gives 5.55 / 5.35 dB |
+| `concrete-block` | 190–203 mm hollow block | 11.3 | measured | 203 mm hollow masonry block, 11.25 / 11.38 dB (NISTIR 6055) |
+| `concrete` | 150 mm plain interior wall | 10 | assumed | The sources disagree: P.2040-4 gives 5.38 / 5.74 dB; NISTIR 6055 measured 10.3–13.7 dB at 102 mm and 21.4–27.8 dB at 203 mm on freshly cast specimens; COST 231 §4.6.2 gives 7 dB for concrete internal walls and 10–20 dB for concrete walls without windows. 10 dB is a value between these |
+| `reinforced-concrete` | 200 mm load-bearing wall with rebar | 15 | assumed | NISTIR 6055, 203 mm: rebar adds 0–3 dB to plain concrete at 0.9 GHz; within COST 231's 10–20 dB for concrete walls |
+| `concrete-slab` | 200 mm floor slab (one floor) | 15 | measured | COST 231 §4.7.2: `L_f` = 18.3 dB at 1800 MHz and a floor loss 3.5 dB lower at 900 MHz (14.8 dB); Seidel and Rappaport: 12.9 and 16.2 dB for one floor at 914 MHz |
+| `metal` | metal-clad wall, metal door or floor | 26 | assumed | The loss through a metal sheet is above 100 dB; leakage through gaps and edges sets the real value. 26 dB is the floor isolation measured with metal floors at 815 MHz (Arnold, Murray and Cox 1989, quoted by Seidel 1993) |
+
+Status: *measured* from a published measurement at 815–915 MHz; *computed* with ITU-R P.2040-4 (Table 3: `ε' = a`, `σ = c·f^d`, f in GHz; exact transmission through the layers at normal incidence, with multiple reflections); *assumed* where the sources disagree or none applies. The values of COST 231 and Seidel and Rappaport are model coefficients fitted on whole buildings (they include paths around the wall), not the loss of a sample; for light walls they are above the physical loss (P.2040-4 computes 0.3–0.4 dB for a plasterboard stud wall), for heavy walls below it. The defaults keep this mix on purpose, for a model in which the walls are the only obstacles. P.2040-4's rows for concrete, brick and plasterboard start at 1 GHz, so their values at 0.9 GHz are extrapolated; thin layers also make the computed loss non-monotonic in thickness (concrete 50 / 75 / 100 mm: 3.3 / 2.8 / 4.8 dB at 868 MHz), so a thickness change of a few centimetres moves it by 1–2 dB. A building's own measurements, entered as `material` lines, should replace these values.
+
+Sources:
+
+- ITU-R P.2040-4 (09/2025), Table 3: https://www.itu.int/dms_pubrec/itu-r/rec/p/R-REC-P.2040-4-202509-I!!PDF-E.pdf
+- COST 231 Final Report (Damosso, ed., 1999), chapter 4 (Cichon, Kürner), §4.6.2, §4.7.2, Tables 4.7.1 and 4.7.2: https://www.winlab.rutgers.edu/~andrej/research/docs/cost231/ch4.pdf
+- W. C. Stone, "Electromagnetic Signal Attenuation in Construction Materials", NISTIR 6055, 1997 (its 0.5–2 GHz regressions, evaluated at 868 and 915 MHz): https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nistir6055.pdf
+- S. Y. Seidel, T. S. Rappaport, "914 MHz path loss prediction models for indoor wireless communications in multifloored buildings", IEEE Trans. Antennas Propag. 40(2), 1992; the figures as given in S. Y. Seidel, "Site-Specific Propagation Prediction for Wireless In-Building Personal Communication System Design", PhD dissertation, Virginia Tech, 1993 (Table 3.6-3, §3.6.5): https://vtechworks.lib.vt.edu/bitstream/10919/38472/1/LD5655.V856_1993.S453.pdf
+- ITU-R P.1238-13 (09/2025), Table 5 (floor penetration at 0.9 GHz, office: 9, 19, 24 dB), for comparison: https://www.itu.int/dms_pubrec/itu-r/rec/p/R-REC-P.1238-13-202509-I!!PDF-E.pdf
+
+#### Outputs
+
+The server's log gives the floor plan (walls, storeys, slabs, outlines, materials, floor height) and the floor term. With a floor plan, each `--prop-dump` line has four more columns: `wall_n wall_db floor_db crossed`. `wall_n` is the weighted number of walls crossed, `wall_db` and `floor_db` the wall and floor terms (both included in `pl_db`), and `crossed` the walls crossed, by their line number in the floor-plan file (`L.K` for edge `K` of the outline on line `L`, `:W` after a weight other than 1, `-` for none). The `walls` column counts the walls met, the wall grid's included. These columns let the web application show why a link has its level.
+
+#### Computation and its cost
+
+The walls of each storey are put in a uniform grid of about one wall per cell (at most 1024 cells per side); a wall is listed in every cell its bounding box, widened by the tolerance, meets. For each pair, the path is cut by storey, and on each storey only the walls listed in the cells its part passes through are tested, each once. The crossings are summed in the order of the walls, so the result is the same as testing every wall (`WSSIM_FLOORPLAN_BRUTE=1` does that, for the tests). Times of the whole start-up computation (no dump, one core):
+
+| Building | Without floor plan | With floor plan |
+| --- | --- | --- |
+| 1000 nodes, 10 storeys of 100 m × 50 m, 1750 walls | 0.04 s | 0.33 s |
+| 4000 nodes, 20 storeys, 3500 walls | 0.55 s | 7.1 s |
+
+The memory is that of the walls and the grids (well under 1 MB for these buildings). Without `--prop-floorplan`, the dump and the log are byte-identical to those of the build before the floor plan (checked on a 1000-node building with a wall grid and every shadowing term).
+
+#### Checks
+
+`sim_utils/vtime/test_floorplan.py <wssimserver>` (fake nodes and `--prop-dump`, about 10 s): `--describe=json` (below); parser errors (unknown directive, word counts, non-integer or out-of-range floors, non-finite or out-of-range coordinates, zero-length walls, unknown materials, a material, a slab or the floor height given twice, bad names and losses, outlines of fewer than 3 points), and what is accepted (a colour, a material defined after its use, a built-in overridden, long lines, an outline without material); geometry (a crossing, a contact at a wall's end and at the path's end, a T junction on the path, parallel and collinear walls, a vertical path, walls of another storey); a path over three storeys meeting one wall per storey only where it is on that storey; heights outside the storey; the losses against hand computation (free space, walls of several materials, slabs per floor including a basement, the `cost231` default and another `b`, `slabs`, `table`, an explicit model, the wall grid on top, the floor height from the file); an interferer's `pos=` behind walls and a slab (CCA energy against the formula); the grid against every wall in random and in grid-aligned buildings (6422 of 14 280 directions with a contact at an end), determinism, shadowing on top; the time for 1000 and 4000 nodes. It is in the LFN suite as `floorplan`.
+
+#### Limits
+
+- **Normal incidence.** A wall's loss does not depend on the angle of the path; real losses grow at grazing angles (COST 231 §4.7.4 caps them at twice the normal-incidence value in ray models).
+- **Straight path only.** No reflection, diffraction around wall ends, corridor guiding or paths through openings: a door or a window is a wall segment of its own material in the wall's gap.
+- **Walls are full storey height and slabs cover the whole floor.** Atriums, stairwells and partial-height partitions are not modelled; an outline does not limit the slab.
+- **One floor height** for the building.
+- **Material values** are for typical constructions; `concrete`, `reinforced-concrete`, `metal` and `low-e-glazing` are assumptions (above), and a measurement in the building should replace them.
+- **Start-up time** grows with the number of pairs times the walls along each path: about 7 s for 4000 nodes and 3500 walls.
+
+### 11.12 Description of the options
+
+`wssimserver --describe=json` prints every command-line option as JSON and exits, for programs that build command lines (the web application's emulator settings):
+
+```
+{
+  "program": "wssimserver",
+  "schema": 1,
+  "presets": [{"name": "calibrated", "default": true, "options": ["--medium-rx-model=layered", ...]}, ...],
+  "materials": [{"name": "plasterboard", "loss_db": 2, "color": "#d9d4c7", "basis": "measured: ..."}, ...],
+  "options": [
+    {"name": "prop-floor-model", "group": "propagation", "arg": "MODEL", "type": "enum",
+     "values": ["cost231", "slabs", "table"], "default": "cost231", "presets": {}, "repeatable": false,
+     "needs": "prop-floorplan", "section": "MEDIUM.md §11.11", "help": "..."},
+    ...
+  ]
+}
+```
+
+- `name`: the long option without `--`; `group`: `server`, `vtime`, `power`, `medium`, `sniff`, `propagation`, `variation` or `interference`; `arg`: the argument's syntax (`null` for a flag); `type`: `flag`, `int`, `number`, `enum` (with `values`), `string`, `file`, `spec` (a structured value, see `arg` and the section) or `list`; `default`: the built-in default as text (`null`: none; "per model" when the model sets it); `presets`: the value each medium preset gives the option (§14), taken from the preset table itself; `repeatable`; `needs`: another option it requires; `section`: where it is documented; `help`: one line.
+- `presets` lists each preset with the options it adds; `materials` the built-in materials of §11.11.
+
+The descriptions are a maintained table (`app_wssimserver/sim_describe.c`). Before printing, the server checks it against the parser's own option table both ways (every option parsed has a description and every description is an option parsed) and against the options the presets set, and exits with an error otherwise, so a new option cannot be left out. `test_floorplan.py` also checks that every option in `--help` is described and that the preset values match the preset table.
 
 ## 12. Link variation and the layered loss model
 
@@ -775,7 +915,7 @@ Tests that compare logs or encode the formulas of one medium model pin `basic`; 
 | Test | Preset | Why |
 | --- | --- | --- |
 | `nonreg_dag_simple.sh` | none (`--medium=legacy`) | permanent reference runs; 10 of 10 seeds identical |
-| `test_conductor.py`, `test_sniff.py`, `test_interf.py`, `test_propagation.py`, `test_channel.py`, `capture_vs_kits.py`, `demo_link_variation.py` (fake nodes, through `test_conductor.Server`) | `basic`, unless a test gives a preset or the options it checks | each test checks a rule or a formula with the options it names; new tests check the default's parts (`test_sniff.py` `layered_default`, `test_conductor.py` `medium_tx_max`, `test_propagation.py` `pa_limit`) |
+| `test_conductor.py`, `test_sniff.py`, `test_interf.py`, `test_propagation.py`, `test_floorplan.py`, `test_channel.py`, `capture_vs_kits.py`, `demo_link_variation.py` (fake nodes, through `test_conductor.Server`) | `basic`, unless a test gives a preset or the options it checks | each test checks a rule or a formula with the options it names; new tests check the default's parts (`test_sniff.py` `layered_default`, `test_conductor.py` `medium_tx_max`, `test_propagation.py` `pa_limit`) |
 | `radio_if/test_ref_client.py` | `basic` | the client's expected outcomes are computed with fixed link values |
 | `test_medium_radio.sh` | `basic` | its CCA check rebuilds each busy answer's energy from the links' fixed levels |
 | `test_lfn_weak.sh` | `basic` | its levels come from the empirical curve (the layered model loses more below −100 dBm) |
