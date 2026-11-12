@@ -1789,6 +1789,7 @@ static void sn_add_ext(void *ctx, const struct intf_piece *p)
 {
     struct sn_sniff *x = ctx;
     struct sn_heard *h;
+    uint64_t margin;
 
     // A later extension adds only the intervals that start in its range
     // (the earlier ones are there already)
@@ -1799,10 +1800,13 @@ static void sn_add_ext(void *ctx, const struct intf_piece *p)
     h->src = SN_SRC_NONE;
     h->start = p->start;
     h->end = p->oend < x->t1 + 1 ? p->oend : x->t1 + 1;    // + 1: on air at t1 counts (end energy)
-    h->pre_end = p->pre_end;
-    h->cand = !p->noise && (sn.frame_mode || p->pre_end > p->start);
+    // As for the nodes' frames (§10.2): a detection must leave the margin
+    // (--sniff-margin-bits) before the preamble's end
+    margin = p->rate_bps ? (uint64_t)sn.margin_bits * 1000000 / p->rate_bps : 0;
+    h->pre_end = p->pre_end > p->start + margin ? p->pre_end - margin : p->start;
+    h->cand = !p->noise && (sn.frame_mode || h->pre_end > p->start);
     h->adj = false;
-    h->det_end = sn.frame_mode ? h->end : p->pre_end;
+    h->det_end = sn.frame_mode ? h->end : h->pre_end;
     h->dwell = ((uint64_t)sn.dwell_bits * 1000000 + p->rate_bps - 1) / p->rate_bps;
     if (!h->dwell)
         h->dwell = 1;
