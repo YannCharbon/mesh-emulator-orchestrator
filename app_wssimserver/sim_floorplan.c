@@ -71,7 +71,7 @@ struct fp_grid {
     int first, n;               // walls [first, first + n) of the sorted array
     double x0, y0, cell;
     int nx, ny;
-    int *start;                 // nx * ny + 1 offsets into items
+    size_t *start;              // nx * ny + 1 offsets into items
     int *items;
 };
 
@@ -244,11 +244,14 @@ static void fp_parse_line(char **tok, int n, int lineno)
             ncoord--;
         }
         npts = ncoord / 2;
-        FATAL_ON(npts < 3, 1, "--prop-floorplan: %s:%d: an outline needs at least 3 points", fp.path, lineno);
         xy = malloc(ncoord * sizeof(*xy));
         FATAL_ON(!xy, 1, "malloc: %m");
         for (int k = 0; k < ncoord; k++)
             xy[k] = fp_coord(tok[2 + k], lineno);
+        // A closing point that repeats the first: the polygon closes anyway
+        if (npts >= 2 && fabs(xy[ncoord - 2] - xy[0]) < FP_TOL && fabs(xy[ncoord - 1] - xy[1]) < FP_TOL)
+            npts--;
+        FATAL_ON(npts < 3, 1, "--prop-floorplan: %s:%d: an outline needs at least 3 points", fp.path, lineno);
         if (mat[0])
             for (int k = 0; k < npts; k++) {
                 int k2 = (k + 1) % npts;
@@ -280,10 +283,66 @@ static int fp_slab_cmp(const void *a, const void *b)
     return (x->floor > y->floor) - (x->floor < y->floor);
 }
 
+// Calls fn(ctx, cell) for every cell of g that the segment a-b, widened by
+// the tolerance, passes through: row by row, the columns of the segment's x
+// range within the row. Used to list a wall in the cells it traverses, and
+// to find the candidate walls of a path.
+typedef void (*fp_cell_fn)(void *ctx, long cell);
+
+static void fp_cells(const struct fp_grid *g, double ax, double ay, double bx, double by, fp_cell_fn fn, void *ctx)
+{
+    double xmin = fmin(ax, bx), xmax = fmax(ax, bx), ylo = fmin(ay, by) - FP_TOL, yhi = fmax(ay, by) + FP_TOL;
+    long r0, r1;
+
+    r0 = (long)floor((ylo - g->y0) / g->cell);
+    r1 = (long)floor((yhi - g->y0) / g->cell);
+    if (r1 < 0 || r0 >= g->ny || xmax + FP_TOL < g->x0 || xmin - FP_TOL > g->x0 + g->nx * g->cell)
+        return;
+    r0 = r0 < 0 ? 0 : r0;
+    r1 = r1 >= g->ny ? g->ny - 1 : r1;
+    for (long r = r0; r <= r1; r++) {
+        double ya = fmax(ylo, g->y0 + r * g->cell), yb = fmin(yhi, g->y0 + (r + 1) * g->cell);
+        double xa = xmin, xb = xmax;
+        long c0, c1;
+
+        if (fabs(by - ay) > 1e-12) {
+            // x of the segment at the band's limits, within its x range
+            double x1 = ax + (ya - ay) * (bx - ax) / (by - ay), x2 = ax + (yb - ay) * (bx - ax) / (by - ay);
+
+            xa = fmax(xmin, fmin(x1, x2));
+            xb = fmin(xmax, fmax(x1, x2));
+        }
+        c0 = (long)floor((xa - FP_TOL - g->x0) / g->cell);
+        c1 = (long)floor((xb + FP_TOL - g->x0) / g->cell);
+        c0 = c0 < 0 ? 0 : c0;
+        c1 = c1 >= g->nx ? g->nx - 1 : c1;
+        for (long c = c0; c <= c1; c++)
+            fn(ctx, r * g->nx + c);
+    }
+}
+
+struct fp_fill {
+    struct fp_grid *g;
+    size_t *count;
+    int wall;
+    bool fill;
+};
+
+static void fp_fill_cell(void *ctx, long cell)
+{
+    struct fp_fill *f = ctx;
+
+    if (!f->fill)
+        f->g->start[cell + 1]++;
+    else
+        f->g->items[f->g->start[cell] + f->count[cell]++] = f->wall;
+}
+
 static void fp_build_grid(struct fp_grid *g)
 {
     double bx0 = INFINITY, by0 = INFINITY, bx1 = -INFINITY, by1 = -INFINITY, w, h, cell;
-    int *count;
+    struct fp_fill f = { .g = g };
+    long cells;
 
     for (int i = g->first; i < g->first + g->n; i++) {
         bx0 = fmin(bx0, fp.walls[i].bx0);
@@ -303,35 +362,70 @@ static void fp_build_grid(struct fp_grid *g)
     g->cell = cell;
     g->nx = (int)fmin(ceil(w / cell), FP_GRID_MAX) + 1;
     g->ny = (int)fmin(ceil(h / cell), FP_GRID_MAX) + 1;
-    g->start = calloc((size_t)g->nx * g->ny + 1, sizeof(*g->start));
-    count = calloc((size_t)g->nx * g->ny, sizeof(*count));
-    FATAL_ON(!g->start || !count, 1, "calloc: %m");
+    cells = (long)g->nx * g->ny;
+    g->start = calloc(cells + 1, sizeof(*g->start));
+    f.count = calloc(cells, sizeof(*f.count));
+    FATAL_ON(!g->start || !f.count, 1, "calloc: %m");
+    // Each wall in the cells it traverses (a long diagonal wall is not listed
+    // in its whole bounding box): counted, then filled
     for (int pass = 0; pass < 2; pass++) {
+        f.fill = pass;
         for (int i = g->first; i < g->first + g->n; i++) {
             const struct fp_wall *wl = &fp.walls[i];
-            int c0 = (int)floor((wl->bx0 - FP_TOL - g->x0) / cell), c1 = (int)floor((wl->bx1 + FP_TOL - g->x0) / cell);
-            int r0 = (int)floor((wl->by0 - FP_TOL - g->y0) / cell), r1 = (int)floor((wl->by1 + FP_TOL - g->y0) / cell);
 
-            c0 = c0 < 0 ? 0 : c0;
-            r0 = r0 < 0 ? 0 : r0;
-            c1 = c1 >= g->nx ? g->nx - 1 : c1;
-            r1 = r1 >= g->ny ? g->ny - 1 : r1;
-            for (int r = r0; r <= r1; r++)
-                for (int c = c0; c <= c1; c++) {
-                    if (!pass)
-                        g->start[r * g->nx + c + 1]++;
-                    else
-                        g->items[g->start[r * g->nx + c] + count[r * g->nx + c]++] = i;
-                }
+            f.wall = i;
+            fp_cells(g, wl->x1, wl->y1, wl->x2, wl->y2, fp_fill_cell, &f);
         }
         if (!pass) {
-            for (int k = 0; k < g->nx * g->ny; k++)
+            for (long k = 0; k < cells; k++)
                 g->start[k + 1] += g->start[k];
-            g->items = malloc((size_t)(g->start[g->nx * g->ny] + 1) * sizeof(*g->items));
+            g->items = malloc((g->start[cells] + 1) * sizeof(*g->items));
             FATAL_ON(!g->items, 1, "malloc: %m");
         }
     }
-    free(count);
+    free(f.count);
+}
+
+// Walls i and j on one line (parallel, and j's first end on i's line)
+static bool fp_collinear(const struct fp_wall *a, const struct fp_wall *b)
+{
+    double ax = a->x2 - a->x1, ay = a->y2 - a->y1, bx = b->x2 - b->x1, by = b->y2 - b->y1;
+
+    return fabs(ax * by - ay * bx) / (a->len * b->len) < 1e-9 &&
+           fabs(ax * (b->y1 - a->y1) - ay * (b->x1 - a->x1)) / a->len < FP_TOL;
+}
+
+// Collinear walls of one storey that overlap over more than the tolerance
+// (a wall drawn on an outline edge): a warning; a path crossing them at one
+// point counts the strongest once (fp_walls)
+static void fp_check_overlaps(void)
+{
+    long pairs = 0;
+    int ex_a = 0, ex_b = 0;
+
+    for (int i = 0; i < fp.n_walls; i++)
+        for (int j = i + 1; j < fp.n_walls && fp.walls[j].floor == fp.walls[i].floor; j++) {
+            const struct fp_wall *a = &fp.walls[i], *b = &fp.walls[j];
+            double ux, uy, s1, s2;
+
+            if (b->bx0 > a->bx1 + FP_TOL || b->bx1 < a->bx0 - FP_TOL || b->by0 > a->by1 + FP_TOL ||
+                b->by1 < a->by0 - FP_TOL || !fp_collinear(a, b))
+                continue;
+            ux = (a->x2 - a->x1) / a->len;
+            uy = (a->y2 - a->y1) / a->len;
+            s1 = (b->x1 - a->x1) * ux + (b->y1 - a->y1) * uy;
+            s2 = (b->x2 - a->x1) * ux + (b->y2 - a->y1) * uy;
+            if (fmin(a->len, fmax(s1, s2)) - fmax(0, fmin(s1, s2)) > FP_TOL) {
+                if (!pairs++) {
+                    ex_a = i;
+                    ex_b = j;
+                }
+            }
+        }
+    if (pairs)
+        WARN("--prop-floorplan: %s: %ld pairs of walls overlap on one line (e.g. lines %d and %d, storey %d): a path "
+             "through both at one point counts the one of higher loss", fp.path, pairs, fp.walls[ex_a].line,
+             fp.walls[ex_b].line, fp.walls[ex_a].floor);
 }
 
 void fp_load(const char *path, double default_h)
@@ -404,6 +498,7 @@ void fp_load(const char *path, double default_h)
         fp_build_grid(g);
         i = j;
     }
+    fp_check_overlaps();
     fp.stamp = calloc(fp.n_walls + 1, sizeof(*fp.stamp));
     FATAL_ON(!fp.stamp, 1, "calloc: %m");
     {
@@ -458,11 +553,19 @@ double fp_slab_db(int f)
 
 /* ---- paths */
 
-// Whether the path p + t·d (t in [0, 1], plen = |d|) crosses wall w: the
-// weight of the crossing (0: none; a contact at a wall's end or at the
-// path's end counts half, at both a quarter) and its parameter t. A wall
-// along the path's line (collinear) is not crossed.
-static double fp_cross(const double p[2], const double d[2], double plen, const struct fp_wall *w, double *t)
+enum { FP_NONE, FP_CROSS, FP_VERTEX };
+
+struct fp_hit {
+    int wall, kind, side;       // side: FP_VERTEX, the side of the path the wall leaves to (+1 left, -1 right)
+    double w, t, vx, vy;        // w: FP_CROSS's weight; vx, vy: the vertex on the path
+};
+
+// Whether the path p + t·d (t in [0, 1], plen = |d|) meets wall w, and how:
+// FP_CROSS, a crossing (weight 1, or 1/2 at an end of the path, 1/4 if also
+// at an end of the wall); FP_VERTEX, an end of the wall on the path's
+// interior (decided per vertex, in fp_walls). A wall along the path's line
+// (collinear) is not met.
+static int fp_cross(const double p[2], const double d[2], double plen, const struct fp_wall *w, struct fp_hit *h)
 {
     double da = (d[0] * (w->y1 - p[1]) - d[1] * (w->x1 - p[0])) / plen;
     double db = (d[0] * (w->y2 - p[1]) - d[1] * (w->x2 - p[0])) / plen;
@@ -470,88 +573,81 @@ static double fp_cross(const double p[2], const double d[2], double plen, const 
     bool za = fabs(da) < FP_TOL, zb = fabs(db) < FP_TOL, zp, zq;
 
     if (za && zb)
-        return 0;
+        return FP_NONE;
     if ((da >= FP_TOL && db >= FP_TOL) || (da <= -FP_TOL && db <= -FP_TOL))
-        return 0;
+        return FP_NONE;
     dp = (ex * (p[1] - w->y1) - ey * (p[0] - w->x1)) / w->len;
     dq = (ex * (p[1] + d[1] - w->y1) - ey * (p[0] + d[0] - w->x1)) / w->len;
     zp = fabs(dp) < FP_TOL;
     zq = fabs(dq) < FP_TOL;
     if (zp && zq)
-        return 0;
+        return FP_NONE;
     if ((dp >= FP_TOL && dq >= FP_TOL) || (dp <= -FP_TOL && dq <= -FP_TOL))
-        return 0;
-    *t = zp ? 0 : zq ? 1 : dp / (dp - dq);
-    return (za || zb ? 0.5 : 1) * (zp || zq ? 0.5 : 1);
+        return FP_NONE;
+    h->t = zp ? 0 : zq ? 1 : dp / (dp - dq);
+    if ((za || zb) && !zp && !zq) {
+        h->vx = za ? w->x1 : w->x2;
+        h->vy = za ? w->y1 : w->y2;
+        h->side = (za ? db : da) > 0 ? 1 : -1;
+        return FP_VERTEX;
+    }
+    h->w = (za || zb ? 0.5 : 1) * (zp || zq ? 0.5 : 1);
+    return FP_CROSS;
 }
 
-struct fp_hit {
-    int wall;
-    double w;
+static struct fp_hit *hits, *picked;
+static int n_hits, cap_hits, n_picked, cap_picked;
+
+static void fp_push(struct fp_hit **a, int *n, int *cap, const struct fp_hit *h)
+{
+    if (*n == *cap) {
+        *cap = *cap ? 2 * *cap : 64;
+        *a = realloc(*a, *cap * sizeof(**a));
+        FATAL_ON(!*a, 1, "realloc: %m");
+    }
+    (*a)[(*n)++] = *h;
+}
+
+struct fp_q {
+    const double *p, *d;
+    double plen, sa, sb;
 };
 
-static struct fp_hit *hits;
-static int n_hits, cap_hits;
-
-static void fp_try(int i, const double p[2], const double d[2], double plen, double sa, double sb)
+static void fp_try(struct fp_q *q, int i)
 {
-    double t, w;
+    struct fp_hit h = { .wall = i };
+    int kind;
 
     if (fp.stamp[i] == fp.query)
         return;
     fp.stamp[i] = fp.query;
-    w = fp_cross(p, d, plen, &fp.walls[i], &t);
-    if (!w || (int)floor(sa + t * (sb - sa)) != fp.walls[i].floor)
+    kind = fp_cross(q->p, q->d, q->plen, &fp.walls[i], &h);
+    if (kind == FP_NONE || (int)floor(q->sa + h.t * (q->sb - q->sa)) != fp.walls[i].floor)
         return;
-    if (n_hits == cap_hits) {
-        cap_hits = cap_hits ? 2 * cap_hits : 64;
-        hits = realloc(hits, cap_hits * sizeof(*hits));
-        FATAL_ON(!hits, 1, "realloc: %m");
-    }
-    hits[n_hits].wall = i;
-    hits[n_hits++].w = w;
+    h.kind = kind;
+    fp_push(&hits, &n_hits, &cap_hits, &h);
+}
+
+static const struct fp_grid *fp_cur_grid;
+
+static void fp_query_cell(void *ctx, long cell)
+{
+    for (size_t k = fp_cur_grid->start[cell]; k < fp_cur_grid->start[cell + 1]; k++)
+        fp_try(ctx, fp_cur_grid->items[k]);
 }
 
 // The candidate walls of storey g for the part [t0, t1] of the path
-static void fp_query(const struct fp_grid *g, const double p[2], const double d[2], double plen, double sa,
-                     double sb, double t0, double t1)
+static void fp_query(const struct fp_grid *g, struct fp_q *q, double t0, double t1)
 {
-    double ax = p[0] + t0 * d[0], ay = p[1] + t0 * d[1], bx = p[0] + t1 * d[0], by = p[1] + t1 * d[1];
-    double xmin = fmin(ax, bx), xmax = fmax(ax, bx), ylo = fmin(ay, by) - FP_TOL, yhi = fmax(ay, by) + FP_TOL;
-    int r0, r1;
-
     fp.query++;
     if (fp.brute) {
         for (int i = g->first; i < g->first + g->n; i++)
-            fp_try(i, p, d, plen, sa, sb);
+            fp_try(q, i);
         return;
     }
-    r0 = (int)floor((ylo - g->y0) / g->cell);
-    r1 = (int)floor((yhi - g->y0) / g->cell);
-    if (r1 < 0 || r0 >= g->ny || xmax + FP_TOL < g->x0 || xmin - FP_TOL > g->x0 + g->nx * g->cell)
-        return;
-    r0 = r0 < 0 ? 0 : r0;
-    r1 = r1 >= g->ny ? g->ny - 1 : r1;
-    for (int r = r0; r <= r1; r++) {
-        double ya = fmax(ylo, g->y0 + r * g->cell), yb = fmin(yhi, g->y0 + (r + 1) * g->cell);
-        double xa = xmin, xb = xmax;
-        int c0, c1;
-
-        if (fabs(by - ay) > 1e-12) {
-            // x of the path at the band's limits, within the part's x range
-            double x1 = ax + (ya - ay) * (bx - ax) / (by - ay), x2 = ax + (yb - ay) * (bx - ax) / (by - ay);
-
-            xa = fmax(xmin, fmin(x1, x2));
-            xb = fmin(xmax, fmax(x1, x2));
-        }
-        c0 = (int)floor((xa - FP_TOL - g->x0) / g->cell);
-        c1 = (int)floor((xb + FP_TOL - g->x0) / g->cell);
-        c0 = c0 < 0 ? 0 : c0;
-        c1 = c1 >= g->nx ? g->nx - 1 : c1;
-        for (int c = c0; c <= c1; c++)
-            for (int k = g->start[r * g->nx + c]; k < g->start[r * g->nx + c + 1]; k++)
-                fp_try(g->items[k], p, d, plen, sa, sb);
-    }
+    fp_cur_grid = g;
+    fp_cells(g, q->p[0] + t0 * q->d[0], q->p[1] + t0 * q->d[1], q->p[0] + t1 * q->d[0], q->p[1] + t1 * q->d[1],
+             fp_query_cell, q);
 }
 
 static const struct fp_grid *fp_grid_of(int floor)
@@ -571,11 +667,86 @@ static const struct fp_grid *fp_grid_of(int floor)
     return NULL;
 }
 
-static int fp_hit_cmp(const void *a, const void *b)
+static int fp_hit_wall_cmp(const void *a, const void *b)
 {
     const struct fp_hit *x = a, *y = b;
 
     return (x->wall > y->wall) - (x->wall < y->wall);
+}
+
+// By t, then wall: the contacts of one vertex come together
+static int fp_hit_t_cmp(const void *a, const void *b)
+{
+    const struct fp_hit *x = a, *y = b;
+
+    if (x->t != y->t)
+        return x->t < y->t ? -1 : 1;
+    return (x->wall > y->wall) - (x->wall < y->wall);
+}
+
+// Of two hits on overlapping collinear walls, the one to drop: the lower
+// loss, then the higher index
+static bool fp_weaker(const struct fp_hit *a, const struct fp_hit *b)
+{
+    double la = fp.mats[fp.walls[a->wall].mat].db, lb = fp.mats[fp.walls[b->wall].mat].db;
+
+    return la < lb || (la == lb && a->wall > b->wall);
+}
+
+// The walls the path really crosses, from the hits found (in any order):
+// - crossings at one point by overlapping collinear walls count once, the
+//   wall of higher loss;
+// - at a vertex on the path where walls end (a corner, a T, a cross), the
+//   walls form sectors; the path crosses from the sector it comes from to the
+//   one it goes to through the walls on its left or those on its right: the
+//   side of lower loss is counted (with only walls on one side, none) (a corner that the path only grazes: none;
+//   a wall split at the vertex: one; a T: one).
+static void fp_resolve(double plen)
+{
+    n_picked = 0;
+    if (n_hits > 1)
+        qsort(hits, n_hits, sizeof(*hits), fp_hit_t_cmp);
+    for (int i = 0; i < n_hits; ) {
+        int j = i;
+        double sum[2] = { 0, 0 };
+        int cnt[2] = { 0, 0 }, low[2] = { INT32_MAX, INT32_MAX }, side;
+
+        // The hits at one point: the same t (within the tolerance)
+        while (j < n_hits && (hits[j].t - hits[i].t) * plen < 2 * FP_TOL)
+            j++;
+        // Overlapping collinear walls among them: keep the stronger
+        for (int a = i; a < j; a++)
+            for (int b = a + 1; b < j; b++) {
+                if (hits[a].kind == FP_NONE || hits[b].kind == FP_NONE || hits[a].kind != hits[b].kind ||
+                    (hits[a].kind == FP_VERTEX && hits[a].side != hits[b].side) ||
+                    !fp_collinear(&fp.walls[hits[a].wall], &fp.walls[hits[b].wall]))
+                    continue;
+                if (fp_weaker(&hits[a], &hits[b]))
+                    hits[a].kind = FP_NONE;
+                else
+                    hits[b].kind = FP_NONE;
+            }
+        for (int a = i; a < j; a++)
+            if (hits[a].kind == FP_CROSS) {
+                fp_push(&picked, &n_picked, &cap_picked, &hits[a]);
+            } else if (hits[a].kind == FP_VERTEX) {
+                side = hits[a].side > 0;
+                sum[side] += fp.mats[fp.walls[hits[a].wall].mat].db;
+                cnt[side]++;
+                low[side] = hits[a].wall < low[side] ? hits[a].wall : low[side];
+            }
+        // The vertex: the side of lower loss, then of fewer walls, then the
+        // one with the lowest wall (whichever the path's direction)
+        side = sum[1] < sum[0] || (sum[1] == sum[0] && (cnt[1] < cnt[0] || (cnt[1] == cnt[0] && low[1] < low[0])));
+        for (int a = i; a < j; a++)
+            if (hits[a].kind == FP_VERTEX && (hits[a].side > 0) == side) {
+                struct fp_hit h = hits[a];
+
+                h.w = 1;
+                fp_push(&picked, &n_picked, &cap_picked, &h);
+            }
+        i = j;
+    }
 }
 
 double fp_walls(const double a[2], double sa, const double b[2], double sb, double *n, int *count, char *list,
@@ -583,9 +754,11 @@ double fp_walls(const double a[2], double sa, const double b[2], double sb, doub
 {
     double d[2] = { b[0] - a[0], b[1] - a[1] }, plen = hypot(d[0], d[1]), db = 0, wn = 0;
     int flo = (int)floor(fmin(sa, sb)), fhi = (int)floor(fmax(sa, sb));
+    struct fp_q q = { .p = a, .d = d, .plen = plen, .sa = sa, .sb = sb };
     size_t used = 0;
 
     n_hits = 0;
+    n_picked = 0;
     if (plen >= FP_TOL && fp.n_walls) {
         // Each storey the path passes through, with its part of the path
         for (int f = flo; f <= fhi; f++) {
@@ -605,32 +778,33 @@ double fp_walls(const double a[2], double sa, const double b[2], double sb, doub
                 t0 = fmax(0, t0 - 1e-9);
                 t1 = fmin(1, t1 + 1e-9);
             }
-            fp_query(g, a, d, plen, sa, sb, t0, t1);
+            fp_query(g, &q, t0, t1);
         }
+        fp_resolve(plen);
     }
     // In the walls' order: the same sum whichever way they were found
-    if (n_hits > 1)
-        qsort(hits, n_hits, sizeof(*hits), fp_hit_cmp);
+    if (n_picked > 1)
+        qsort(picked, n_picked, sizeof(*picked), fp_hit_wall_cmp);
     if (list && listsz)
         list[0] = '\0';
-    for (int k = 0; k < n_hits; k++) {
-        const struct fp_wall *w = &fp.walls[hits[k].wall];
+    for (int k = 0; k < n_picked; k++) {
+        const struct fp_wall *w = &fp.walls[picked[k].wall];
 
-        db += hits[k].w * fp.mats[w->mat].db;
-        wn += hits[k].w;
+        db += picked[k].w * fp.mats[w->mat].db;
+        wn += picked[k].w;
         if (list && used + 32 < listsz) {
             used += snprintf(list + used, listsz - used, "%s%d", k ? "," : "", w->line);
             if (w->edge >= 0)
                 used += snprintf(list + used, listsz - used, ".%d", w->edge);
-            if (hits[k].w != 1)
-                used += snprintf(list + used, listsz - used, ":%g", hits[k].w);
+            if (picked[k].w != 1)
+                used += snprintf(list + used, listsz - used, ":%g", picked[k].w);
         } else if (list && used + 4 < listsz && !strstr(list, "...")) {
             used += snprintf(list + used, listsz - used, ",...");
         }
     }
-    if (list && listsz > 1 && !n_hits)
+    if (list && listsz > 1 && !n_picked)
         snprintf(list, listsz, "-");
     *n = wn;
-    *count = n_hits;
+    *count = n_picked;
     return db;
 }

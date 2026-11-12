@@ -88,7 +88,8 @@ def test_describe():
     check(p.returncode == 0, f"status {p.returncode}: {p.stderr[-500:]}")
     d = json.loads(p.stdout)
     names = {o["name"] for o in d["options"]}
-    keys = {"name", "group", "arg", "type", "values", "default", "presets", "repeatable", "needs", "section", "help"}
+    keys = {"name", "group", "arg", "type", "values", "default", "effective_default", "presets", "repeatable", "needs",
+            "section", "help"}
     for o in d["options"]:
         check(set(o) == keys, f"keys of {o['name']}: {sorted(o)}")
         check(o["type"] in ("flag", "int", "number", "enum", "string", "file", "spec", "list"), f"type {o}")
@@ -101,14 +102,26 @@ def test_describe():
     check(not missing, f"options in --help without a description: {sorted(missing)}")
     pre = {p["name"]: p for p in d["presets"]}
     check(set(pre) == {"calibrated", "realistic", "basic", "em4"} and pre["calibrated"]["default"], f"{pre}")
+    def as_opts(name, v):
+        """The command-line options of a preset value: a string, true (a
+        flag) or a list (the option given several times)."""
+        return [f"--{name}" if x is True else f"--{name}={x}" for x in (v if isinstance(v, list) else [v])]
+
+    dflt = next(p for p in d["presets"] if p["default"])
     for o in d["options"]:
         for pname, v in o["presets"].items():
-            check(f"--{o['name']}={v}" in pre[pname]["options"], f"{o['name']} {pname} {v}")
+            check(all(x in pre[pname]["options"] for x in as_opts(o["name"], v)), f"{o['name']} {pname} {v}")
+        # effective_default: the default preset's value, else the built-in default
+        want = o["presets"].get(dflt["name"], o["default"])
+        check(o["effective_default"] == want, f"effective_default of {o['name']}: {o['effective_default']} != {want}")
     for pname, p in pre.items():
         for opt in p["options"]:
-            n, v = opt[2:].split("=", 1)
+            n = opt[2:].split("=", 1)[0]
             o = next(x for x in d["options"] if x["name"] == n)
-            check(o["presets"].get(pname) == v, f"preset {pname} {opt} not in {o}")
+            check(opt in as_opts(n, o["presets"].get(pname)), f"preset {pname} {opt} not in {o}")
+    eff = {o["name"]: o["effective_default"] for o in d["options"]}
+    check(eff["medium-rx-model"] == "layered" and eff["medium-tx-max"] == "16.9" and eff["prop-shadow"] == "4",
+          f"effective defaults {eff['medium-rx-model']} {eff['medium-tx-max']} {eff['prop-shadow']}")
     mats = {m["name"] for m in d["materials"]}
     check({"plasterboard", "wood", "glass", "brick", "concrete", "concrete-slab", "reinforced-concrete", "metal",
            "partition"} <= mats, f"materials {mats}")
@@ -126,6 +139,13 @@ def test_parser():
     refused(["--prop-floor-model=slabs"], "need --prop-floorplan")
     refused(["--prop-floor-b=0.3"], "need --prop-floorplan")
     refused(["--prop-floor-model=bogus"], "cost231, slabs or table", fp=ok)
+    # Each floor option belongs to one floor term
+    refused(["--prop-floor-model=table"], "needs --prop-floor-db", fp=ok)
+    refused(["--prop-floor-db=10"], "needs --prop-floor-model=table", fp=ok)
+    refused(["--prop-floor-db=10", "--prop-floor-model=slabs"], "needs --prop-floor-model=table", fp=ok)
+    refused(["--prop-floor-b=0.3", "--prop-floor-model=slabs"], "needs --prop-floor-model=cost231", fp=ok)
+    refused(["--prop-floor-b=0.3", "--prop-floor-model=table", "--prop-floor-db=5"], "needs --prop-floor-model=cost231",
+            fp=ok)
     refused([f"--prop-floorplan={ARGS.logdir}/missing.fp"], "missing.fp")
     for fp, msg in [
         ("door 0 1 2\n", "unknown directive"),
@@ -140,7 +160,6 @@ def test_parser():
         ("slab 0 unobtainium\n", "unknown material"),
         ("material m 3\nmaterial m 4\n", "defined twice"),
         ("material m -1\n", "bad loss"),
-        ("material m 3 #fff extra\n", ""),           # after '#': a comment
         ("material 9m 3\n", "starts with a letter"),
         ("material m/x 3\n", "bad material name"),
         ("material m\n", "expected material"),
@@ -148,6 +167,7 @@ def test_parser():
         ("floorheight 3\nfloorheight 4\n", "given twice"),
         ("floorheight 0\n", "bad floor height"),
         ("outline 0 0 0 1 0\n", "at least 3 points"),
+        ("outline 0 0 0 1 0 0 0\n", "at least 3 points"),     # the closing point repeats the first
         ("outline 0 0 0 1 0 1 1 brick wood\n", "bad coordinate"),
         ("outline 0 0 0 1 0 1 1 1 1 brick\n", "shorter than 1 mm"),
     ]:
@@ -161,47 +181,72 @@ def test_parser():
                    "outline 0 -1 -1 20 -1 20 20\n")
     check(abs(r[(1, 0)]["wdb"] - 8.5) < 1e-9 and r[(1, 0)]["walls"] == 2, f"{r[(1, 0)]}")
     check("2 walls on 1 storeys" in out and "1 outlines" in out and "(2 from the file)" in out, out[-1500:])
+    # A colour and anything after it are a comment: material m is 3 dB
+    out, r = build("0 0 0 0\n1 10 0 0\n", "material m 3 #fff extra words\nwall 0 5 -1 5 1 m\n")
+    check(r[(1, 0)]["wdb"] == 3, f"colour: {r[(1, 0)]}")
+    # An outline closed by repeating its first point: 4 edges, not 5 (no
+    # zero-length edge); the path crosses edge 2 and edge 4
+    out, r = build("0 -5 5 0\n1 15 5 0\n", "outline 0 0 0 10 0 10 10 0 10 0 0 glass\n")
+    check(r[(1, 0)]["crossed"] == "1.2,1.4" and "4 walls" in out, f"closed outline: {r[(1, 0)]}")
+    # Warnings: the file's floor height over the option's, double counting,
+    # walls overlapping on one line (counted once where a path crosses both)
+    out, r = build("0 0 0 0\n1 10 0 0\n", "floorheight 3\noutline 0 -5 -5 5 -5 5 5 -5 5 brick\n"
+                   "wall 0 5 -2 5 2 concrete\n", ["--prop-floor-height=4", "--prop-model=logdist", "--prop-walls=8:1"])
+    check("replaces --prop-floor-height 4" in out and "counted twice" in out and "add to the floor plan" in out and
+          "1 pairs of walls overlap" in out, out[-1500:])
+    check(r[(1, 0)]["crossed"] == "3" and abs(r[(1, 0)]["wdb"] - MAT["concrete"]) < 1e-9, f"overlap: {r[(1, 0)]}")
 
 
 def test_geometry():
-    """Crossing, contacts at ends (half), parallel and collinear (none), a
-    junction on the path (two halves), a vertical path, walls of other
-    storeys, the grid against every wall."""
+    """Crossing; a contact at the path's end (half); parallel and collinear
+    walls (none); vertices on the path: a corner the path grazes (none), a
+    wall end touching the path (none), a wall split at the path (one), a T
+    (one), a bar with a stem ending on it (one), two crossing walls (two); a
+    vertical path; walls of other storeys."""
     pos = ("0 0 0 0 0\n"
            "1 10 0 0 0\n"
            "2 0 4 0 0\n"
            "3 10 4 0 0\n"
-           "4 5 2 0 0\n"        # on wall line 5 (x = 5)
+           "4 5 2 0 0\n"        # on wall 5 (x = 5)
            "5 0 0 7 2\n")       # above node 0, two floors up
     fp = ("material m 10\n"
           "wall 0 5 -1 5 1 m\n"         # 2: crossed by 0-1
-          "wall 0 2 0.5 2 3 m\n"        # 3: its end (2, 0.5)... not on 0-1; crossed by 0-3? see below
-          "wall 0 7 0 7 4 m\n"          # 4: ends on 0-1 at (7, 0) and on 2-3 at (7, 4): halves
-          "wall 0 5 1.5 5 2.5 m\n"      # 5: node 4 at (5, 2) lies on it
-          "wall 0 0 -2 10 -2 m\n"       # 6: parallel to 0-1, never crossed
-          "wall 0 1 4 3 4 m\n"          # 7: along 2-3 (collinear), not crossed
-          "wall 0 8 -1 8 0 m\n"         # 8: T junction at (8, 0) on 0-1 with 9
-          "wall 0 8 0 9 -1 m\n"         # 9
+          "wall 0 2 0.5 2 3 m\n"        # 3: crossed by 0-4 at (2, 0.8)
+          "wall 0 7 0 7 4 m\n"          # 4: its ends touch 0-1 and 2-3, from one side: not crossed
+          "wall 0 5 1.5 5 2.5 m\n"      # 5: node 4 at (5, 2) stands on it
+          "wall 0 0 -2 10 -2 m\n"       # 6: parallel to 0-1
+          "wall 0 1 4 2 4 m\n"          # 7: along 2-3 (collinear)
+          "wall 0 8 -1 8 0 m\n"         # 8, 9: a corner at (8, 0), both below 0-1: grazed
+          "wall 0 8 0 9 -1 m\n"
           "wall 1 5 -10 5 10 m\n"       # 10: storey 1 only
+          "wall 0 3 3 3 4 m\n"          # 11, 12, 13: a T at (3, 4) on 2-3: the bar split at the path
+          "wall 0 3 4 3 5 m\n"          #   (11 below, 12 above) and a stem above (13): 1 below, 2 above
+          "wall 0 3 4 4 5 m\n"
+          "wall 0 5.5 3 5.5 5 m\n"      # 14: a bar crossed at (5.5, 4) ...
+          "wall 0 5.5 4 6.5 5 m\n"      # 15: ... and a stem ending on it there
+          "wall 0 8 3 9 5 m\n"          # 16, 17: two walls crossing at (8.5, 4) on 2-3
+          "wall 0 9 3 8 5 m\n"
           )
     out, r = build(pos, fp, SLABS)
-    # 0-1 along y = 0: wall 2 (1), wall 4 end (0.5), walls 8 and 9 meet on it (0.5 + 0.5)
     x = r[(1, 0)]
-    check(x["crossed"] == "2,4:0.5,8:0.5,9:0.5" and abs(x["wn"] - 2.5) < 1e-9 and abs(x["wdb"] - 25) < 1e-9,
-          f"0-1: {x}")
-    check(abs(x["pl"] - (fspl(10) + 25)) < 0.01, f"0-1 loss {x}")
-    # 2-3 along y = 4: wall 4's other end (0.5); wall 7 collinear: not crossed
-    check(r[(3, 2)]["crossed"] == "4:0.5", f"2-3: {r[(3, 2)]}")
-    # 0-4 ends on wall 5 (a contact at the path's end: half); it crosses wall 3 at (2, 0.8)
+    check(x["crossed"] == "2" and x["wn"] == 1 and x["wdb"] == 10, f"0-1: {x}")
+    check(abs(x["pl"] - (fspl(10) + 10)) < 0.01, f"0-1 loss {x}")
+    x = r[(3, 2)]
+    check(x["crossed"] == "11,14,16,17" and x["wdb"] == 40, f"2-3: {x}")
     check(r[(4, 0)]["crossed"] == "3,5:0.5", f"0-4: {r[(4, 0)]}")
-    # 0-5: vertical, no wall; 2 slabs of the default material
     x = r[(5, 0)]
     check(x["crossed"] == "-" and abs(x["fdb"] - 2 * MAT["concrete-slab"]) < 0.01 and x["floors"] == 2, f"0-5 {x}")
-    # 5-1: from floor 2 above node 0 down to node 1 (floor 0): wall 10 (storey 1) is
-    # crossed at x = 5, where the path is on storey 1; wall 2 (storey 0) at the same
-    # x is not, nor wall 4 at x = 7 (storey 0 from s = 0.02 + (1 - t) 2 ... t = 0.7 -> s = 0.62)
-    x = r[(5, 1)]
-    check(x["crossed"] == "4:0.5,8:0.5,9:0.5,10", f"5-1: {x}")
+    # 5-1: from storey 2 above node 0 down to node 1: s = 2.02 - 2 t; wall 10
+    # (storey 1) at x = 5 (t 0.5, s 1.02) counts, wall 2 (storey 0) there does not
+    check(r[(5, 1)]["crossed"] == "10", f"5-1: {r[(5, 1)]}")
+    # A wall split at the path: one part on each side, the lighter one counts
+    out, r = build("0 0 0 0\n1 4 0 0\n2 0 1 0\n3 4 1 0\n",
+                   "material m 10\nwall 0 2 -1 2 0 m\nwall 0 2 0 2 1 glass\nwall 0 1 1 1 2 m\nwall 0 1 1 1.5 0 m\n")
+    check(r[(1, 0)]["crossed"] == "3" and r[(1, 0)]["wdb"] == MAT["glass"], f"split: {r[(1, 0)]}")
+    # 2-3 (y = 1) passes (1, 1), where walls 4 (above) and 5 (below) meet: one of
+    # them (equal losses and counts: the side with the lower line); wall 3's end
+    # (2, 1) touches it from below: not crossed
+    check(r[(3, 2)]["crossed"] == "4", f"corner crossed: {r[(3, 2)]}")
 
 
 def test_storeys():
@@ -248,12 +293,16 @@ def test_losses():
     # The walls the 0-3 path meets: storey 0 while s < 1, s = 0.02 + 3 t
     wx = [w for w in (4, 8, 12, 16) if 0.02 + 3 * w / 20 < 1]
     check(r[(3, 0)]["walls"] == len(wx), f"0-3 walls {r[(3, 0)]} want {wx}")
-    # COST 231 (the default): Lf k^((k+2)/(k+1) - b), Lf the mean slab loss, b 0.46
+    # COST 231 (the default): Lf k^((k+2)/(k+1) - b), Lf the mean slab loss, b 0.46;
+    # here the light wood slab lowers the mean of the three, so the term is that of
+    # the two heavy slabs below it (never decreasing, test_cost231_monotone)
     lf = (slab[0] + slab[1] + slab[2]) / 3
     out, r = build(pos, fp)
-    check(abs(r[(3, 0)]["fdb"] - lf * 3 ** (5 / 4 - 0.46)) < 0.01, f"cost231 default {r[(3, 0)]}")
+    want = max(lf * 3 ** (5 / 4 - 0.46), (slab[0] + slab[1]) / 2 * 2 ** (4 / 3 - 0.46))
+    check(abs(r[(3, 0)]["fdb"] - want) < 0.01, f"cost231 default {r[(3, 0)]} want {want}")
     out, r = build(pos, fp, ["--prop-floor-model=cost231", "--prop-floor-b=0.5"])
-    check(abs(r[(3, 0)]["fdb"] - lf * 3 ** (5 / 4 - 0.5)) < 0.01, f"cost231 {r[(3, 0)]}")
+    want = max(lf * 3 ** (5 / 4 - 0.5), (slab[0] + slab[1]) / 2 * 2 ** (4 / 3 - 0.5))
+    check(abs(r[(3, 0)]["fdb"] - want) < 0.01, f"cost231 {r[(3, 0)]}")
     check(abs(r[(2, 0)]["fdb"] - slab[0]) < 0.01, "cost231, one floor: Lf")
     # table
     out, r = build(pos, fp, ["--prop-floor-model=table", "--prop-floor-db=7,11"])
@@ -268,7 +317,48 @@ def test_losses():
     out, r = build("0 0 0 0\n1 0 0 3\n", "floorheight 3\n")
     check(r[(1, 0)]["floors"] == 1, f"floorheight {r[(1, 0)]}")
     out, r = build("0 0 0 0\n1 0 0 3\n", "")
-    check(r[(1, 0)]["floors"] == 1 and "floor height 3.50 m" in out, "default floor height 3.5")
+    check(r[(1, 0)]["floors"] == 0 and "floor height 3.50 m" in out, "default floor height 3.5: Z 3 on storey 0")
+
+
+def test_storey_from_z():
+    """With a floor plan, a node without FLOOR is on the storey whose height
+    range holds its Z (floor(Z / H)), not the rounded one: ceiling-mounted
+    detectors at F·H + 2.6 m stay on F; a Z that is a multiple of H by
+    floating point (9.6 / 3.2) is on that storey."""
+    pos = "0 0 0 2.6\n1 10 0 5.8\n2 10 0 9.6\n3 0 0 12.79\n4 5 0 1.0\n"
+    out, r = build(pos, "floorheight 3.2\nwall 0 2 -1 2 1 glass\nwall 1 2 -1 2 1 brick\n", SLABS)
+    fl = {0: 0, 1: 1, 2: 3, 3: 3, 4: 0}
+    for (rx, tx), x in r.items():
+        check(x["floors"] == abs(fl[rx] - fl[tx]), f"{rx}<-{tx}: {x} storeys {fl}")
+    # 0 (storey 0, u 0.81) to 1 (storey 1, u 0.81): s = 0.81 + t; at x = 2 (t 0.2) storey 1: brick
+    check(r[(1, 0)]["crossed"] == "3", f"0-1: {r[(1, 0)]}")
+    # Without a floor plan, rounding as before: Z 2.6 with H 3.2 is floor 1
+    out, r = build(pos, None, ["--prop-floor-height=3.2"])
+    check(r[(4, 0)]["floors"] == 1, f"no floor plan: {r[(4, 0)]}")
+
+
+def test_cost231_monotone():
+    """The cost231 term never decreases with more floors, even when a light
+    slab lowers the mean loss: at least the term of each shorter run."""
+    pos = "".join(f"{f} 0 0 {f * 3 + 1} {f}\n" for f in range(6))
+    fp = "floorheight 3\nmaterial light 0.5\nslab 0 metal\nslab 1 light\nslab 2 light\nslab 3 metal\nslab 4 light\n"
+    out, r = build(pos, fp)
+    slab = [MAT["metal"], 0.5, 0.5, MAT["metal"], 0.5]
+
+    def raw(lo, k):
+        return sum(slab[lo:lo + k]) / k * k ** ((k + 2) / (k + 1) - 0.46)
+
+    def mono(lo, k):
+        return raw(lo, k) if k == 1 else max(raw(lo, k), mono(lo, k - 1), mono(lo + 1, k - 1))
+
+    for a in range(6):
+        for b in range(a + 1, 6):
+            got = r[(b, a)]["fdb"]
+            check(abs(got - mono(a, b - a)) < 0.01, f"{a}-{b}: {got} want {mono(a, b - a):.2f}")
+            if b > a + 1:
+                check(got >= r[(b - 1, a)]["fdb"] - 1e-9, f"decreasing {a}-{b}")
+    check(raw(0, 2) < MAT["metal"] and abs(r[(1, 0)]["fdb"] - MAT["metal"]) < 0.01 and
+          abs(r[(2, 0)]["fdb"] - MAT["metal"]) < 0.01, f"clamped: {r[(2, 0)]}")
 
 
 def test_interferer():
@@ -276,13 +366,14 @@ def test_interferer():
     and one slab, without shadowing."""
     pos = write("i.pos", "1 0 0 0 0\n2 10 0 3.5 1\n")
     fp = write("i.fp", "material m 6\nwall 0 3 -5 3 5 m\nwall 1 6 -5 6 5 m\nwall 0 6 -5 6 5 glass\n")
-    spec = "--interferer=chan=0,pos=-5/0/1,eirp=10"
+    spec = "--interferer=chan=0,pos=-5/0/3,eirp=10"
     r = {n: Radio(n, {1000: [("sense", 0)]}) for n in (1, 2)}
     medium_run(r, [], opts=[f"--positions={pos}", f"--prop-floorplan={fp}", "--prop-shadow=0", spec])
-    # node 1: 5.1 m, no wall between x = -5 and 0; node 2: crosses x = 3 on storey 0
-    # (s from 0.286 to 1.02, at t = 8/15: 0.68), x = 6 at t = 11/15 (s 0.82: storey 0, glass), one slab
-    want1 = 10 - fspl(math.hypot(5, 1))
-    want2 = 10 - (fspl(math.sqrt(15 ** 2 + 2.5 ** 2)) + 6 + MAT["glass"] + MAT["concrete-slab"])
+    # The interferer at z = 3 m is on storey 0 (floor(3 / 3.5)), u = 0.857. Node 1:
+    # no wall between x = -5 and 0; node 2 (storey 1): s from 0.857 to 1.02, so x = 3
+    # (t 8/15, s 0.94) and x = 6 (t 11/15, s 0.98: glass) are on storey 0; one slab
+    want1 = 10 - fspl(math.hypot(5, 3))
+    want2 = 10 - (fspl(math.hypot(15, 0.5)) + 6 + MAT["glass"] + MAT["concrete-slab"])
     check(abs(r[1].sensed[0][2] - energy(want1)) < 0.01, f"node 1 {r[1].sensed} want {energy(want1)}")
     check(abs(r[2].sensed[0][2] - energy(want2)) < 0.01, f"node 2 {r[2].sensed} want {energy(want2)}")
     print(f"     node 1 {want1:.2f} dBm, node 2 {want2:.2f} dBm")
@@ -337,12 +428,94 @@ def test_grid_vs_every_wall():
         check(a == c, "not deterministic")
         halves = sum(":" in v["crossed"] for v in a.values())
         print(f"     aligned {aligned}: {len(a)} directions, mean {sum(v['wn'] for v in a.values()) / len(a):.1f} "
-              f"walls, {halves} with a contact at an end")
+              f"walls, {halves} with a node on a wall (a weight below 1)")
     # Shadowing on top: the seed's draws, unchanged by the floor plan
     pos, fp = random_building(30, 2, 3)
     s1 = build(pos, fp, ["--prop-shadow=4"])[1]
     s2 = build(pos, fp, ["--prop-shadow=4"], seed="2")[1]
     check(s1 != s2 and all(s1[k]["pl"] == s2[k]["pl"] for k in s1), "shadowing changes pl_db or not the level")
+
+
+def _orient(a, b, c):
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _proper(p, q, a, b):
+    """Segments p-q and a-b cross at one interior point of both (general
+    position: no endpoint on the other segment's line)."""
+    return _orient(p, q, a) * _orient(p, q, b) < 0 and _orient(a, b, p) * _orient(a, b, q) < 0
+
+
+def _dist_seg(p, a, b):
+    ax, ay = b[0] - a[0], b[1] - a[1]
+    t = max(0, min(1, ((p[0] - a[0]) * ax + (p[1] - a[1]) * ay) / (ax * ax + ay * ay)))
+    return math.hypot(p[0] - a[0] - t * ax, p[1] - a[1] - t * ay)
+
+
+def test_oracle():
+    """An independent oracle on random plans snapped to a 1 m grid (walls of
+    random materials, many shared vertices, no overlapping collinear walls),
+    nodes at half-metre offsets (never on a wall), one storey. The path is
+    moved 1 mm to its left and to its right; each moved path crosses walls in
+    general position, counted by orientation tests. A path through one vertex
+    where walls meet must have the loss of the lighter of the two moved paths;
+    with several such vertices, at most that loss (the server chooses at each
+    vertex)."""
+    rnd = random.Random(11)
+    mats = {"glass": MAT["glass"], "wood": MAT["wood"], "brick": MAT["brick"], "concrete": MAT["concrete"]}
+    n_eq = n_le = n_vert = 0
+    for plan in range(4):
+        walls = []
+        while len(walls) < 40:
+            a = (rnd.randint(0, 12), rnd.randint(0, 12))
+            if walls and rnd.random() < 0.6:        # start from an existing vertex
+                a = rnd.choice(walls)[rnd.randint(0, 1)]
+            b = (a[0] + rnd.randint(-4, 4), a[1] + rnd.randint(-4, 4))
+            if a == b:
+                continue
+            # no overlap with a collinear wall
+            bad = False
+            for (c, e, _) in walls:
+                if _orient(a, b, c) == 0 and _orient(a, b, e) == 0:
+                    ux, uy = b[0] - a[0], b[1] - a[1]
+                    s1 = (c[0] - a[0]) * ux + (c[1] - a[1]) * uy
+                    s2 = (e[0] - a[0]) * ux + (e[1] - a[1]) * uy
+                    if min(ux * ux + uy * uy, max(s1, s2)) - max(0, min(s1, s2)) > 0:
+                        bad = True
+            if not bad:
+                walls.append((a, b, rnd.choice(list(mats))))
+        nodes = []
+        while len(nodes) < 30:
+            p = (rnd.randint(0, 12) + 0.5, rnd.randint(0, 12) + 0.5)
+            if p not in nodes and all(_dist_seg(p, a, b) > 0.01 for a, b, _ in walls):
+                nodes.append(p)
+        fp = "".join(f"wall 0 {a[0]} {a[1]} {b[0]} {b[1]} {m}\n" for a, b, m in walls)
+        pos = "".join(f"{i} {p[0]} {p[1]} 1 0\n" for i, p in enumerate(nodes))
+        r = build(pos, fp)[1]
+        for i in range(len(nodes)):
+            for j in range(i + 1, len(nodes)):
+                p, q = nodes[i], nodes[j]
+                dx, dy = q[0] - p[0], q[1] - p[1]
+                ln = math.hypot(dx, dy)
+                nx, ny = -dy / ln * 1e-3, dx / ln * 1e-3
+                side = []
+                for sg in (1, -1):
+                    pp, qq = (p[0] + sg * nx, p[1] + sg * ny), (q[0] + sg * nx, q[1] + sg * ny)
+                    side.append(sum(mats[m] for a, b, m in walls if _proper(pp, qq, a, b)))
+                # wall ends on the path's interior, by vertex
+                verts = {v for a, b, _ in walls for v in (a, b)
+                         if _orient(p, q, v) == 0 and 0 < (v[0] - p[0]) * dx + (v[1] - p[1]) * dy < ln * ln}
+                got = r[(j, i)]["wdb"]
+                if len(verts) <= 1:
+                    check(abs(got - min(side)) < 1e-6, f"plan {plan} {p}-{q}: {got} != {min(side)} ({side}), "
+                                                       f"{r[(j, i)]['crossed']}, vertices {verts}")
+                    n_eq += 1
+                    n_vert += len(verts)
+                else:
+                    check(got <= min(side) + 1e-6, f"plan {plan} {p}-{q}: {got} > {min(side)}")
+                    n_le += 1
+    print(f"     {n_eq} paths equal to the oracle ({n_vert} through one vertex), {n_le} through several vertices "
+          f"at most the oracle")
 
 
 def test_performance():
@@ -407,8 +580,11 @@ def main():
         ("geometry", test_geometry),
         ("storeys", test_storeys),
         ("losses", test_losses),
+        ("storey_from_z", test_storey_from_z),
+        ("cost231_monotone", test_cost231_monotone),
         ("interferer", test_interferer),
         ("grid_vs_every_wall", test_grid_vs_every_wall),
+        ("oracle", test_oracle),
         ("performance", test_performance),
     ]
     failed = 0

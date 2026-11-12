@@ -30,9 +30,10 @@ double fp_slab_db(int f);
 
 // Walls crossed by the straight path from a to b: a[0..1], b[0..1] the
 // horizontal coordinates (m), sa, sb the storey coordinates. Returns the
-// summed loss (dB); *n the weighted number of crossings (a contact at a
-// wall's end, or at the path's end, counts half), *count the number of walls
-// met. With list (size listsz), the crossed walls' IDs: the floor plan's line
+// summed loss (dB); *n the weighted number of crossings (a crossing at the
+// path's end counts half; where walls end on the path, the lighter side of
+// the vertex counts, docs/MEDIUM.md §11.11), *count the number of walls
+// counted. With list (size listsz), the crossed walls' IDs: the floor plan's line
 // number, ".K" for edge K of an outline, ":W" when the weight W is not 1;
 // "-" if none.
 double fp_walls(const double a[2], double sa, const double b[2], double sb, double *n, int *count,

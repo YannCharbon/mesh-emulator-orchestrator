@@ -247,18 +247,42 @@ static void json_str(FILE *f, const char *s)
     fputc('"', f);
 }
 
-// The value a preset gives option name, or NULL
-static const char *preset_value(const struct describe_preset *p, const char *name)
+// Whether option o of a preset is option name; *val its value (NULL for a
+// flag without one)
+static bool preset_match(const char *o, const char *name, const char **val)
 {
     size_t n = strlen(name);
 
-    for (int k = 0; p->opts[k]; k++) {
-        const char *o = p->opts[k];
+    if (strncmp(o, "--", 2) || strncmp(o + 2, name, n) || (o[2 + n] != '=' && o[2 + n]))
+        return false;
+    *val = o[2 + n] ? o + 3 + n : NULL;
+    return true;
+}
 
-        if (!strncmp(o, "--", 2) && !strncmp(o + 2, name, n) && o[2 + n] == '=')
-            return o + 3 + n;
-    }
-    return NULL;
+// The value(s) a preset gives option name, as JSON: a string, true for a
+// flag, an array when the preset gives it more than once. False if none.
+static bool preset_json(FILE *f, const struct describe_preset *p, const char *name)
+{
+    const char *v;
+    int n = 0, k2 = 0;
+
+    for (int k = 0; p->opts[k]; k++)
+        n += preset_match(p->opts[k], name, &v);
+    if (!n || !f)
+        return n;
+    if (n > 1)
+        fputc('[', f);
+    for (int k = 0; p->opts[k]; k++)
+        if (preset_match(p->opts[k], name, &v)) {
+            fprintf(f, "%s", k2++ ? ", " : "");
+            if (v)
+                json_str(f, v);
+            else
+                fputs("true", f);
+        }
+    if (n > 1)
+        fputc(']', f);
+    return true;
 }
 
 void describe_json(FILE *f, const struct option *opts, const struct describe_preset *presets, int n_presets,
@@ -348,16 +372,19 @@ void describe_json(FILE *f, const struct option *opts, const struct describe_pre
         }
         fprintf(f, ", \"default\": ");
         json_str(f, d->def);
+        // What a run gets without the option: the default preset's value
+        // when it sets the option, else the built-in default
+        fprintf(f, ", \"effective_default\": ");
+        if (!preset_json(f, &presets[default_preset], d->name))
+            json_str(f, d->def);
         fprintf(f, ", \"presets\": {");
         for (int p = 0; p < n_presets; p++) {
-            const char *v = preset_value(&presets[p], d->name);
-
-            if (!v)
+            if (!preset_json(NULL, &presets[p], d->name))
                 continue;
             fprintf(f, "%s", first ? "" : ", ");
             json_str(f, presets[p].name);
             fprintf(f, ": ");
-            json_str(f, v);
+            preset_json(f, &presets[p], d->name);
             first = false;
         }
         fprintf(f, "}, \"repeatable\": %s, \"needs\": ", d->repeatable ? "true" : "false");

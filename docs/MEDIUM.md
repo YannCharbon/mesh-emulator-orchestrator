@@ -279,7 +279,7 @@ The model lives in `app_wssimserver/sim_propagation.c`. The medium asks it for o
 
 ### 11.1 Positions file
 
-`--positions=FILE`: one node per line, `ID X Y Z [FLOOR [GAIN_DBI]]`, coordinates in metres. Blank lines and lines starting with `#` are skipped. `FLOOR` is an integer; without it, the floor is `Z / --prop-floor-height` rounded (3.5 m). `GAIN_DBI` is the node's antenna gain, applied in transmission and in reception; without it, `--prop-gain` (0 dBi). A node ID may appear once. The ID is an integer from 0 to 4095; the coordinates are finite numbers within ±10⁶ m, `FLOOR` within ±10 000 and `GAIN_DBI` within ±50 dBi; a line with anything else is an error. Lines may have any length, and a `#` starts a comment anywhere on a line. Nodes that are not in the file keep the `-g` links only.
+`--positions=FILE`: one node per line, `ID X Y Z [FLOOR [GAIN_DBI]]`, coordinates in metres. Blank lines and lines starting with `#` are skipped. `FLOOR` is an integer; without it, the floor is `Z / --prop-floor-height` rounded (3.5 m), or, with a floor plan (§11.11), the storey whose height range holds `Z`. `GAIN_DBI` is the node's antenna gain, applied in transmission and in reception; without it, `--prop-gain` (0 dBi). A node ID may appear once. The ID is an integer from 0 to 4095; the coordinates are finite numbers within ±10⁶ m, `FLOOR` within ±10 000 and `GAIN_DBI` within ±50 dBi; a line with anything else is an error. Lines may have any length, and a `#` starts a comment anywhere on a line. Nodes that are not in the file keep the `-g` links only.
 
 `radio_if/scale/gen_building.py --positions FILE` writes this format (`ID X Y Z FLOOR` after a `#` header), so a generated building can be used directly: `gen_building.py --nodes 200 -o /dev/null --positions b.pos`.
 
@@ -425,11 +425,13 @@ One directive per line, words separated by spaces or tabs, metres and dB. A `#` 
 
 | Directive | Meaning |
 | --- | --- |
-| `floorheight H` | metres between floors (0.1 to 1000); without it, `--prop-floor-height` (3.5). It also sets the floor of a node without a `FLOOR` column (§11.1). At most once |
+| `floorheight H` | metres between floors (0.1 to 1000); without it, `--prop-floor-height` (3.5). It also sets the floor of a node without a `FLOOR` column (§11.1). At most once; when `--prop-floor-height` is also given with another value, the file's value applies and the server prints a warning |
 | `material NAME LOSS_DB [COLOR]` | a material: its loss per crossing (0 to 200 dB) at the run's frequency. `COLOR` (`#rrggbb`) is for the web application; it starts with `#`, so the server reads it as a comment. A `material` line with the name of a built-in material replaces its value. A name defined twice in the file is an error |
 | `wall FLOOR X1 Y1 X2 Y2 MATERIAL` | a vertical wall segment on storey `FLOOR`, the full height of the storey |
 | `slab FLOOR MATERIAL` | the slab between `FLOOR` and `FLOOR + 1`, over the whole floor. A floor without a `slab` line has `concrete-slab`. At most one per floor |
-| `outline FLOOR X1 Y1 X2 Y2 ... Xn Yn [MATERIAL]` | the outer contour of the floor (a closed polygon, at least 3 points). With `MATERIAL`, each of its edges is an exterior wall of that material; without it, the outline is for the web application only and adds nothing. Several outlines per floor are allowed |
+| `outline FLOOR X1 Y1 X2 Y2 ... Xn Yn [MATERIAL]` | the outer contour of the floor (a closed polygon, at least 3 distinct points; a last point that repeats the first is dropped). With `MATERIAL`, each of its edges is an exterior wall of that material, edge `K` from point `K` to point `K + 1`; without it, the outline is for the web application only and adds nothing. Several outlines per floor are allowed |
+
+Walls of one storey that overlap on one line (a wall drawn over an outline edge, for example) are accepted with a warning; where a path crosses both at one point, only the one of higher loss counts.
 
 `FLOOR` is an integer from −10 000 to 10 000 (negative floors are basements); coordinates are finite numbers within ±10⁶ m; a material name has at most 63 characters, letters, digits and `_ - . +`, and starts with a letter or `_`. A wall or an outline edge shorter than 1 mm, an unknown directive or material, or a wrong number of words is an error that names the file and the line.
 
@@ -445,11 +447,13 @@ slab 0 reinforced-concrete
 
 #### Geometry
 
-- A node's storey is its `FLOOR` column, or `Z / H` rounded (§11.1). Its height within the storey is `u = (Z − F·H) / H`, brought into [0.02, 0.98]; a `Z` outside its storey (a height given relative to the floor, for example) is placed at the nearest end. The 3-D distance of §11.3 still uses the given coordinates.
+- A node's storey is its `FLOOR` column or, without it, `floor(Z / H)`: the storey whose height range holds `Z`, so that a detector on the ceiling (`Z = F·H + 2.6` m with `H` = 3 m) is on storey `F`. Without a floor plan the floor stays `Z / H` rounded (§11.1), as before. Its height within the storey is `u = (Z − F·H) / H`, brought into [0.02, 0.98]; a `Z` outside its storey (a height given relative to the floor with a `FLOOR` column, for example) is placed at the nearest end. The 3-D distance of §11.3 still uses the given coordinates.
 - Along the straight path from `a` to `b`, the storey coordinate `s = F + u` changes linearly. A wall of storey `F` is counted when the path crosses it in the horizontal plane at a point where `floor(s) = F`: a path between floors meets the walls of each storey only on the part of its length that lies on that storey.
 - The path crosses `|F_a − F_b|` slabs, those of the floors from the lower one up to the floor below the higher one.
-- A crossing inside both segments counts 1. A contact at an end of the wall, or at an end of the path (a node standing on a wall), counts 1/2, and 1/4 at both; two walls that meet on the path (a T or a corner) therefore count once in all. A wall along the path's line, a parallel wall, and any wall for a vertical path (no horizontal extent) count 0. A point within 1 µm of a line is on it.
-- External interferers with `pos=` (§13.1) use the same geometry, their storey from `z` as for a node without `FLOOR`.
+- A crossing inside both segments counts 1. A crossing at an end of the path (a node standing on a wall) counts 1/2, and 1/4 if it is also at an end of the wall.
+- Where walls end at a point inside the path (a vertex: a corner, a T, a wall split there), they divide the space around it into sectors, and the path goes from one sector to another through the walls on its left or through those on its right. The side of lower loss counts, each of its walls once (then the side of fewer walls, then the side with the wall of the lowest line). So a corner or a wall end that only touches the path from one side counts nothing, a wall split at the path counts once (its lighter part), a T counts once, and two walls crossing each other on the path count twice. This is the loss of the lighter of the two paths moved by a millimetre to either side, decided at each vertex.
+- A wall along the path's line, a parallel wall, and any wall for a vertical path (no horizontal extent) count 0. Overlapping walls on one line count once where the path crosses them (above). A point within 1 µm of a line is on it.
+- External interferers with `pos=` (§13.1) use the same geometry, their storey from `z` as for a node without `FLOOR` (`floor(z / H)`).
 
 #### Model
 
@@ -461,12 +465,13 @@ with `L_FS` the free-space loss, `L_c` a constant (0 here), `k_wi` the number of
 
     PL = PL0 + 10 · n · log10(d) + w · d_h + L_wall · walls_grid + Σ c_j · L_j + L_floor
 
-- Without `--prop-model`, a floor plan sets free space: `PL0` the free-space loss at 1 m (31.7 dB at 915 MHz) and `n` = 2; the server prints the model as `multi-wall (floor plan)`. `--prop-pl0` and `--prop-exp` change them. An explicit `--prop-model` keeps that model's values and adds the floor plan's walls; the `indoor` exponent already includes walls, so it counts them twice.
+- Without `--prop-model`, a floor plan sets free space: `PL0` the free-space loss at 1 m (31.7 dB at 915 MHz) and `n` = 2; the server prints the model as `multi-wall (floor plan)`. `--prop-pl0` and `--prop-exp` change them. An explicit `--prop-model` keeps that model's values and adds the floor plan's walls; the `indoor` exponent already includes walls, so it counts them twice. The server prints a warning when a floor plan is combined with `--prop-model`, `--prop-walls` or `--prop-wall-db-per-m`.
 - `Σ c_j · L_j`: each wall crossed, with its weight `c_j` (1, 1/2 or 1/4 above) and its material's loss.
 - `L_floor`, `--prop-floor-model`:
-  - `cost231` (default): `L_f · k^((k + 2)/(k + 1) − b)` with `k` the slabs crossed, `L_f` the mean loss of those slabs, and `b` = `--prop-floor-b` (0.46, COST 231 Table 4.7.2). With `concrete-slab` (15 dB): 15.0, 27.5, 35.7, 41.8, 46.8 dB for 1 to 5 floors.
+  - `cost231` (default): `L_f · k^((k + 2)/(k + 1) − b)` with `k` the slabs crossed, `L_f` the mean loss of those slabs, and `b` = `--prop-floor-b` (0.46, COST 231 Table 4.7.2). With `concrete-slab` (15 dB): 15.0, 27.5, 35.7, 41.8, 46.8 dB for 1 to 5 floors. With slabs of different losses, a light slab lowers the mean, so the term is made non-decreasing: it is at least the term of each shorter run of consecutive slabs it contains (`M(lo, k) = max(L(lo, k), M(lo, k − 1), M(lo + 1, k − 1))`); a path never loses floor loss by crossing one more slab.
   - `slabs`: the sum of the losses of the slabs crossed (15, 30, 45 dB ...).
   - `table`: `--prop-floor-db` as in §11.3, by number of floors.
+  Each floor option belongs to one term: with a floor plan, `--prop-floor-db` needs `table` (and `table` needs it), and `--prop-floor-b` needs `cost231`; other combinations are refused.
   The default is `cost231` because measured losses grow more slowly than one slab loss per floor: Seidel and Rappaport measured 12.9, 18.7, 24.4 and 27.0 dB for 1 to 4 floors at 914 MHz in one office building, and 16.2, 27.5 and 31.6 dB for 1 to 3 in another (signals also go around the slabs, through stairwells and windows).
 - `--prop-wall-db-per-m` and `--prop-walls` still add their terms when given; static shadowing (§11.4), the hearing graph (§11.5) and everything else in this section are unchanged.
 
@@ -506,18 +511,18 @@ The server's log gives the floor plan (walls, storeys, slabs, outlines, material
 
 #### Computation and its cost
 
-The walls of each storey are put in a uniform grid of about one wall per cell (at most 1024 cells per side); a wall is listed in every cell its bounding box, widened by the tolerance, meets. For each pair, the path is cut by storey, and on each storey only the walls listed in the cells its part passes through are tested, each once. The crossings are summed in the order of the walls, so the result is the same as testing every wall (`WSSIM_FLOORPLAN_BRUTE=1` does that, for the tests). Times of the whole start-up computation (no dump, one core):
+The walls of each storey are put in a uniform grid of about one wall per cell (at most 1024 cells per side); a wall is listed in every cell it passes through, widened by the tolerance (a long diagonal wall is not listed over its whole bounding box). For each pair, the path is cut by storey, and on each storey only the walls listed in the cells its part passes through are tested, each once. The crossings are summed in the order of the walls, so the result is the same as testing every wall (`WSSIM_FLOORPLAN_BRUTE=1` does that, for the tests). Times of the whole start-up computation (no dump, one core):
 
 | Building | Without floor plan | With floor plan |
 | --- | --- | --- |
-| 1000 nodes, 10 storeys of 100 m × 50 m, 1750 walls | 0.04 s | 0.33 s |
-| 4000 nodes, 20 storeys, 3500 walls | 0.55 s | 7.1 s |
+| 1000 nodes, 10 storeys of 100 m × 50 m, 1750 walls | 0.04 s | 0.37 s |
+| 4000 nodes, 20 storeys, 3500 walls | 0.55 s | 7.5 s |
 
 The memory is that of the walls and the grids (well under 1 MB for these buildings). Without `--prop-floorplan`, the dump and the log are byte-identical to those of the build before the floor plan (checked on a 1000-node building with a wall grid and every shadowing term).
 
 #### Checks
 
-`sim_utils/vtime/test_floorplan.py <wssimserver>` (fake nodes and `--prop-dump`, about 10 s): `--describe=json` (below); parser errors (unknown directive, word counts, non-integer or out-of-range floors, non-finite or out-of-range coordinates, zero-length walls, unknown materials, a material, a slab or the floor height given twice, bad names and losses, outlines of fewer than 3 points), and what is accepted (a colour, a material defined after its use, a built-in overridden, long lines, an outline without material); geometry (a crossing, a contact at a wall's end and at the path's end, a T junction on the path, parallel and collinear walls, a vertical path, walls of another storey); a path over three storeys meeting one wall per storey only where it is on that storey; heights outside the storey; the losses against hand computation (free space, walls of several materials, slabs per floor including a basement, the `cost231` default and another `b`, `slabs`, `table`, an explicit model, the wall grid on top, the floor height from the file); an interferer's `pos=` behind walls and a slab (CCA energy against the formula); the grid against every wall in random and in grid-aligned buildings (6422 of 14 280 directions with a contact at an end), determinism, shadowing on top; the time for 1000 and 4000 nodes. It is in the LFN suite as `floorplan`.
+`sim_utils/vtime/test_floorplan.py <wssimserver>` (fake nodes and `--prop-dump`, about 10 s, 11 tests): `--describe=json` (below); parser errors (unknown directive, word counts, non-integer or out-of-range floors, non-finite or out-of-range coordinates, zero-length walls, unknown materials, a material, a slab or the floor height given twice, bad names and losses, outlines of fewer than 3 points), and what is accepted (a colour, a material defined after its use, a built-in overridden, long lines, an outline without material); the floor options refused in the wrong combination; the warnings (floor height, double counting, overlapping walls counted once); a colour followed by more words; an outline closed by repeating its first point; geometry (a crossing, a contact at the path's end, a grazed corner, a wall end touching the path, a wall split at the path, a T, a bar with a stem ending on it, two walls crossing on the path, parallel and collinear walls, a vertical path, walls of another storey); a path over three storeys meeting one wall per storey only where it is on that storey; heights outside the storey; storeys from `Z` without `FLOOR` (ceiling heights in the upper half of a storey, a multiple of `H` in floating point) and rounding without a floor plan; the `cost231` term never decreasing over runs of heavy and light slabs; the losses against hand computation (free space, walls of several materials, slabs per floor including a basement, the `cost231` default and another `b`, `slabs`, `table`, an explicit model, the wall grid on top, the floor height from the file); an interferer's `pos=` behind walls and a slab (CCA energy against the formula); the grid against every wall in random and in grid-aligned buildings (6028 of 14 280 directions with a node on a wall), determinism, shadowing on top; an independent oracle on four random plans snapped to a 1 m grid (1696 paths equal to the lighter of the two paths moved 1 mm aside, 158 of them through a vertex; 44 paths through several vertices at most that); the time for 1000 and 4000 nodes. It is in the LFN suite as `floorplan`.
 
 #### Limits
 
@@ -526,7 +531,8 @@ The memory is that of the walls and the grids (well under 1 MB for these buildin
 - **Walls are full storey height and slabs cover the whole floor.** Atriums, stairwells and partial-height partitions are not modelled; an outline does not limit the slab.
 - **One floor height** for the building.
 - **Material values** are for typical constructions; `concrete`, `reinforced-concrete`, `metal` and `low-e-glazing` are assumptions (above), and a measurement in the building should replace them.
-- **Start-up time** grows with the number of pairs times the walls along each path: about 7 s for 4000 nodes and 3500 walls.
+- **Start-up time** grows with the number of pairs times the walls along each path: about 7.5 s for 4000 nodes and 3500 walls.
+- **Vertices:** at a point where walls meet on the path, the lighter side is chosen at each vertex on its own; a path through several vertices may therefore combine sides that no single moved path would.
 
 ### 11.12 Description of the options
 
@@ -540,14 +546,14 @@ The memory is that of the walls and the grids (well under 1 MB for these buildin
   "materials": [{"name": "plasterboard", "loss_db": 2, "color": "#d9d4c7", "basis": "measured: ..."}, ...],
   "options": [
     {"name": "prop-floor-model", "group": "propagation", "arg": "MODEL", "type": "enum",
-     "values": ["cost231", "slabs", "table"], "default": "cost231", "presets": {}, "repeatable": false,
+     "values": ["cost231", "slabs", "table"], "default": "cost231", "effective_default": "cost231", "presets": {}, "repeatable": false,
      "needs": "prop-floorplan", "section": "MEDIUM.md §11.11", "help": "..."},
     ...
   ]
 }
 ```
 
-- `name`: the long option without `--`; `group`: `server`, `vtime`, `power`, `medium`, `sniff`, `propagation`, `variation` or `interference`; `arg`: the argument's syntax (`null` for a flag); `type`: `flag`, `int`, `number`, `enum` (with `values`), `string`, `file`, `spec` (a structured value, see `arg` and the section) or `list`; `default`: the built-in default as text (`null`: none; "per model" when the model sets it); `presets`: the value each medium preset gives the option (§14), taken from the preset table itself; `repeatable`; `needs`: another option it requires; `section`: where it is documented; `help`: one line.
+- `name`: the long option without `--`; `effective_default`: what a run gets without the option, the default preset's value when that preset sets the option, else `default` (use this one to show the default); `group`: `server`, `vtime`, `power`, `medium`, `sniff`, `propagation`, `variation` or `interference`; `arg`: the argument's syntax (`null` for a flag); `type`: `flag`, `int`, `number`, `enum` (with `values`), `string`, `file`, `spec` (a structured value, see `arg` and the section) or `list`; `default`: the built-in default as text (`null`: none; "per model" when the model sets it); `presets`: the value each medium preset gives the option (§14), taken from the preset table itself (a string; `true` for an option without a value; a list when the preset gives the option more than once); `repeatable`; `needs`: another option it requires; `section`: where it is documented; `help`: one line.
 - `presets` lists each preset with the options it adds; `materials` the built-in materials of §11.11.
 
 The descriptions are a maintained table (`app_wssimserver/sim_describe.c`). Before printing, the server checks it against the parser's own option table both ways (every option parsed has a description and every description is an option parsed) and against the options the presets set, and exits with an error otherwise, so a new option cannot be left out. `test_floorplan.py` also checks that every option in `--help` is described and that the preset values match the preset table.

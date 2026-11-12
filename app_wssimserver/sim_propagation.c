@@ -102,7 +102,7 @@ static struct {
     bool tuning;                // any --prop-* option
     const char *path;           // --positions
     enum prop_model model;
-    bool has_pl0, has_exp, has_floor, has_model;
+    bool has_pl0, has_exp, has_floor, has_model, has_floor_height, has_floor_b;
     const char *floorplan;      // --prop-floorplan
     enum prop_floor_model floor_model;
     bool has_floor_model;
@@ -243,6 +243,7 @@ bool prop_option(int opt, const char *arg)
         break;
     case OPT_PROP_FLOOR_HEIGHT:
         prop.floor_height = prop_number("prop-floor-height", arg, 0.1, 1e3);
+        prop.has_floor_height = true;
         break;
     case OPT_PROP_SHADOW:
         prop.sh_link = prop_number("prop-shadow", arg, 0, 30);
@@ -298,7 +299,7 @@ bool prop_option(int opt, const char *arg)
         break;
     case OPT_PROP_FLOOR_B:
         prop.floor_b = prop_number("prop-floor-b", arg, 0, 2);
-        prop.has_floor_model = true;
+        prop.has_floor_b = true;
         break;
     }
     return true;
@@ -344,7 +345,15 @@ void prop_check_options(bool central)
 {
     FATAL_ON((prop.tuning || prop.dump_path) && !prop.path, 1, "--prop-* options need --positions");
     FATAL_ON(prop.dump_node >= 0 && !prop.dump_path, 1, "--prop-dump-node needs --prop-dump");
-    FATAL_ON(prop.has_floor_model && !prop.floorplan, 1, "--prop-floor-model and --prop-floor-b need --prop-floorplan");
+    FATAL_ON((prop.has_floor_model || prop.has_floor_b) && !prop.floorplan, 1,
+             "--prop-floor-model and --prop-floor-b need --prop-floorplan");
+    // With a floor plan, each floor option belongs to one floor term
+    FATAL_ON(prop.floorplan && prop.floor_model == FLOOR_TABLE && !prop.has_floor, 1,
+             "--prop-floor-model=table needs --prop-floor-db");
+    FATAL_ON(prop.floorplan && prop.floor_model != FLOOR_TABLE && prop.has_floor, 1,
+             "--prop-floor-db with a floor plan needs --prop-floor-model=table");
+    FATAL_ON(prop.floorplan && prop.floor_model != FLOOR_COST231 && prop.has_floor_b, 1,
+             "--prop-floor-b needs --prop-floor-model=cost231");
     FATAL_ON((prop.rssi_offset > 0 || prop.rssi_noise > 0) && !central, 1,
              "--rssi-offset and --rssi-noise need the central medium (--vtime, not --medium=legacy)");
 }
@@ -401,6 +410,16 @@ static bool prop_token(const char *tok, double min, double max, double *v)
     return end != tok && !*end && isfinite(*v) && *v >= min && *v <= max;
 }
 
+// The storey of a height z (§11.1, §11.11): without a floor plan, z / H
+// rounded (nodes given at their floor's level, as before); with one, the
+// storey whose height range holds z (a detector at F·H + 2.6 m is on F)
+static int prop_storey_of(double z)
+{
+    if (prop.floorplan)
+        return (int)floor(z / prop.floor_height + 1e-9);
+    return (int)floor(z / prop.floor_height + 0.5);
+}
+
 static void prop_read_positions(void)
 {
     FILE *f = fopen(prop.path, "r");
@@ -444,7 +463,7 @@ static void prop_read_positions(void)
             FATAL_ON(v[3] != floor(v[3]), 1, "--positions: %s:%d: FLOOR must be an integer", prop.path, lineno);
             prop.floor[id] = (int)v[3];
         } else {
-            prop.floor[id] = (int)floor(v[2] / prop.floor_height + 0.5);
+            prop.floor[id] = prop_storey_of(v[2]);
         }
         prop.g[id] = n >= 6 ? v[4] : prop.gain;
     }
@@ -493,6 +512,79 @@ static double prop_storey_u(double z, int f)
     return fmin(fmax(u, 0.02), 0.98);
 }
 
+// COST 231's floor term of the k slabs from floor lo: Lf k^((k+2)/(k+1) - b),
+// Lf their mean loss
+static double prop_cost231_raw(int lo, int k)
+{
+    double sum = 0;
+
+    for (int f = lo; f < lo + k; f++)
+        sum += fp_slab_db(f);
+    return sum / k * pow(k, (k + 2.0) / (k + 1.0) - prop.floor_b);
+}
+
+// The cost231 term made non-decreasing: at least the term of each shorter
+// run of slabs it contains (with slabs of different losses, the mean could
+// otherwise fall when a light slab is added). M(lo, k) = max(raw(lo, k),
+// M(lo, k - 1), M(lo + 1, k - 1)); a table over the nodes' floors, computed
+// on demand, and the same recursion for other floors (interferers).
+static struct {
+    int f0, n;                  // floors f0 .. f0 + n - 1
+    double *m;                  // m[lo * n + k - 1], NAN until computed
+} cost_tab;
+
+static double prop_cost231(int lo, int k)
+{
+    double *cell = NULL, v;
+
+    if (k <= 0)
+        return 0;
+    if (cost_tab.m && lo >= cost_tab.f0 && lo + k <= cost_tab.f0 + cost_tab.n) {
+        cell = &cost_tab.m[(long)(lo - cost_tab.f0) * cost_tab.n + k - 1];
+        if (!isnan(*cell))
+            return *cell;
+    }
+    if (!cell) {
+        // Outside the table: the same recursion, by run length (O(k^2))
+        double *row = malloc(k * sizeof(*row));
+
+        FATAL_ON(!row, 1, "malloc: %m");
+        for (int i = 0; i < k; i++)
+            row[i] = prop_cost231_raw(lo + i, 1);
+        for (int len = 2; len <= k; len++)
+            for (int i = 0; i + len <= k; i++)
+                row[i] = fmax(prop_cost231_raw(lo + i, len), fmax(row[i], row[i + 1]));
+        v = row[0];
+        free(row);
+        return v;
+    }
+    v = prop_cost231_raw(lo, k);
+    if (k > 1)
+        v = fmax(v, fmax(prop_cost231(lo, k - 1), prop_cost231(lo + 1, k - 1)));
+    *cell = v;
+    return v;
+}
+
+static void prop_cost231_table(void)
+{
+    int fmin_ = 0, fmax_ = 0;
+
+    for (int k = 0; k < prop.n_pos; k++) {
+        int f = prop.floor[prop.ids[k]];
+
+        fmin_ = !k || f < fmin_ ? f : fmin_;
+        fmax_ = !k || f > fmax_ ? f : fmax_;
+    }
+    cost_tab.f0 = fmin_;
+    cost_tab.n = fmax_ - fmin_ + 1;
+    if (cost_tab.n < 2 || cost_tab.n > 2048)
+        return;                 // no slab, or too many floors for a table (recursion only)
+    cost_tab.m = malloc((size_t)cost_tab.n * cost_tab.n * sizeof(*cost_tab.m));
+    FATAL_ON(!cost_tab.m, 1, "malloc: %m");
+    for (long i = 0; i < (long)cost_tab.n * cost_tab.n; i++)
+        cost_tab.m[i] = NAN;
+}
+
 // The floor term between storeys fa and fb with a floor plan (§11.11)
 static double prop_fp_floor_loss(int fa, int fb)
 {
@@ -503,12 +595,11 @@ static double prop_fp_floor_loss(int fa, int fb)
         return 0;
     if (prop.floor_model == FLOOR_TABLE)
         return prop_floor_loss(k);
+    if (prop.floor_model == FLOOR_COST231)
+        return prop_cost231(lo, k);
     for (int f = lo; f < lo + k; f++)
         sum += fp_slab_db(f);
-    if (prop.floor_model == FLOOR_SLABS)
-        return sum;
-    // COST 231 multi-wall: Lf k^((k+2)/(k+1) - b), Lf the mean slab loss
-    return sum / k * pow(k, (k + 2.0) / (k + 1.0) - prop.floor_b);
+    return sum;
 }
 
 // The floor plan's terms of the path from (xa, ya, storey fa, height ua) to
@@ -607,12 +698,23 @@ void prop_build(uint64_t (*graph)[MAX_NODES / 64], struct node_infos *links, con
     prop_defaults();
     if (prop.floorplan) {
         fp_load(prop.floorplan, prop.floor_height);
+        if (prop.has_floor_height && fp_floor_height() != prop.floor_height)
+            WARN("--prop-floorplan: the file's floorheight %g m replaces --prop-floor-height %g m",
+                 fp_floor_height(), prop.floor_height);
         prop.floor_height = fp_floor_height();
+        // Terms that already stand for walls: counted twice with the floor plan
+        if (prop.has_model)
+            WARN("--prop-floorplan with --prop-model=%s: the model's exponent and floor table may already include "
+                 "walls and floors (counted twice)", prop_model_names[prop.model]);
+        if (prop.wall_db > 0 || prop.wall_per_m > 0)
+            WARN("--prop-floorplan with --prop-walls or --prop-wall-db-per-m: those walls add to the floor plan's");
     }
     prop_read_positions();
     if (prop.floorplan)
         for (int k = 0; k < prop.n_pos; k++)
             prop.u[prop.ids[k]] = prop_storey_u(prop.z[prop.ids[k]], prop.floor[prop.ids[k]]);
+    if (prop.floorplan && prop.floor_model == FLOOR_COST231)
+        prop_cost231_table();
     if (prop.sh_node > 0)
         for (int k = 0; k < prop.n_pos; k++)
             prop.node_sh[prop.ids[k]] = prop.sh_node * prop_normal(K_NODE, prop.ids[k], 0);
@@ -624,7 +726,7 @@ void prop_build(uint64_t (*graph)[MAX_NODES / 64], struct node_infos *links, con
                       "(0: added by a -g option only); given: 1 if a -g value sets that direction\n",
                 prop.floorplan ? " wall_n wall_db floor_db crossed" : "", prop.tx_dbm);
         if (prop.floorplan)
-            fprintf(dump, "# floor plan: wall_n the weighted crossings (a contact at an end counts half), wall_db and "
+            fprintf(dump, "# floor plan: wall_n the weighted crossings (a crossing at the path's end counts half), wall_db and "
                           "floor_db their losses (in pl_db), crossed the walls' line numbers in the floor plan "
                           "(.K: edge K of an outline; :W a weight other than 1)\n");
     }
@@ -743,7 +845,7 @@ bool prop_point_dbm(int node, const double pos[3], float eirp_dbm, float *dbm)
     if (prop.wall_db > 0)
         pl += (prop_walls_between(pos[0], prop.x[node], prop.walls_x) +
                prop_walls_between(pos[1], prop.y[node], prop.walls_y)) * prop.wall_db;
-    fl = (int)floor(pos[2] / prop.floor_height + 0.5);
+    fl = prop_storey_of(pos[2]);
     if (prop.floorplan) {
         struct prop_path r = { };
 
