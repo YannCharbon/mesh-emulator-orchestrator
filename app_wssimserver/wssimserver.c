@@ -20,6 +20,7 @@
 #include "ns_port_sim.h"
 #include "sim_power.h"
 #include "sim_medium.h"
+#include "sim_propagation.h"
 
 #define MAX_NODES SIM_MAX_NODES
 
@@ -380,6 +381,7 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "                            receiver is on (0)\n");
     fprintf(stream, "  --sniff-log=FILE          one line per sniff (t_req node id chan t0 t1 outcome t frame_id\n");
     fprintf(stream, "                            src rssi_dbm sinr_db locked)\n");
+    prop_print_help(stream);
     exit(exit_code);
 }
 
@@ -607,12 +609,19 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "sniff-log", required_argument, 0, OPT_SNIFF_LOG },
         { 0,       0,                 0,   0  }
     };
+    // The propagation options (sim_propagation.c) follow the server's own
+    static struct option all_opts[ARRAY_SIZE(opts_long) + 32];
     uint64_t mask[MAX_NODES / 64];
     char *end;
     double d;
-    int opt;
+    int opt, n;
 
-    while ((opt = getopt_long(argc, argv, opts_short, opts_long, NULL)) != -1) {
+    for (n = 0; opts_long[n].name; n++)
+        all_opts[n] = opts_long[n];
+    for (int k = 0; prop_long_options[k].name; k++)
+        all_opts[n++] = prop_long_options[k];
+    BUG_ON(n >= (int)ARRAY_SIZE(all_opts));
+    while ((opt = getopt_long(argc, argv, opts_short, all_opts, NULL)) != -1) {
         switch (opt) {
             case 'g':
                 FATAL_ON(bitmap_parse(optarg, mask, MAX_NODES / 64), 1,
@@ -819,6 +828,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
                 print_help(stderr, 1);
                 break;
             default:
+                prop_option(opt, optarg);
                 break;
         }
     }
@@ -846,7 +856,8 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             vt_ctls[j] = vt_ctls[j - 1];
             vt_ctls[j - 1] = tmp;
         }
-    FATAL_ON(ctxt->dump && !ctxt->num_groups, 1, "No graph to dump");
+    prop_check_options(med_central());
+    FATAL_ON(ctxt->dump && !ctxt->num_groups && !prop_enabled(), 1, "No graph to dump");
     if (optind >= argc)
         FATAL(1, "Expected argument: socket path");
     if (optind + 1 < argc)
@@ -876,7 +887,6 @@ static void apply_groups(struct ctxt *ctxt)
                  "-g %s: bad option (IDS[:RSSI], IDs 0 to %d, e.g. 2,5:-67.5 or 0-3)", ctxt->groups[i], MAX_NODES - 1);
         graph_apply_mask(ctxt->node_graph, mask);
     }
-    free(lp.origin);
     if (lp.overrides)
         WARN("-g: %d link values set again with another value by a later -g (the later one applies)", lp.overrides);
     max = ctxt->num_groups ? graph_get_num_nodes(ctxt) : 0;
@@ -887,8 +897,11 @@ static void apply_groups(struct ctxt *ctxt)
                 lp.asymmetric++;
     if (lp.asymmetric)
         INFO("-g: %d asymmetric links (a different value in each direction)", lp.asymmetric);
-    if (!ctxt->num_groups)
+    // With --positions, who hears whom comes from the model (plus the -g pairs)
+    if (!ctxt->num_groups && !prop_enabled())
         memset(ctxt->node_graph, 0xFF, sizeof(ctxt->node_graph));
+    prop_build(ctxt->node_graph, nodes_infos_flat_map, lp.origin);
+    free(lp.origin);
     for (i = 0; i < MAX_NODES; i++)
         bitmap_clr(i, ctxt->node_graph[i], MAX_NODES / 64);
     if (ctxt->dump) {
@@ -1717,12 +1730,15 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
         ret = -1;
     for (i = 0; i < num; i++) {
         if (!msgs[i].frame && msgs[i].sniff) {
+            if (msgs[i].result.detected)
+                msgs[i].result.rssi_dbm = prop_reported_dbm(node, msgs[i].result.frame_id, msgs[i].result.rssi_dbm);
             if (!ret && vt_send(node, &msgs[i].result, sizeof(msgs[i].result)))
                 ret = -1;
             vt_sniff_results_out++;
             continue;
         }
         if (!msgs[i].frame) {
+            msgs[i].verdict.rx_dbm = prop_reported_dbm(node, msgs[i].verdict.frame_id, msgs[i].verdict.rx_dbm);
             if (!ret && vt_send(node, &msgs[i].verdict, sizeof(msgs[i].verdict)))
                 ret = -1;
             vt_verdicts_out++;
@@ -1732,7 +1748,7 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
         if (!ret && hdr->flags & SIM_FRAME_MEDIUM) {
             // The power at this receiver, in a copy: the frame is shared
             memcpy(out, msgs[i].frame->data, msgs[i].frame->len);
-            ((struct sim_frame_hdr *)out)->rx_dbm = msgs[i].rx_dbm;
+            ((struct sim_frame_hdr *)out)->rx_dbm = prop_reported_dbm(node, hdr->frame_id, msgs[i].rx_dbm);
             // A version-1 client of the radio interface knows only MEDIUM
             if (vt_radio_if(node) && conns[slot_of_node[node]].radio_if < 2)
                 ((struct sim_frame_hdr *)out)->flags &= ~SIM_FRAME_LONG_PREAMBLE;
@@ -1871,6 +1887,7 @@ static int vt_ctl_run(struct ctxt *ctxt, struct vt_ctl *c, struct nsim_welcome *
         INFO("virtual time: link %d-%d at %.1f dBm from %s", c->src, c->node, c->rssi, vt_time_str(vt_now));
         sim_link(nodes_infos_flat_map, c->node, c->src)->rssi = c->rssi;
         sim_link(nodes_infos_flat_map, c->src, c->node)->rssi = c->rssi;
+        prop_override(c->src, c->node);
         return 0;
     case VT_CTL_START:
         if (slot_of_node[c->node])

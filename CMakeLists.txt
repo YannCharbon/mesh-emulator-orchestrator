@@ -63,6 +63,7 @@ function(wssim_add_server)
         ${NANOSTACK_ROOT}/port/posix/common/log.c
         app_wssimserver/sim_medium.c
         app_wssimserver/sim_power.c
+        app_wssimserver/sim_propagation.c
         app_wssimserver/wssimserver.c)
     target_include_directories(wssimserver PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}

@@ -21,6 +21,7 @@
 
 #include "common/log.h"
 #include "sim_medium.h"
+#include "sim_propagation.h"
 
 // kTB at 293 K and 100 kHz, NF 4 dB: the constant of the radio's loss curve
 // (app_wshwsim/sl_rf_driver.c)
@@ -595,6 +596,9 @@ static float med_rx_dbm(int rx, int src, int8_t tx_dbm)
 {
     float link = sim_link(med.links, rx, src)->rssi;
 
+    // From node positions (docs/MEDIUM.md §11), unless a -g value overrides
+    if (prop_modelled(rx, src))
+        return prop_link_dbm(rx, src, tx_dbm);
     if (link == 0 || !med.has_tx_ref)
         return link;
     return link + (tx_dbm - med.tx_ref);
