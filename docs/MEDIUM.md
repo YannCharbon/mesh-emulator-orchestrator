@@ -1,6 +1,6 @@
 # Central radio medium (EM4): design for implementers
 
-Plan and rationale: the root repo's `documents/pre-study/investigation/Investigation_Nanostack_Emulator.md` §5 (P2, "Target architecture") and `STATUS.md` EM4. This note fixes the interfaces of the MVP so that the server side and the radio side can be built in parallel. Scope: **virtual time only** (`wssimserver --vtime`, in-process nodes on the simulation port), where it is the default since the gate passed (§8). Wall-clock mode and the split programs keep the per-radio behaviour.
+Plan and rationale: the root repo's `documents/pre-study/investigation/Investigation_Nanostack_Emulator.md` §5 (P2, "Target architecture") and `STATUS.md` EM4. This note fixes the interfaces of the MVP so that the server side and the radio side can be built in parallel. Scope: **virtual time only** (`wssimserver --vtime`, in-process nodes on the simulation port), where it is the default since the gate passed (§8). Wall-clock mode and the split programs keep the per-radio behaviour. The default settings of the medium are the `calibrated` preset; §14 lists the presets and what each one turns on.
 
 ## 1. What changes
 
@@ -18,7 +18,7 @@ With the central medium (the default with `--vtime`; `--medium=central` says it 
 
 All powers in dBm at the receiver's antenna; sums are done in mW.
 
-- **Received power.** `P = link(rx, tx)` from the `-g` options (and `--vtime-link`), or, with `--positions`, from the node positions and a path-loss model (§11), which also derives who hears whom. With `-g` values: the value is the received power, whatever TX power the sender uses. With `--medium-tx-ref=DBM`, the value is the received power when the sender transmits at DBM, and `P = link + (tx_dbm − DBM)`, with `tx_dbm` from the frame header: the TX power the MAC last set (`wsnode` and `wsbrd` set it from their `tx_power` setting at start; a radio whose MAC never set one reports 0 dBm). The TX power used there and with positions (§11) is at most the sender's PA maximum, `--medium-tx-max=DBM|profile|off`: by default (`profile`) the top level of the sender's power-profile TX table, the level the power ledger clamps to (16.9 dBm in the FG25 profiles, POWER_MODEL.md §12.10), so a node asking for 20 dBm radiates 16.9 dBm; without `--power` there is no profile and no limit (the header's value, as before 2026-11-13). Plain `-g` values without `--medium-tx-ref` do not depend on the TX power. The graph of §11 (who hears whom) is still decided at `--prop-tx-dbm`. An edge without a value (0 dBm) stays a perfect link; it is also a 0 dBm interferer and 0 dBm of CCA energy, so two frames over such links always destroy each other and neither can capture the other. Give RSSIs to the edges when collisions matter. With the options of §12, the link's variation at the frame's start (shadowing, fading, bursts) is added to `P`. Pairs that are not graph neighbours do not hear each other at all: no reception, no interference, no energy in CCA.
+- **Received power.** `P = link(rx, tx)` from the `-g` options (and `--vtime-link`), or, with `--positions`, from the node positions and a path-loss model (§11), which also derives who hears whom. With `-g` values: the value is the received power, whatever TX power the sender uses. With `--medium-tx-ref=DBM`, the value is the received power when the sender transmits at DBM, and `P = link + (tx_dbm − DBM)`, with `tx_dbm` from the frame header: the TX power the MAC last set (`wsnode` and `wsbrd` set it from their `tx_power` setting at start; a radio whose MAC never set one reports 0 dBm). The TX power used there and with positions (§11) is at most the sender's PA maximum, `--medium-tx-max=DBM|profile|off`: 16.9 dBm in the `calibrated` and `realistic` presets (the FG25 reference hardware: RAIL's reported maximum on the BRD4271A, POWER_MODEL.md §12.10), so a node asking for 20 dBm radiates 16.9 dBm; `off` (no limit, the header's value) in the `basic` and `em4` presets; `profile`, only when given, the top level of each sender's power-profile TX table (it needs `--power`). The limit does not depend on whether power is recorded: a run with and without `--power` radiates the same powers. Plain `-g` values without `--medium-tx-ref` do not depend on the TX power. The graph of §11 (who hears whom) is still decided at `--prop-tx-dbm`. An edge without a value (0 dBm) stays a perfect link; it is also a 0 dBm interferer and 0 dBm of CCA energy, so two frames over such links always destroy each other and neither can capture the other. Give RSSIs to the edges when collisions matter. With the options of §12, the link's variation at the frame's start (shadowing, fading, bursts) is added to `P`. Pairs that are not graph neighbours do not hear each other at all: no reception, no interference, no energy in CCA.
 - **Links and their direction.** `link(rx, tx)` is directional: the power at `rx` of `tx`'s frames. The `-g` options (and `--group-file`, one option per line) set it, in order:
   - `-g A,B:RSSI` (exactly two IDs) sets `A → B` (heard by B) to RSSI, and also `B → A`, unless an option `-g B,A:RSSI` gives that direction itself, before or after. A link given once is therefore the same in both directions, as before 2026-11-09, and a reverse option makes it **asymmetric** (different TX powers, noise or antennas at the two ends): `-g 0,1:-70 -g 1,0:-80` is −70 dBm at node 1 and −80 dBm at node 0. Giving both directions with the same value is the same as giving the link once.
   - Any other list, a range (`0-3:RSSI`, even `0-1:RSSI`) or more than two IDs (`1,2,5:RSSI`), sets every pair of its nodes, both directions.
@@ -34,7 +34,7 @@ All powers in dBm at the receiver's antenna; sums are done in mW.
 - **Over a frame.** The counted bits are spread uniformly over `[t_bits, t_end)`: with the measured curve, `t_bits` is the end of the frame's SHR (the kits measured the interferer over the PHR, payload and FCS; interference during the SHR is the business of the capture rules, §3); with `--medium-model=em4`, the frame's start, as before EM5. That range is cut into segments wherever an interferer starts or ends. Each segment `k` holds a share of the counted bits proportional to its duration, `bits_k`, and has its own `SNR` and `SIR_k`. `P_success = Π_k (1 − BER_k)^bits_k`. One uniform draw from the receiver's stream decides; draws are made only when `0 < P_success < 1`. The SINR reported in the verdict and the medium log is the lowest `P / (N + I)` over the segments.
 - **Interferers** of a frame at receiver `r`: every other frame whose sender is a graph neighbour of `r`, overlapping in time (end exclusive: a frame ending at `t` does not overlap one starting at `t`), on the same channel at its received power, or on the next channel (channel number ± 1) 10 dB weaker (`--medium-adjacent-db`, §2.1). Frames two or more channels away do not interfere, unless the adjacent-channel table says otherwise (§13.2). External interferers (§13.1) add to the same sums. The same rule gives the energy of the lock threshold (§3) and of CCA (§6): a frame on the next channel adds its power less 10 dB.
 - **Airtime** at the medium: `bytes = shr_len + phr_len + len + fcs_len`, `airtime_us = bytes · 8 · 10⁶ / rate_bps` with integer division, from the frame header. This is the sender's own formula (`rf_airtime_us()`), so the sender's TX end and the medium's frame end coincide.
-- **Defaults** (all settable): lock threshold `--medium-lock-snr=0` dB (chosen); interference curve, capture margin and windows, break margin and adjacent channel per PHY from the kit measurements (§2.1).
+- **Defaults** (all settable): lock threshold `--medium-lock-snr=0` dB (chosen); interference curve, capture margin and windows, break margin and adjacent channel per PHY from the kit measurements (§2.1); the receiver curve, link variation, adjacent-channel table, capture model and PA maximum from the preset (§14).
 
 ### 2.1 Calibration on the FG25 kits (EM5)
 
@@ -53,7 +53,7 @@ The profile of the frame being received sets the curve and the capture rules; th
 
 **The emulated radio's preamble** (`app_wshwsim/sl_rf_driver.c`). With the central medium, the Nanostack nodes send the FG25 PHY's preamble: 12 bytes in mode 3 (SHR 747 µs), 8 bytes in the other modes (`COCHANNEL_RESULTS.md` §2, §6 item 4: Silicon Labs' `PHY_WISUN_FAN_1v1_863MHz_Plan33_2FSK_3_EU`; mode 1a sends 8 bytes; other modes keep Wi-SUN FAN's minimum of 8, not measured). `WSSIM_PHY_PREAMBLE` in the nodes' environment fixes it for every mode; the legacy medium keeps 8 bytes, as the permanent reference runs. A client of the radio interface sends the SHR it puts in its frame headers ([RADIO_INTERFACE.md](RADIO_INTERFACE.md)): 14 bytes (12 + SFD) to match the FG25 in mode 3.
 
-**The model before EM5:** `--medium-model=em4` (interference as noise, capture by 6 dB over the whole SHR, no break, no adjacent channel, counted bits over the whole airtime), with `WSSIM_PHY_PREAMBLE=8` in the nodes' environment, gives the MVP's behaviour: a 41-node star with collisions (`medium_gate_star.sh`, hidden, seed 1, 600 s) gives node logs and a medium log (397 220 lines) identical to emulator `da8e09c`.
+**The model before EM5:** `--medium-preset=em4` (the preset sets `--medium-model=em4`: interference as noise, capture by 6 dB over the whole SHR, no break, no adjacent channel, counted bits over the whole airtime; `--medium-model=em4` without a preset selects the same preset), with `WSSIM_PHY_PREAMBLE=8` in the nodes' environment, gives the MVP's behaviour: a 41-node star with collisions (`medium_gate_star.sh`, hidden, seed 1, 600 s) gives node logs and a medium log (397 220 lines) identical to emulator `da8e09c` (checked again with the presets, with `--medium-preset=em4` and with `--medium-model=em4` alone).
 
 ## 3. Reception at a receiver
 
@@ -105,12 +105,13 @@ Under `NS_PORT_SIM` and `ns_port_sim_medium()` (`app_wshwsim/sl_rf_driver.c`):
 ## 7. Server options and outputs
 
 - `--medium=legacy|central` (virtual time only; refused without `--vtime`). Default with `--vtime`: `central`.
+- `--medium-preset=calibrated|realistic|basic|em4` (central medium; `basic` is also accepted with `--medium=legacy`, where it changes nothing): a set of the options below, given before the command line's own (§14). Default: `calibrated`.
 - `--medium-tx-ref=DBM`, `--medium-tx-max=DBM|profile|off`, `--medium-lock-snr=DB` (refused with `--medium=legacy`).
 - The reception model (§2.1; refused with `--medium=legacy`): `--medium-model=fg25|em4`, and per PHY profile `--medium-int-curve=[MODE:]X0,B|noise`, `--medium-capture-db=[MODE:]DB`, `--medium-capture-early-bits=[MODE:]N|shr`, `--medium-capture-sfd=[MODE:]on|off`, `--medium-break-db=[MODE:]DB|off`, `--medium-adjacent-db=[MODE:]DB|off`.
 - Propagation from node positions: `--positions`, `--prop-*` (both media), `--rssi-offset`, `--rssi-noise` (central only); §11.8.
-- Preamble sniffing: `--sniff-detect`, `--sniff-dwell-bits`, `--sniff-threshold`, `--sniff-curve`, `--sniff-sfd-bits`, `--sniff-log` (§10.5; refused with `--medium=legacy`).
+- Preamble sniffing: `--sniff-detect`, `--sniff-dwell-bits`, `--sniff-threshold`, `--sniff-curve`, `--sniff-sfd-bits`, `--sniff-margin-bits`, `--sniff-settle-us`, `--sniff-log` (§10.5; refused with `--medium=legacy`).
 - Link variation and the receiver curve: `--medium-rx-model`, `--medium-rx-curve`, `--medium-combine`, `--medium-fading`, `--medium-shadowing`, `--medium-node-share`, `--medium-reciprocal`, `--medium-burst` (§12.5; refused with `--medium=legacy`).
-- External interference and spectrum: `--interferer*`, `--medium-adjacent-table`, `--medium-capture-model`, `--medium-capture-smooth`, `--medium-int-curve-presync`, `--sniff-adjacent`, `--sniff-energy*`, `--sniff-false` (§13.5).
+- External interference and spectrum: `--interferer*`, `--medium-adjacent-table`, `--medium-capture-model`, `--medium-capture-smooth`, `--medium-int-curve-presync`, `--sniff-adjacent`, `--sniff-energy*`, `--sniff-false` (§13.5). Options that would have no effect are refused: `--medium-capture-smooth` for PHYs without the smooth model, `--sniff-energy-us` without `--sniff-energy`, `--interferer-log` without an interferer, `--sniff-adjacent` without any adjacent-channel coupling.
 - `--medium-log=FILE`: one line per (frame, receiver) outcome: `t_end_us src dst frame_id outcome rx_dbm sinr_min_db` (four more columns when links vary, §12.6; then, with external interferers, one more, §13.1), outcome one of `ok`, `noise` (lost, no interferer), `interference` (lost with an interferer), `captured`, `below_lock` (heard, not locked: too weak against the noise and interference), `busy` (heard while receiving another frame and not captured), `not_listening`, `tx_abort`, `left`.
 - At the end of the run, a summary line per outcome (totals), the number of sync searches broken by a stronger frame (§3, counted in `interference`), and the CCA query count with the number of queries that found a frame on air. The server does not know the radios' CCA thresholds: the busy counts are in the radios' exit lines (`rf medium: N CCA, N busy`).
 - Random: the verdict draws use a stream per receiver, `mix64(seed + mix64(node ID + 1) + K)` with a constant `K` that separates it from the port's and the drift's streams.
@@ -127,9 +128,9 @@ The gate passed: the central medium is the default with `--vtime`. What compares
 
 Since EM5 (§2.1), `test_conductor.py` also checks the calibrated model: the measured locked-frame points (`medium_calib_sir`: mode 3 at SIR +0.4, +2.65, +3.8, +5.0 and +8 dB, mode 1a at +2.9 and +5.3 dB, each inside the measured band and equal to the formula, and the EM4 model at +5 dB for comparison), the capture windows and margins in modes 3 and 1a, the break and a lock after it (`medium_calib_capture`), the adjacent channel in reception, lock and CCA (`medium_calib_adjacent`, `medium_cca`), and the options (`medium_calib_options`). The tests that encoded the MVP's rules run them with `--medium-model=em4` or were moved to the new values, each change explained in its docstring. `radio_if/test_ref_client.py` has a capture inside the early window and a broken search (`capture`, `capture_break`).
 
-**Effect at network level** (2026-11-09, `--medium-model=em4` with `WSSIM_PHY_PREAMBLE=8` against the default; same seeds):
+**Effect at network level** (2026-11-09, `--medium-model=em4` with `WSSIM_PHY_PREAMBLE=8` against the default of that time, which is the `basic` preset today, §14; same seeds):
 
-| Scenario | Runs per model | EM4 model | Calibrated (EM5) |
+| Scenario | Runs per model | EM4 model | Kit measurements (EM5; today's `basic` preset) |
 | --- | --- | --- | --- |
 | `dag_simple` (`medium_gate_dag.sh`, 15 nodes, no data traffic) | 6 × 600 s | collisions 2.05 % of the frames heard, interference losses 32 per run; routers ready median 148 s | 1.52 %, 19 per run; 152 s; join milestones not significantly different (Mann-Whitney p = 0.64–0.82), 14/14 routers ready in every run |
 | Star, 40 routers in 4 hidden groups (`medium_gate_star.sh`, from 300 s) | 3 × 900 s | at the border router 56 % of the frames heard received, 628 interference losses per run, collisions 42 %; requests delivered 99.82 % (4 of 2280 lost); routers ready median 125 s | 64 %, 338, 34 %; 99.65 % (8 of 2280; one run lost 8, the others none: not significant); 112 s |
@@ -141,18 +142,18 @@ Most remaining collision losses are `busy` frames (a receiver holds one frame at
 
 ## 9. Not in the MVP
 
-Fading, time-varying shadowing and bursts of losses are in §12 (off by default). External interferers are in §13. Not modelled by default: RX↔TX turnaround and settling times (the emulated radio has options for the turnaround, off by default, §9.2) (Investigation §5, P4–P11 and the layered loss model). Node positions with path-loss models, static shadowing and a reported RSSI with its own error are in §11. The radio still decides its own TX timing; the medium does not delay or refuse a transmission. A frame that will be lost keeps its receiver in RX for its whole airtime, as on a real radio (legacy dropped it at its start), so central runs show more RX time.
+Fading (on by default since the presets, §14), time-varying shadowing and bursts of losses (off by default) are in §12. External interferers are in §13. Not modelled by default: the RX↔TX turnaround of the emulated radio (options, off by default, §9.2) and the receiver's settling time at a frame's start (the 225 µs settling time applies to sniffing only, §10.5) (Investigation §5, P4–P11 and the layered loss model). Node positions with path-loss models, static shadowing and a reported RSSI with its own error are in §11. The radio still decides its own TX timing; the medium does not delay or refuse a transmission. A frame that will be lost keeps its receiver in RX for its whole airtime, as on a real radio (legacy dropped it at its start), so central runs show more RX time.
 
 ### 9.1 Limits of the calibration
 
 The collision figures of the MVP were upper bounds (interference treated as noise, 9–16 dB pessimistic for a locked frame); since EM5 the defaults follow the kit measurements (§2.1). What they do not cover:
 
-- **No fading in the measurements.** The kits stood a few tens of centimetres apart on a desk. By default links keep fixed values; §12 adds variation.
+- **No fading in the measurements.** The kits stood a few tens of centimetres apart on a desk. The fading of the default preset (§12, §14) is not from these measurements: its K factor is fitted so that the layered curve reproduces the field-fitted empirical curve on average (§12.3).
 - **Nothing near sensitivity.** The wanted frames were 70 dB above sensitivity (−38 … −14 dBm). Near sensitivity, noise and interference add; the medium takes the larger of the two error rates, which is optimistic there by up to a few dB: the datasheet's co-channel rejection, measured 3 dB above sensitivity with a CW interferer, needs the wanted signal 4.4 dB (mode 3) to 7.1 dB (mode 1a) above the interferer for 10 % packet loss, against 3.8 dB here for 10 % loss (mode 3, a modulated interferer, `COCHANNEL_RESULTS.md` §4.1, §4.3). `--medium-combine` (§12.4) adds the two disturbances instead.
-- **Transitions are coarse steps.** Capture and break are deterministic at their margins, whereas the kits show probabilistic transitions: with 0–3 dB of margin the stronger frame was still received in 58–95 % of cycles (0 and 100 µs, §4.2), which the medium counts as both lost (`--medium-capture-model=smooth`, §13.3, models these transitions as probabilities). The capture timing was scanned at three margins in mode 3 and two in mode 1a; the transition points (mode 3: 250, 600, 750 µs) are placed at their 50 % points or at the SFD's edges.
+- **Transitions as steps (`basic` preset).** With `--medium-capture-model=step`, capture and break are deterministic at their margins, whereas the kits show probabilistic transitions: with 0–3 dB of margin the stronger frame was still received in 58–95 % of cycles (0 and 100 µs, §4.2), which the step model counts as both lost. The default preset uses the smooth model (§13.3), which models these transitions as probabilities. The capture timing was scanned at three margins in mode 3 and two in mode 1a; the transition points (mode 3: 250, 600, 750 µs) are placed at their 50 % points or at the SFD's edges.
 - **Not measured, values carried over:** mode 1a's capture margin, break margin and adjacent channel (mode-3 values); every other PHY (the `other` profile, the mode-3 values, including the early window of 37 bits whatever the preamble length); long `"xl"` preambles (the whole long preamble is a capture window, as a receiver that restarts its search would take a stronger frame; not measured); frames of other lengths than 50 and 250 bytes.
 - **The interference curve** fits the 50-byte, 250-byte and partial-overlap cases with one constant pair, within 0.4 dB at 50 % and 1–2 dB conservative at 99 % (§4.1). The SIR axis of the measurement is accurate to about 1 dB.
-- **Preamble sniffing** (§10): its defaults are from the kits since 2026-11-12 (§10.5), in mode 3 only and against an interferer only (no detection near sensitivity); frames on the next channel take no part in it.
+- **Preamble sniffing** (§10): its defaults are from the kits since 2026-11-12 (§10.5), in mode 3 only and against an interferer only (no detection near sensitivity); frames on the next channel take no part in it unless `--sniff-adjacent` is given (§13.4).
 - RAILtest only: the firmware's MAC (CCA, ACK timing) was not in the loop.
 
 ### 9.2 RX/TX turnaround of the emulated radio (options, off by default)
@@ -178,7 +179,7 @@ For sniff MACs (low-power listening, preamble sampling): a node wakes for a shor
 
 ### 10.1 The primitive
 
-A radio sends `"xn"` (`struct sim_sniff`) during its run at time `t`: channel `C`, duration `d`, a tag, flags, an end state. Its receiver is on, on `C`, from `t_on` to `t1 = t + d`: `t_on = t`, or the end of the node's own frame if one is on air (half duplex, §10.3). It detects over the **window** `[t0, t1)`, `t0 = t_on + --sniff-settle-us` (0 by default), at most `t1`. The conductor answers with one `"xd"` (`struct sim_sniff_result`), not at once but in a later wake of the node:
+A radio sends `"xn"` (`struct sim_sniff`) during its run at time `t`: channel `C`, duration `d`, a tag, flags, an end state. Its receiver is on, on `C`, from `t_on` to `t1 = t + d`: `t_on = t`, or the end of the node's own frame if one is on air (half duplex, §10.3). It detects over the **window** `[t0, t1)`, `t0 = t_on + --sniff-settle-us` (225 µs by default, §10.5), at most `t1`. The conductor answers with one `"xd"` (`struct sim_sniff_result`), not at once but in a later wake of the node:
 
 - at the **detection time** `td`, the end of the first dwell that detects a frame (§10.2): `detected = 1`, the frame's `frame_id` and sender, `t_us = td`, `rssi_dbm` = the frame's received power `P`, `sinr_db` = the lowest SINR over that dwell;
 - or at `t1` if nothing was detected: `detected = 0`, `t_us = t1`, `rssi_dbm` = the energy on `C` at the node at `t1` (noise plus the frames on air then that it hears, as `"xs"` would answer; on an empty channel, the noise floor −119.93 dBm).
@@ -244,7 +245,7 @@ All are user settings. The FG25 datasheet gives no preamble-detection figure (no
 | `--sniff-detect=preamble\|frame` | `preamble` | RAIL's RX duty-cycle "preamble sense" mode: the radio stays in RX if it has a preamble at the end of the sense time (`RAIL_RX_CHANNEL_HOPPING_MODE_PREAMBLE_SENSE`, `rail_types.h` of the Simplicity SDK 2026.6.2) |
 | `--sniff-dwell-bits=N` | 7 | Kits: a receiver already on detects a preamble 7–61 µs after it starts, median 47 µs (7 bits at 150 kbit/s); one dwell is the median, the faster detections are not modelled. Before: 16, an assumption |
 | `--sniff-threshold=DBM\|off` | `off` | RAIL applies an RSSI threshold in duty-cycle mode only if `RAIL_RX_CHANNEL_HOPPING_OPTION_RSSI_THRESHOLD` is set (`rssiThresholdDbm`, same header); off by default. The medium compares it with the candidate frame's own received power, not with the total energy on the channel the radio measures; they differ only with interferers, whose SINR then already lowers the try's probability |
-| `--sniff-curve=ber:N\|SINR:P,...` | `-2.8:0,0.6:0.002,3.9:0.65,5.4:1` | Kits, receiver on in a preamble under a co-channel FSK frame (SIR = wanted over interferer, 24–29 cycles per point): first try 100 % from +5.4 dB, 18/27 at +3.9 dB, none at +0.6 dB and below; within 4 ms, 4/29 at +0.6 dB (about 0.002 per try), none at −2.8 and −8 dB. Without interference it puts 50 % per try at about −116.8 dBm (3.1 dB SINR). With `--medium-rx-model=layered` (§12) and no `--sniff-curve`, the default is `ber:16` on the layered noise curve instead (50 % per try at 11.2 dB SINR, §12.3), so that detection keeps the layered model's field margin: the kits measured detection against an interferer only, not near sensitivity; for comparison, FG25 packet sensitivity (10 % PER, 250 octets) in the 866 MHz band: −108.8 dBm in mode 3 with FEC (datasheet Table 4.30, p. 92). Before: `ber:16` |
+| `--sniff-curve=ber:N\|SINR:P,...` | `-2.8:0,0.6:0.002,3.9:0.65,5.4:1` | Kits, receiver on in a preamble under a co-channel FSK frame (SIR = wanted over interferer, 24–29 cycles per point): first try 100 % from +5.4 dB, 18/27 at +3.9 dB, none at +0.6 dB and below; within 4 ms, 4/29 at +0.6 dB (about 0.002 per try), none at −2.8 and −8 dB. Without interference it puts 50 % per try at about −116.8 dBm (3.1 dB SINR). With `--medium-rx-model=layered` (§12, the default preset) and no `--sniff-curve`, the noise and the interference are treated apart, as reception treats them (§12.4): the noise through `ber:16` on the layered noise curve (50 % per try at 11.2 dB SNR, §12.3), which keeps the layered model's field margin, and the interference through the kits' table at the dwell's SIR; the interference counts as the noise power that gives the table's probability on that curve, and the two are combined with `--medium-combine` (`sum`). Far above the noise this is the kits' table (0.65 per try at SIR 3.9 dB); without interference, `ber:16` of the SNR; at −104 dBm with SIR 5 dB, 0.49 per try (the table alone: 0.91). The kits measured detection against an interferer only, not near sensitivity. Before the presets, the layered model used `ber:16` of the SINR, interference included, about 8 dB more pessimistic than the kits against an interferer (`test_sniff.py` `layered_default` checks the combination); for comparison, FG25 packet sensitivity (10 % PER, 250 octets) in the 866 MHz band: −108.8 dBm in mode 3 with FEC (datasheet Table 4.30, p. 92). Before: `ber:16` |
 | `--sniff-sfd-bits=N` | 16 | IEEE 802.15.4 SUN FSK SFD of 2 octets, as the emulated radio sends (`WSSIM_PHY_SFD` = 2 bytes). Also the SFD of the capture rule (§2.1, `--medium-capture-sfd`) |
 | `--sniff-margin-bits=N` | 22 | Kits: the frame is received only if about 150 µs (22 bits) of preamble remain after the detection, before the SFD; with less, the radio reports no detection at all. A detection must end at least margin + SFD bits before the SHR's end (§10.2), which is also the lock rule's limit (§10.3); an external interferer's preamble (§13) leaves the same margin. Before: 0 (no such setting) |
 | `--sniff-settle-us=N` | 225 | Receiver settling (AGC, timing recovery) before detection can start, after the request or after the node's own frame. Kits: the first detection comes 252–293 µs after the radio's RX state is reached (after TX→RX and after idle→RX alike), that is 225 µs plus one dwell. The request is taken as the moment the receiver is on: a client that models RAIL's own idle→RX time (100–120 µs) adds it before its request. Before: 0 |
@@ -288,7 +289,7 @@ For a frame that `tx` sends at `tx_dbm` (from the frame header, at most the send
 
     P(rx ← tx) = tx_dbm + G_tx + G_rx − PL(tx, rx) − X(rx, tx)
 
-with `G` the antenna gains (§11.1), `PL` the path loss of the model (§11.3) and `X` the static shadowing (§11.4). At the start, the server stores `P` at the nominal TX power `--prop-tx-dbm` (20 dBm, the default `tx_power` of `wsbrd` and `wsnode`) in its RSSI map, and the medium adds `tx_dbm − 20` to it for each frame. The legacy medium and wall-clock runs use the map as it is: their radios do not apply the sender's TX power, so `--prop-tx-dbm` should be the TX power the nodes use.
+with `G` the antenna gains (§11.1), `PL` the path loss of the model (§11.3) and `X` the static shadowing (§11.4). At the start, the server stores `P` at the nominal TX power in its RSSI map: `--prop-tx-dbm` (20 dBm, the default `tx_power` of `wsbrd` and `wsnode`), at most the PA maximum when `--medium-tx-max` gives a value (16.9 dBm in the default preset, §2), so that the map, the hearing graph and the frames agree; the medium adds `tx_dbm − nominal` to it for each frame, `tx_dbm` itself at most the PA maximum. The legacy medium and wall-clock runs use the map as it is: their radios do not apply the sender's TX power, so `--prop-tx-dbm` should be the TX power the nodes use.
 
 The TX power is the one in each frame's header. A Nanostack node sets it from its `tx_power` setting (`-o tx_power=14`, or `NODE_OPTS_<i>` in `run.sh`). A client of the radio interface sets the header's `tx_dbm` field of every frame ([RADIO_INTERFACE.md](RADIO_INTERFACE.md)); a client that leaves it at 0 sends at 0 dBm, so its frames arrive 20 dB below the stored levels with the default `--prop-tx-dbm`. Such a client should fill the field with its real TX power, and `--prop-tx-dbm` should then match it.
 
@@ -312,7 +313,7 @@ Every term is a user setting, for every model:
 
 The model of `gen_building.py` (`docs/SCALE.md` §2) is `--prop-model=logdist --prop-pl0=31.7 --prop-exp=3 --prop-wall-db-per-m=1.8 --prop-floor-db=18 --prop-shadow=0`: with `--prop-cutoff=-100 --prop-margin=0`, the server gives the same links as the generator's topology file (`test_propagation.py`, `gen_building`).
 
-**Choosing the model.** The default is site-general and has no wall term beyond its exponent: in large open floors it predicts long ranges. With the default model at 14 dBm (`--prop-tx-dbm=14`), the two farthest nodes of a 152 m × 72 m floor of `gen_building.py` receive each other at about −91 dBm before shadowing, and a 4000-node building of 20 such floors has about 2890 neighbours per node on average in the hearing graph. Buildings with many solid walls are closer to the wall grid or the per-metre term: with `--prop-walls=8:2.4`, the same building has about 1730 neighbours per node, and with the `gen_building.py` model, 162. The parameters should be set from measurements in the target building when they exist.
+**Choosing the model.** The default is site-general and has no wall term beyond its exponent: in large open floors it predicts long ranges. With the default model at 14 dBm (`--prop-tx-dbm=14`), the two farthest nodes of a 152 m × 72 m floor of `gen_building.py` receive each other at about −91 dBm before shadowing, and a 4000-node building of 20 such floors has about 2890 neighbours per node on average in the hearing graph. Buildings with many solid walls are closer to the wall grid or the per-metre term: with `--prop-walls=8:2.4`, the same building has about 1730 neighbours per node, and with the `gen_building.py` model, 162. The parameters should be set from measurements in the target building when they exist. §14.5 shows that this density comes from the path loss, not from the hearing graph's cutoff, and gives the cost of such buildings.
 
 ### 11.4 Static shadowing
 
@@ -330,7 +331,7 @@ The total standard deviation is `√(σ_link² + σ_dir² + 2·σ_node²)`. Each
 
 A pair of positioned nodes hears each other when the stronger of its two mean levels at `--prop-tx-dbm`, plus `--prop-margin` (10 dB), reaches `--prop-cutoff` (−125 dBm). The graph stays symmetric (§2). Pairs below that level are neither received nor interferers, nor counted in CCA energy.
 
-- The cutoff is 5 dB below the noise floor (−119.93 dBm, §2): one interferer at −125 dBm raises the noise by 1.2 dB, and a weaker one by less. Weak far nodes therefore still interfere, while a building larger than the model's range stays sparse.
+- The cutoff is 5 dB below the noise floor (−119.93 dBm, §2): one interferer at −125 dBm raises the noise by 1.2 dB, and a weaker one by less. Weak far nodes therefore still interfere, while a building larger than the model's range stays sparse. In a 4000-node building, all the pairs it drops raise a node's noise by less than 0.1 dB even with every node on air 10 % of the time (§14.5).
 - The margin leaves room for the time-varying layer: a link whose mean is 10 dB below the cutoff is kept, because fading can raise it above the cutoff for short periods.
 - The graph uses the nominal TX power. A node that sends at a higher power than `--prop-tx-dbm` reaches farther than its graph: set `--prop-tx-dbm` to the highest TX power in use.
 
@@ -348,7 +349,7 @@ A pair of positioned nodes hears each other when the stronger of its two mean le
 The RSSI that a real receiver reports has its own measurement error, which matters because the stack uses it to select parents. Two optional terms, central medium only, apply to the value the server delivers (the `rx_dbm` of `"xx"` and `"xv"`, and the `rssi_dbm` of a detection in `"xd"`), never to the power the medium uses for its decisions or writes in `--medium-log`:
 
 - `--rssi-offset=σ` (0 dB): a fixed offset per receiver, a normal draw from the seed and the node (a calibration error);
-- `--rssi-noise=σ` (0 dB): a normal draw per frame and receiver, from the seed, the node and the frame ID (the same value in the frame's `"xx"` and its verdict).
+- `--rssi-noise=σ` (0 dB): a normal draw per frame and receiver, from the seed, the node and the frame ID (the same value in the frame's `"xx"` and its verdict); for a detection that names no frame (frame ID 0: an energy detection, a false detection, an external interferer's preamble), from the seed, the node and the detection's time.
 
 The FG25 datasheet (Rev. 1.2, Tables 4.23 and 4.24) gives an RSSI resolution of 0.25 dB and a maximum absolute error, under typical conditions and with offset correction, of 1.2 dB in the 915 MHz band and 1.8 dB in the 868 MHz band, from −100 to −30 dBm. A standard deviation of half the maximum puts 95 % of the receivers within it: `--rssi-offset=0.6` (915 MHz) or `0.9` (868 MHz). The energy that CCA measures (`"xs"`) keeps the true value.
 
@@ -377,7 +378,7 @@ The FG25 datasheet (Rev. 1.2, Tables 4.23 and 4.24) gives an RSSI resolution of 
 | `--prop-cutoff=DBM`, `--prop-margin=DB` | −125, 10 | hearing graph (§11.5) |
 | `--prop-dump=FILE` | none | the computed links at start-up (§11.7) |
 | `--prop-dump-node=ID` | none | with `--prop-dump`, only the links of this node |
-| `--rssi-offset=DB`, `--rssi-noise=DB` | 0, 0 | reported RSSI error (§11.6), central medium only |
+| `--rssi-offset=DB`, `--rssi-noise=DB` | 0 (`realistic` preset: offset 0.9), 0 | reported RSSI error (§11.6), central medium only |
 
 The `--prop-*` options need `--positions`.
 
@@ -387,7 +388,7 @@ The `--prop-*` options need `--positions`.
 
 Without the new options, the outputs are unchanged: `nonreg_dag_simple.sh` against the permanent reference runs, `medium_gate_star.sh` (seed 1, hidden, central) with node logs and medium log identical to a build without the model, `test_conductor.py`, `test_sniff.py`, `radio_if/test_ref_client.py` and `lfn_suite.sh quick` pass.
 
-**Network-level demonstration** (`sim_utils/vtime/prop_building.sh`, defaults): a border router and 149 FAN 1.0 routers on 3 floors of a generated building (`gen_building.py`, 5 × 10 nodes per floor, 10 m apart, the border router in the middle of floor 0), the default model and shadowing, the routers' default TX power of 20 dBm (`--prop-tx-dbm=20`), no `-g` link, central medium, 3 seeds × 1200 virtual seconds. 111 s of wall time for the three runs at once.
+**Network-level demonstration** (`sim_utils/vtime/prop_building.sh`, its defaults; made before the presets, with the medium of today's `basic` preset, §14): a border router and 149 FAN 1.0 routers on 3 floors of a generated building (`gen_building.py`, 5 × 10 nodes per floor, 10 m apart, the border router in the middle of floor 0), the default model and shadowing, the routers' default TX power of 20 dBm (`--prop-tx-dbm=20`), no `-g` link, central medium, 3 seeds × 1200 virtual seconds. 111 s of wall time for the three runs at once.
 
 | Figure | Seed 1 | Seed 2 | Seed 3 |
 | --- | --- | --- | --- |
@@ -408,12 +409,12 @@ With the default model, every node of this building hears every other one, and m
 - **One site-general model per run.** Every pair uses the same parameters; a building with mixed construction needs the parameters of its dominant part, or `-g` values for the pairs that differ.
 - **Static mean.** The values are fixed for the run (apart from `--vtime-link`); time variation is the business of a separate layer.
 - **Nominal TX power for the graph and for the legacy medium** (§11.2, §11.5).
-- **Memory.** The model uses the server's existing RSSI map (4096 × 4096 values in shared memory) and a bitmap of 2 MB; nothing grows with the number of frames. Runs with very dense graphs (thousands of neighbours per node) cost more per frame in the medium, in proportion to the number of receivers.
+- **Memory.** The model uses the server's existing RSSI map (4096 × 4096 values in shared memory) and a bitmap of 2 MB; nothing grows with the number of frames. Runs with very dense graphs (thousands of neighbours per node) cost more per frame in the medium, in proportion to the number of receivers: the 4000-node building of §11.3 runs 3 to 4 times slower than the same building with the `gen_building.py` links (§14.4).
 - **Reported RSSI:** a normal error only; no quantisation to the 0.25 dB resolution or to the integer dBm the MAC stores, no saturation outside −100 to −30 dBm, and no error on the CCA energy.
 
 ## 12. Link variation and the layered loss model
 
-Root repo `documents/pre-study/investigation/Investigation_Nanostack_Emulator.md` §5, "Formalising the loss model", splits the radio's empirical curve (§2) into physical layers. This section implements layers 2, 3 and 5 and a burst process, in `app_wssimserver/sim_channel.c`. Every option is off by default: without them, every output is byte-identical to the medium without this module (§12.8).
+Root repo `documents/pre-study/investigation/Investigation_Nanostack_Emulator.md` §5, "Formalising the loss model", splits the radio's empirical curve (§2) into physical layers. This section implements layers 2, 3 and 5 and a burst process, in `app_wssimserver/sim_channel.c`. The default preset (`calibrated`, §14) turns on the layered receiver curve with its fading (§12.3); slow shadowing and bursts stay off (the `realistic` preset adds an illustrative shadowing). With the `basic` preset every option is off and every output is byte-identical to the medium without this module (§12.8).
 
 | Layer | What | Where |
 | --- | --- | --- |
@@ -434,7 +435,11 @@ The received power of a frame at a receiver is `P = link(rx, tx) + S + F + B`, i
 - **Across channels** (`--medium-fading-bc=MHZ`, 5.5 MHz; `inf`: the same fading on every channel). `s` is the sum of 8 taps of equal power, each an independent complex Gauss-Markov process in time, with delays `τ_l` drawn once per link from an exponential distribution of mean `σ_τ`; on channel `c` tap `l` turns by `exp(−j 2π f_c τ_l)`, `f_c = c · spacing`. Each channel's marginal stays Rician with factor `K`. On average over links, the scattered field's correlation between two channels `Δf` apart has magnitude `1 / √(1 + (2π σ_τ Δf)²)` (an exponential power delay profile), and `σ_τ = √3 / (2π B_c)`, so that it is 0.5 at the coherence bandwidth `B_c`. A single link, with its 8 delays, has its own correlation around that mean; the power correlation of two distant channels does not fall below about 1/8 (Rayleigh). The direct component has delay 0 and is the same on every channel. The spacing (`--medium-chan-spacing=KHZ`) comes from the frame's data rate by default: 100 kHz at 50 kbit/s (Wi-SUN FAN EU mode 1a), 200 kHz at any other rate (EU mode 3 at 150 kbit/s). The medium knows only the channel number and the rate of a frame, not the band: NA mode 1b (50 kbit/s, 200 kHz) or mode 3 (400 kHz) need the option. Channel 0's frequency is irrelevant (only differences count).
 - **Reciprocity** (`--medium-reciprocal=on`, the default): a link's processes (shadowing, fading taps and delays, link bursts) are the same in both directions, as the channel between two antennas is at one frequency and time. Asymmetric mean levels (different TX powers, noise or antennas) stay in `link(rx, tx)` (§2). `off`: each direction has its own link processes. The node terms are a node's own and stay common to both directions: with `--medium-node-share` or node-scope bursts, the two directions of a link remain correlated (by the node share, or through the common node state) even with `off`.
 
-**Determinism.** Every Gaussian process is an exact Ornstein-Uhlenbeck process built from the top down, so that its value at `t` depends only on (run seed, process, link, `t`). Anchors every `8τ` form an AR(1) of coefficient `e⁻⁸`; between two anchors, the interval holding `t` is halved repeatedly, each midpoint drawn from the exact bridge distribution given its interval's ends (mean `r (x_lo + x_hi) / (1 + r²)`, variance `(1 − r²) / (1 + r²)`, `r = e^(−half interval / τ)`), down to `max(1 µs, τ / 16384)` (18 µs at 0.3 s), then interpolated linearly. Each draw comes from a counter-based generator keyed by the anchor, the level and the interval. The values at any set of times have the exact joint distribution of the process at every lag down to that resolution, whatever the order or number of the queries. Each process caches its two anchors and the first 12 midpoints of its last path: values, never state, so a cached value is the one a fresh computation gives. The streams are separate from the verdict and detection streams (§7, §10.2). Cost: about 3 µs per sample with 8-tap fading and shadowing (`--medium-var-dump`, 200 000 samples 50 ms apart in 0.69 s); about 340 bytes per cached process (8 per link with frequency-selective fading, about 40 MB for 15 000 links). The hidden star of §12.7 with the layered model runs within 5 % of the empirical wall time.
+**Determinism.** Every Gaussian process is an exact Ornstein-Uhlenbeck process built from the top down, so that its value at `t` depends only on (run seed, process, link, `t`). Anchors every `8τ` form an AR(1) of coefficient `e⁻⁸`; between two anchors, the interval holding `t` is halved repeatedly, each midpoint drawn from the exact bridge distribution given its interval's ends (mean `r (x_lo + x_hi) / (1 + r²)`, variance `(1 − r²) / (1 + r²)`, `r = e^(−half interval / τ)`), down to `max(1 µs, τ / 16384)` (18 µs at 0.3 s), then interpolated linearly. Each draw comes from a counter-based generator keyed by the anchor, the level and the interval. The values at any set of times have the exact joint distribution of the process at every lag down to that resolution, whatever the order or number of the queries. Each process caches its two anchors and the first 12 midpoints of its last path: values, never state, so a cached value is the one a fresh computation gives. The cache has a fixed size: 32 768 processes (2-way set-associative, the least recently used one evicted; 376 bytes each, 12 MB in all, allocated at the first sample). An eviction changes no value, only the time to compute the next sample of that process: a 1000-node building with links from positions gave the same node outputs with 9 million evictions as with an unbounded cache. The streams are separate from the verdict and detection streams (§7, §10.2).
+
+**Lazy evaluation.** The medium applies a link's variation when the received power is first needed: at a receiver that listens on the frame's channel or receives a frame it disturbs, for the energy of a CCA, a lock or a sniff, or for the medium log. A receiver whose radio is off or on another channel, without a medium log, costs no sample. The value is a function of (seed, link, frame start, channel) only, so it does not depend on when it is computed: node logs and medium logs are identical to those of eager evaluation (`medium_gate_star.sh` hidden seed 1 and `dag_simple` seed 1, against the build before the change).
+
+**Cost.** About 3 µs per sample with 8-tap fading and shadowing when cached (`--medium-var-dump`, 200 000 samples 50 ms apart in 0.69 s); a sample whose processes were evicted, or whose time is more than about 8 coherence times from the last one, draws about 180 Gaussian pairs for 8-tap fading (about 7 µs: the 4000-node building of §14.4 drew 7.9 million samples for 54 s of server CPU time more than the `basic` preset). Server memory and wall time with the default preset are in §14.4.
 
 ### 12.2 Loss bursts
 
@@ -497,19 +502,19 @@ All are user settings, refused with `--medium=legacy` (central medium only, virt
 
 | Option | Default | Source or reason |
 | --- | --- | --- |
-| `--medium-rx-model=empirical\|layered` | `empirical` | the radio's field-fitted curve stays the reference (Investigation §5) |
+| `--medium-rx-model=empirical\|layered` | `layered` (`calibrated`, `realistic` presets); `empirical` (`basic`, `em4`) | the layered curve with its default fading reproduces the radio's field-fitted empirical curve on average (§12.3) and adds the variation of real links; the empirical curve stays available as the reference of earlier runs (Investigation §5) |
 | `--medium-rx-curve=X0,B` | 9.0, 0.9 dB | §12.3: B the kits' measured slope, X0 the fit. Refused without `--medium-rx-model=layered` |
 | `--medium-combine=max\|sum\|P` | `max` (empirical), `sum` (layered) | §12.4 |
 | `--medium-fading=K,TC_S\|off` | off (empirical); 10, 0.3 s (layered) | K: §12.3. `TC_S` is the lag of field correlation e⁻¹ (§12.1). Nodes are static and the channel changes with people moving: IEEE 802.11 TGn channel models (Erceg et al., IEEE 802.11-03/940r4) use an environment speed of 1.2 km/h, a Doppler `f_d = v / λ` of 1.0 Hz at 915 MHz (0.96 Hz at 868 MHz). For Clarke's spectrum the field correlation `J0(2π f_d Δt)` is e⁻¹ at `Δt = 0.279 / f_d`: 0.27 s at 915 MHz, 0.29 s at 868 MHz, hence 0.3 s. Rappaport's rule of thumb `T_c ≈ 0.423 / f_d` (*Wireless Communications*, §5.4.3) is a different definition (a geometric mean of two criteria) and would give 0.42 s |
 | `--medium-fading-bc=MHZ\|inf` | 5.5 MHz | §12.1. Indoor RMS delay spreads of a few tens of ns up to about 100 ns are reported for office and residential buildings (Hashemi, "The indoor radio propagation channel", Proc. IEEE 81(7), 1993). 5.5 MHz is `σ_τ` = 50 ns in this model; Rappaport's rule `B_c ≈ 1 / (5 σ_τ)` (§5.4.2, 0.5 correlation) gives 4 MHz for the same delay spread. Refused without fading |
 | `--medium-chan-spacing=KHZ` | from the data rate (§12.1) | Wi-SUN FAN EU channel plans; refused without frequency-selective fading |
-| `--medium-shadowing=SIGMA_DB,TAU_S\|off` | off | The mean link value already holds the location's shadowing. How much a static link's level wanders over minutes to hours depends on the building and its activity, and no measured value is available. Illustration in §12.7: 4 dB, 60 s |
+| `--medium-shadowing=SIGMA_DB,TAU_S\|off` | off; `realistic` preset: 2 dB, 60 s (illustrative, §14.2) | The mean link value already holds the location's shadowing. How much a static link's level wanders over minutes to hours depends on the building and its activity, and no measured value is available. Illustration in §12.7: 4 dB, 60 s |
 | `--medium-node-share=F` | 0 | no source; with F, links sharing a node correlate by F / 2. Refused without shadowing |
 | `--medium-reciprocal=on\|off` | `on` | channel reciprocity (§12.1). Refused when nothing varies |
 | `--medium-burst=GOOD_S,BAD_S,DB[,link\|rx\|node]\|off` | off | Burst lengths should come from field data, for example sequence-number gaps in real logs (Investigation §5) |
 | `--medium-var-dump=RX,TX,FROM_S,STEP_S,COUNT[,shuffle][,ch=N\|hop=N][,rate=BPS]` | none | prints `rx tx t_us shadow_db fading_db bad` for COUNT times from FROM_S every STEP_S (the seed from `WSSIM_SEED`), on channel N (0), or sample `i` on channel `7i mod N`, at rate BPS (150000, for the spacing), in a shuffled query order with `shuffle`, and exits: for tests and plots |
 
-The server prints the settings at the start (`medium: receiver curve ...`, `medium: fading ...`) and, at the end, the number of samples, those in a bad state, the Gaussian pairs drawn and the processes cached.
+The server prints the settings at the start (`medium: receiver curve ...`, `medium: fading ...`) and, at the end, the number of samples, those in a bad state, the Gaussian pairs drawn, the processes cached and those evicted.
 
 Options are matched by `getopt_long`, which also accepts unambiguous abbreviations; the new names make some earlier abbreviations ambiguous (`--medium-b` was `--medium-break-db`, now also `--medium-burst`). No script of the emulator uses an abbreviated `--medium-*` option.
 
@@ -545,7 +550,7 @@ With flat fading, hopping changes nothing: successive frames see the same fade. 
 
 **Networks still form** (`medium_gate_dag.sh` and `medium_gate_star.sh` with `MODES=central`, seeds 1–3, `SIM_OPTS=--medium-rx-model=layered` against the default; 5 s and 24 s of wall time for the 6 runs of each):
 
-| Scenario | Default (empirical) | Layered |
+| Scenario | Empirical (the default then; today's `basic` preset) | Layered |
 | --- | --- | --- |
 | `dag_simple`, 600 s | 14/14 routers ready in every run, median ready 148, 140, 131 s; frames heard received 98.6 %, collisions 1.34 % | 14/14 in every run, 155, 144, 125 s; 98.5 %, 1.52 % |
 | Star, 40 routers in 4 hidden groups, 900 s, requests every 30 s from 300 s | 40/40 ready, median 116, 115, 99 s; frames heard received 92.0 %, collisions 7.5 %; requests received 2272 of 2280, echoed back 2271 | 40/40, 114, 117, 109 s; 91.6 %, 7.8 %; 2280 of 2280, echoed back 2280 |
@@ -554,7 +559,7 @@ Wall time of the star runs: 11.6–12.1 s per run (empirical) and 12.1–12.3 s 
 
 ### 12.8 Checks
 
-- **Off by default:** with none of the options, `nonreg_dag_simple.sh` against `dag_simple_8c5677e` (10 of 10 seeds identical), `medium_gate_star.sh` hidden seed 1 (node logs identical with pointers masked, medium log byte-identical, server log identical apart from the connection order and the wall time, against a build of the commit before this module), `test_conductor.py` (38 tests), `test_sniff.py` (18), `radio_if/test_ref_client.py` (21) and the LFN quick suite (53 runs, before `channel` was added to it) pass.
+- **Off in the `basic` preset:** with none of the options (before the presets; today `--medium-preset=basic`), `nonreg_dag_simple.sh` against `dag_simple_8c5677e` (10 of 10 seeds identical), `medium_gate_star.sh` hidden seed 1 (node logs identical with pointers masked, medium log byte-identical, server log identical apart from the connection order and the wall time, against a build of the commit before this module), `test_conductor.py` (38 tests), `test_sniff.py` (18), `radio_if/test_ref_client.py` (21) and the LFN quick suite (53 runs, before `channel` was added to it) pass.
 - `sim_utils/vtime/test_channel.py` (in the LFN suite as `channel`, about 11 s, 15 tests): shadowing (σ within 3 %, autocorrelation 0.37 at τ and 0.05 at 3τ within 0.02, also at other times); short lags at times that are no anchor point (1 − ρ within 5 % of `1 − exp(−Δt/τ)` at 0.002 τ, 0.05 τ and τ/16; the fading power at 0.01 `TC_S`); fading (mean power, K from the moments, shares 3 dB and 6 dB below the mean against the Rician distribution, autocorrelation at the coherence time against the formula, Rayleigh with K = 0); across channels (Rayleigh power correlation of 100 links at 1, 5.4 and 20 MHz against `1/8 + (7/8) / (1 + (2π σ_τ Δf)²)` within 0.07; `inf` identical on every channel); determinism by seed, independence from the query order and from other links' queries; reciprocity on and off; the node share's correlation; bursts (share of time bad, mean sojourns, coefficient of variation about 1, link, receiver and node scopes); through the medium, the measured layered loss rate at −90, −95 and −100 dBm against its average formula (within 4 σ), and at −100 dBm within a factor 2.5 of the empirical curve; the variation in an interferer's power and in CCA energy (30 cases: sensed energy and lowest SINR from the varied powers of the log); links from positions (§11) varying around their path-loss mean; the medium log's variation against the dump, and `rx_dbm` with bursts; a run's determinism; the combination near sensitivity (layered `sum` and `max`, empirical `sum`, each against its formula within 3.5 σ over 2000 frames); the options, the refusals of options without effect and the warning of §12.4.
 
 ### 12.9 Limits
@@ -567,7 +572,7 @@ Wall time of the star runs: 11.6–12.1 s per run (empirical) and 12.1–12.3 s 
 
 ## 13. External interference and spectrum
 
-Interferers that are not emulated nodes, an adjacent-channel table beyond the next channel, capture and break as probabilities, and three additions to sniffing (summed energy, false detections, adjacent channels). Central medium only (the legacy medium refuses these options). **Every feature is off by default:** without these options the server's outputs, the nodes' logs and the medium log are byte-identical to the emulator without this section (checked with `nonreg_dag_simple.sh` against the permanent reference runs, `medium_gate_star.sh` seed 1 in both topologies against a server built from the emulator before this section, `test_mixed.sh` with `SNIFF=1` on seeds 1–3 against the same build, the LFN quick suite, `test_conductor.py`, `test_sniff.py`, `test_propagation.py`, `test_channel.py` and `radio_if/test_ref_client.py`). Code: `app_wssimserver/sim_interf.c` (interferers, option dispatch) and hooks in `sim_medium.c`.
+Interferers that are not emulated nodes, an adjacent-channel table beyond the next channel, capture and break as probabilities, and three additions to sniffing (summed energy, false detections, adjacent channels). Central medium only (the legacy medium refuses these options). The default preset (`calibrated`, §14) turns on the adjacent-channel table `10/40` and the smooth capture model; interferers, the presync curve's own setting and the sniffing additions stay off. **With the `basic` preset every feature is off:** the server's outputs, the nodes' logs and the medium log are then byte-identical to the emulator without this section (checked with `nonreg_dag_simple.sh` against the permanent reference runs, `medium_gate_star.sh` seed 1 in both topologies against a server built from the emulator before this section, `test_mixed.sh` with `SNIFF=1` on seeds 1–3 against the same build, the LFN quick suite, `test_conductor.py`, `test_sniff.py`, `test_propagation.py`, `test_channel.py` and `radio_if/test_ref_client.py`). Code: `app_wssimserver/sim_interf.c` (interferers, option dispatch) and hooks in `sim_medium.c`.
 
 ### 13.1 External interferers
 
@@ -610,19 +615,21 @@ Interferers that are not emulated nodes, an adjacent-channel table beyond the ne
 
 | Distance | Default (fg25) | Source |
 | --- | --- | --- |
-| 1 channel | 10 dB | `COCHANNEL_RESULTS.md` §4.4: a modulated interferer on the next channel acts as a co-channel one 10 dB weaker (mode 3) |
-| 2 channels and more | none (no coupling) | §4.4: two channels away, no loss down to the largest ratio the kits could make, W/I = −29.8 dB; with the interference curve (99 % received at SIR +5 dB) this means at least about 35 dB of attenuation. Datasheet (EFR32FG25 Rev. 1.2, Table 4.30, 866 MHz Wi-SUN FSK, CW interferer, wanted signal 3 dB above sensitivity): alternate channel 47.2 dB (mode 3 with FEC), 45.1 dB (mode 1a); adjacent 45.5 dB and 45.7 dB |
+| 1 channel | 10 dB (every preset but `em4`) | `COCHANNEL_RESULTS.md` §4.4: a modulated interferer on the next channel acts as a co-channel one 10 dB weaker (mode 3) |
+| 2 channels | 40 dB (`calibrated`, `realistic`); none (`basic`) | §4.4: two channels away, no loss down to the largest ratio the kits could make, W/I = −29.8 dB; with the interference curve (99 % received at SIR +5 dB) this means at least about 35 dB of attenuation. Datasheet (EFR32FG25 Rev. 1.2, Table 4.30, 866 MHz Wi-SUN FSK, CW interferer, wanted signal 3 dB above sensitivity): alternate channel 47.2 dB (mode 3 with FEC), 45.1 dB (mode 1a); adjacent 45.5 dB and 45.7 dB |
+| 3 channels and more | none (no coupling) | no measurement; the kits saw no effect two channels away already |
 
-The default beyond the next channel stays "none" so that existing runs do not change. Where strong sources two channels away matter (a close interferer, a dense building), `--medium-adjacent-table=10/40` is the suggested setting: 40 dB lies between the kits' lower bound and the datasheet's CW figure, since a modulated interferer's spectrum spreads further than a tone's. The datasheet's CW figures are receiver selectivity: they suit a narrowband external interferer (`adj=45.5/47.2`), not a frame of the same PHY.
+The `calibrated` and `realistic` presets (the default, §14) set `--medium-adjacent-table=10/40`: 40 dB two channels away lies between the kits' lower bound (about 35 dB) and the datasheet's CW figure (45.1–47.2 dB), since a modulated interferer's spectrum spreads further than a tone's; nothing beyond. The `basic` preset keeps the next channel only (10 dB), as before the presets. The datasheet's CW figures are receiver selectivity: they suit a narrowband external interferer (`adj=45.5/47.2`), not a frame of the same PHY.
 
 ### 13.3 Probabilistic capture and break, and the presync curve
 
-`--medium-capture-model=[MODE:]step|smooth` (default `step`, the rules of §3). With `smooth`, when a frame `F` starts while the receiver holds `A` on the same channel, with `margin = P_F − P_A` (dB), `d` the time since the start of `A`'s own SHR in bits, `Tp` and `Tshr` its preamble and SHR in bits:
+`--medium-capture-model=[MODE:]step|smooth` (`smooth` in the `calibrated` and `realistic` presets, the default; `step`, the rules of §3, in `basic` and `em4`). With `smooth`, when a frame `F` starts while the receiver holds `A` on the same channel, with `margin = P_F − P_A` (dB), `d` the time since the start of `A`'s own SHR in bits, `Tp` and `Tshr` its preamble and SHR in bits:
 
 - capture weight `w(d) = max(early, sfd)`: `early = 1 − logistic((d − E) / w_e)`, `E = early + slope · max(0, margin − 5)` within `[0, Tp]`; `sfd = logistic((d − Tp − rise) / w_e) · (1 − logistic((d − Tshr − fall) / w_e))` for a profile that captures during the SFD (mode 3), else 0; during an `"xl"` preamble `w = 1`;
 - `P(capture) = w(d) · logistic((margin − m50) / s)`;
 - `P(break) = (1 − w(d)) · logistic((margin − break) / brk_s)` while `d < Tshr` (with the break margin of §2.1);
 - one draw from the receiver's own capture stream (separate from its verdict stream) decides capture, break or neither; none when both probabilities are below 10⁻⁹, or capture is certain. After the windows' last edge (`d ≥ Tshr + fall + 8 w_e`) nothing is drawn.
+- a capture is a lock: it is refused when `F`'s SINR at its start (against the noise and every frame on air, `A` included) is below the lock threshold (§3 rule 2, `--medium-lock-snr`); `A` then continues and `F` is `busy`. The step model's margin (3 dB over a frame locked above the noise) always passes the threshold; the smooth model captures from about 0 dB of margin. The server's end-of-run line counts these refusals.
 
 It also sets, unless `--medium-int-curve-presync` says otherwise, the **presync curve**: the interference curve of everything that was already on air when the received frame's SHR ended, `BER = 0.5 · exp(−(SIR − x0) / b)` with its own `x0`, `b`. This covers the weaker frame that overlaps a captured one, a frame that starts during the SHR without capturing it, and an external `fsk` interferer that is on at that time, constant or not (§13.1). What starts after the SHR keeps the measured curve of §2.1, so the locked-frame measurements (`COCHANNEL_RESULTS.md` §4.1) are unchanged. With mixed interferers in a segment, the presync curve applies only when all of the FSK power there was on air before the SHR's end. `--medium-int-curve-presync=[MODE:]X0,B|same` sets it with either capture model. `--medium-capture-smooth=[MODE:]KEY=V,...` overrides the other parameters (`m50`, `s`, `brk_s`, `early`, `slope`, `w`, `rise`, `fall`).
 
@@ -653,7 +660,7 @@ So, with the smooth model, a constant or long FSK interferer that is on before a
 | | All 256 points | The 32 points in a transition (kit between 5 and 95 %) | Points more than 20 points away |
 | --- | --- | --- | --- |
 | Step model | 5.1 points | 25.8 points | 31 |
-| Smooth model | 2.6 points | 10.4 points | 13 |
+| Smooth model | 2.7 points (2.6 before captures were held to the lock threshold) | 10.5 points (10.4) | 14 (13) |
 
 **Validation:** 5-fold cross-validation in `capture_fit.py` (each fifth of the points predicted by a fit made without it, with the SIR error): 3.7 points (residual of the full fit with the SIR error: 2.9 points; the step model: 5.0). About 50 s of wall time. Selected points (kit, step, smooth; first / second frame where both matter):
 
@@ -668,7 +675,7 @@ So, with the smooth model, a constant or long FSK interferer that is on before a
 | Mode 3, 300 µs, SIR −0.1 dB, two pairs | 0 % and 91 % (first) | 0 % | 36 % |
 | Mode 3, second +4.6 / +10.2 / +21.4 dB at 250 µs | 53 / 66 / 62 % | 0 % | 61 % |
 | Mode 3, second +5.8 / +12.0 / +22.7 dB at 600 µs | 44 / 25 / 13 % | 0 % | 36 % |
-| Mode 1a, same start, −1.1 / −0.3 dB (both lost) | 0 / 0 % (first) | 0 / 0 % | 56 / 26 % (first) |
+| Mode 1a, same start, −1.1 / −0.3 dB (both lost) | 0 / 0 % (first) | 0 / 0 % | 81 / 47 % (first; 56 / 26 % before captures were held to the lock threshold) |
 | Mode 1a, same start, +0.1 / +1.3 dB | 78 / 100 % | 0 / 0 % | 18 / 65 % |
 | Mode 1a, +5.2 / +11.1 dB at 400 µs | 21 / 100 % | 0 / 0 % | 29 / 98 % |
 | Mode 1a, +10.3 / +11.5 dB at 600 / 800 µs | 94 / 0 % | 0 / 0 % | 71 / 43 % |
@@ -680,10 +687,10 @@ The remaining large differences are near 0 dB, where the kit points contradict e
 Three options of the sniffing model of §10, each off by default:
 
 - **`--sniff-adjacent=off|on|detect`.** `on`: the frames on other channels whose power leaks onto the sniff's channel (the table of §13.2) take part in the sniff as interference (in each candidate's SINR) and in the energy (the result at the window's end, the energy detector). `detect`: they are also candidates for detection at the power that leaks, reported with their `frame_id` and sender, never locked onto (the receiver cannot receive a frame on another channel).
-- **`--sniff-energy=DBM|off`, `--sniff-energy-us=N`** (107 µs: 16 bits at 150 kbit/s, the default dwell in mode 3; no datasheet value). An energy detector next to the preamble detector: it detects at the first time `t` at which the total energy on the channel (noise, the frames heard, adjacent frames with `--sniff-adjacent`, external interferers) has stayed at or above DBM over `[t − N, t)`, `t` at least N after the window's start. It catches what the preamble detector cannot, such as a collision of frames each too weak, or an external interferer. The result names the strongest emulated frame on the channel at `t` (`rssi_dbm` its power, `sinr_db` its lowest SINR over the averaging time), and with `SIM_SNIFF_LOCK` locks onto it by the rules of §10.3; with no such frame, `frame_id` 0, `src` 0xFFFF and `rssi_dbm` the total energy. No draw: the energy is exact, the RSSI's own error is not modelled.
+- **`--sniff-energy=DBM|off`, `--sniff-energy-us=N`** (107 µs: 16 bits at 150 kbit/s, the preamble detector's dwell before the kit calibration, kept as the energy detector's averaging time, longer than today's 7-bit dwell; no datasheet or kit value). An energy detector next to the preamble detector: it detects at the first time `t` at which the total energy on the channel (noise, the frames heard, adjacent frames with `--sniff-adjacent`, external interferers) has stayed at or above DBM over `[t − N, t)`, `t` at least N after the window's start. It catches what the preamble detector cannot, such as a collision of frames each too weak, or an external interferer. The result names the strongest emulated frame on the channel at `t` (`rssi_dbm` its power, `sinr_db` its lowest SINR over the averaging time), and with `SIM_SNIFF_LOCK` locks onto it by the rules of §10.3; with no such frame, `frame_id` 0, `src` 0xFFFF and `rssi_dbm` the total energy. No draw: the energy is exact, the RSSI's own error is not modelled.
 - **`--sniff-false=P|RATE/s`.** A false detection on noise: with probability P per sniff window, at a time drawn uniformly in `(t0, t1]`; or at a rate per second of listening (Poisson, the first arrival after `t0`). Drawn at the request, from the node's own false-detection stream. If no real detection comes first, the result has `detected` 1, `frame_id` 0, `src` 0xFFFF, `rssi_dbm` the energy at that time. The receiver stays on (LISTEN in the ledger) until the client reports otherwise, as a real detector that waits for a sync word until its timeout; the cost is the client's timeout. A receiver locked onto a frame at that time does not trigger. Default 0: the FG25 datasheet gives no false-detection figure (§10.5); Investigation §5 (P4) estimates that one false wake-up per second adds about 12.8 µA to a sleeping node's budget.
 
-External interferers (§13.1) take part in every sniff on their channels: as interference and energy, and for `kind=fsk` as a candidate during the preamble at the start of each on-interval (`pre`), detected with `frame_id` 0 and `src` 0xFFFF, never locked onto. A noise-like interferer is never a preamble. The sniff log is unchanged; the server's end-of-run summary adds, when any of these features is on, the detections by energy, false ones, those of an external interferer and those of a frame on another channel. The `"xd"` message is unchanged; `frame_id` 0 with `detected` 1 is new ([RADIO_INTERFACE.md](RADIO_INTERFACE.md) §4.13). A sniff takes the external intervals one second of its window at a time and drops the entries that can no longer matter, so that a long window with a busy interferer stays cheap (a one-hour sniff with a 2 ms burst every 10 ms on average, about 360 000 intervals: 0.2 s of wall time).
+External interferers (§13.1) take part in every sniff on their channels: as interference and energy, and for `kind=fsk` as a candidate during the preamble at the start of each on-interval (`pre`), detected with `frame_id` 0 and `src` 0xFFFF, never locked onto. A noise-like interferer is never a preamble. The sniff log is unchanged; the server's end-of-run summary adds, when any of these features is on, the detections by energy, false ones, those of an external interferer and those of a frame on another channel. The `"xd"` message is unchanged; `frame_id` 0 with `detected` 1 is new ([RADIO_INTERFACE.md](RADIO_INTERFACE.md) §4.13). A detection try of an external interferer's preamble or of a frame on another channel draws from a hash of (seed, node, candidate, dwell end), not from the node's detection stream, so adding such a source does not change the draws of the emulated frames on the sniff's channel (`test_interf.py` `sniff_streams`). A sniff takes the external intervals one second of its window at a time and drops the entries that can no longer matter, so that a long window with a busy interferer stays cheap (a one-hour sniff with a 2 ms burst every 10 ms on average, about 360 000 intervals: 0.2 s of wall time).
 
 ### 13.5 Options
 
@@ -691,17 +698,17 @@ External interferers (§13.1) take part in every sniff on their channels: as int
 | --- | --- | --- |
 | `--interferer=SPEC`, `--interferer-file=FILE` | none | §13.1 |
 | `--interferer-log=FILE` | none | §13.1 |
-| `--medium-adjacent-table=[MODE:]DB/DB/...` | fg25: 10 dB on the next channel only; em4: none | §13.2 |
-| `--medium-capture-model=[MODE:]step\|smooth` | `step` | §13.3 |
+| `--medium-adjacent-table=[MODE:]DB/DB/...` | `calibrated`, `realistic`: 10/40 dB; `basic`: 10 dB on the next channel only; `em4`: none | §13.2 |
+| `--medium-capture-model=[MODE:]step\|smooth` | `smooth` (`calibrated`, `realistic`); `step` (`basic`, `em4`) | §13.3 |
 | `--medium-capture-smooth=[MODE:]KEY=V,...` | the fit of §13.3 | §13.3 |
-| `--medium-int-curve-presync=[MODE:]X0,B\|same` | `same` (`smooth`: −2.72 dB, 0.54 dB) | §13.3 |
+| `--medium-int-curve-presync=[MODE:]X0,B\|same` | with `smooth` (the default preset): −2.72 dB, 0.54 dB; with `step`: `same` | §13.3 |
 | `--sniff-adjacent=off\|on\|detect` | `off` | §13.4 |
 | `--sniff-energy=DBM\|off`, `--sniff-energy-us=N` | `off`, 107 µs | §13.4 |
 | `--sniff-false=P\|RATE/s` | 0 | §13.4 |
 
 ### 13.6 Network-level demonstration
 
-`sim_utils/vtime/interf_demo.sh build-vt $(pwd) <outdir>`: the hidden star of §8 item 4 (a border router and 40 routers in 4 mutually hidden groups, a UDP request to the border router every 30 s from 300 s), 3 seeds × 900 s, central medium, without and with an interferer; `medium_stats.py` compares the two groups. 48 s of wall time for the 6 runs, 3 at a time.
+`sim_utils/vtime/interf_demo.sh build-vt $(pwd) <outdir>` (the figures below were made before the presets, with the medium of today's `basic` preset, §14; `SIM_OPTS=--medium-preset=basic` reproduces them): the hidden star of §8 item 4 (a border router and 40 routers in 4 mutually hidden groups, a UDP request to the border router every 30 s from 300 s), 3 seeds × 900 s, central medium, without and with an interferer; `medium_stats.py` compares the two groups. 48 s of wall time for the 6 runs, 3 at a time.
 
 | Figure (3 seeds) | Without | With a noise-like source on channels 0–9 of 35, on 200 ms every second, −70 dBm at every node | With another FSK network hopping on all 35 channels, 4 ms bursts with 16 ms mean gaps, −65 dBm at every node |
 | --- | --- | --- | --- |
@@ -723,6 +730,124 @@ With these levels the interferers cost 0.3–1.4 points of frame delivery and 27
 - Interferers do not react to the emulated network (no listen-before-talk, no acknowledgements) and have fixed levels per node: no fading (unless a time-variation model adds it to the same hook) and no frequency offset within a channel.
 - `kind=noise` is an assumption for non-FSK interferers (conservative, §13.1); LoRa, OFDM and wideband noise against the FG25 have not been measured.
 - The smooth capture model fits end-to-end kit results with a presync curve that is itself fitted, not measured; the break below +5 dB, the capture timing at other margins, other frame lengths and every PHY but modes 3 and 1a are extrapolations (the `other` profile takes the mode-3 values). The mode-1a early window is constant below 5 dB of margin and grows linearly above, fitted on the two measured margins (+5.5 and +11 dB); elsewhere it is extrapolated.
-- The adjacent-channel table beyond the next channel has no default (no coupling); the suggested 40 dB is between a lower bound from the kits and the datasheet's CW figure.
+- The adjacent-channel table's 40 dB two channels away (default preset) is between a lower bound from the kits and the datasheet's CW figure, not a measurement; nothing beyond two channels.
 - Sniffing: the energy detector has no RSSI error and no averaging filter shape (a hard window), and false detections have no measured rate: both are placeholders for kit measurements (§10.6). The detection of an FSK interferer's preamble uses the dwell of its own rate and the default curve, as for an emulated frame.
 - An interferer's on-intervals that ended more than 60 s before the latest time the medium has seen are freed. Queries start at the latest time, at the start of a frame being locked onto, or at a sniff's current step (§13.4): only a frame on air for more than 60 s (a long `"xl"` preamble) would see fewer intervals than exist.
+
+## 14. Defaults and presets
+
+The medium's settings come in presets: `--medium-preset=calibrated|realistic|basic|em4` (central medium, virtual time). A preset is a list of options that the server places before the command line's own, so any option given on the command line overrides it. Without `--medium-preset`, the preset is `calibrated`, or `em4` when `--medium-model=em4` is given alone (so that earlier command lines keep the MVP). The server prints the preset and the options it added at the start (`medium: preset calibrated (the default): ...`), then every setting as before. With `--medium=legacy` no preset applies (`basic` is accepted and changes nothing).
+
+### 14.1 What each preset sets
+
+| Preset | Options it adds | What it gives |
+| --- | --- | --- |
+| `calibrated` (default) | `--medium-rx-model=layered --medium-adjacent-table=10/40 --medium-capture-model=smooth --medium-tx-max=16.9` | The kits' interference curves, capture windows and break margin (§2.1, in every preset but `em4`); the layered receiver curve with Rician fading K 10, coherence time 0.3 s, coherence bandwidth 5.5 MHz and the `sum` combination (§12.3, §12.4); the adjacent-channel table 10 dB / 40 dB (§13.2); smooth capture and break with the presync curve (§13.3); a PA maximum of 16.9 dBm (§2); the kits' sniffing settings (§10.5), with the layered model's detection rule for noise and interference |
+| `realistic` | the `calibrated` options, `--medium-shadowing=2,60 --rssi-offset=0.9` | `calibrated` plus slow shadowing of 2 dB with a 60 s decorrelation time (§12.1) and a reported-RSSI offset per receiver of 0.9 dB standard deviation (§11.6). No interferers, no bursts, no false detections |
+| `basic` | none (`--medium-tx-max` stays `off`) | The defaults before the presets (emulator `e446b87`): the kits' curves and capture rules as steps, the empirical noise curve, no link variation, the next channel only, no PA maximum. With it, a run gives node logs, medium log and sniff log byte-identical to `e446b87` without options (checked below) |
+| `em4` | `--medium-model=em4` | The MVP's reception model (§2.1): with `WSSIM_PHY_PREAMBLE=8` in the nodes' environment, identical to emulator `da8e09c` |
+
+Positions (§11) need a positions file and stay opt-in in every preset. So do the options that are not calibrated: bursts (§12.2), external interferers (§13.1), false detections, energy detection and adjacent-channel sniffing (§13.4), the radio's turnaround delays (§9.2) and per-frame reported-RSSI noise (§11.6).
+
+### 14.2 Sources: calibrated and illustrative
+
+| Setting | Value | Preset | Source | Status |
+| --- | --- | --- | --- | --- |
+| Interference curve, capture margin and windows, break margin, next channel | §2.1 | all but `em4` | FG25 kits, RAILtest, EU modes 3 and 1a (`COCHANNEL_RESULTS.md`) | measured |
+| Smooth capture and presync curve | §13.3 | `calibrated`, `realistic` | fit to 256 kit power pairs, 5-fold cross-validated (3.7 points against 5.0 for the step model) | fitted on measurements |
+| Two channels away | 40 dB | `calibrated`, `realistic` | between the kits' lower bound (about 35 dB, no loss at W/I −29.8 dB) and the datasheet's CW selectivity (45.1–47.2 dB) | bounded by measurements |
+| Layered curve, fading K, coherence bandwidth | 9.0 dB, 0.9 dB; K 10; 5.5 MHz | `calibrated`, `realistic` | the slope is the kits'; X0 and K fitted so that the average over the fading reproduces the radio's field-fitted empirical curve within a factor 2.0 from −100 to −85 dBm (100-byte frames, §12.3); the delay spread from published indoor measurements | fitted to the empirical curve |
+| Coherence time | 0.3 s | `calibrated`, `realistic` | Clarke's spectrum at the 1.2 km/h environment speed of the IEEE 802.11 TGn channel models (§12.5) | literature |
+| PA maximum | 16.9 dBm | `calibrated`, `realistic` | RAIL's reported maximum on the BRD4271A (POWER_MODEL.md §12.10), the level the FG25 profiles' TX tables end at | measured on the kits (reported, not an RF measurement) |
+| Sniffing dwell, margin, settling, table | §10.5 | all | FG25 kits, EU mode 3 | measured |
+| Slow shadowing | 2 dB, 60 s | `realistic` | our choice. Measurements of fixed indoor links with people moving (for example "Impact of people movement on received signal in fixed indoor radio communications", 900 and 2450 MHz) report temporal fluctuations whose size depends on the link; no value suits every building. 2 dB is half the illustration of §12.7 | illustrative |
+| Reported-RSSI offset | 0.9 dB (standard deviation) | `realistic` | FG25 datasheet Rev. 1.2, Tables 4.23 and 4.24: at most 1.8 dB of absolute error in the 868 MHz band (1.2 dB at 915 MHz); half the maximum puts 95 % of receivers within it (§11.6) | datasheet bound, spread assumed |
+
+### 14.3 Choosing a preset, and what the scripts use
+
+- **New work:** the default (`calibrated`). `realistic` shows the effect of slowly varying links and imperfect RSSI on a protocol; its two additions are illustrative, so a result that depends on them should be reported with and without them.
+- **Comparison with runs made before the presets:** `--medium-preset=basic`. `em4` reproduces the MVP's collision figures (upper bounds).
+- **A single setting:** any option after the preset, for example `--medium-preset=calibrated --medium-fading=off` or `--medium-capture-model=step`.
+- **Scripts:** `run.sh` passes `SIM_OPTS` to the server (`SIM_OPTS=--medium-preset=basic`); `run_scale.py` takes `--server-opts`; the web application's run configuration takes `serverOptions` ([OTHER_STACKS.md](OTHER_STACKS.md)).
+
+Tests that compare logs or encode the formulas of one medium model pin `basic`; the others run the default:
+
+| Test | Preset | Why |
+| --- | --- | --- |
+| `nonreg_dag_simple.sh` | none (`--medium=legacy`) | permanent reference runs; 10 of 10 seeds identical |
+| `test_conductor.py`, `test_sniff.py`, `test_interf.py`, `test_propagation.py`, `test_channel.py`, `capture_vs_kits.py`, `demo_link_variation.py` (fake nodes, through `test_conductor.Server`) | `basic`, unless a test gives a preset or the options it checks | each test checks a rule or a formula with the options it names; new tests check the default's parts (`test_sniff.py` `layered_default`, `test_conductor.py` `medium_tx_max`, `test_propagation.py` `pa_limit`) |
+| `radio_if/test_ref_client.py` | `basic` | the client's expected outcomes are computed with fixed link values |
+| `test_medium_radio.sh` | `basic` | its CCA check rebuilds each busy answer's energy from the links' fixed levels |
+| `test_lfn_weak.sh` | `basic` | its levels come from the empirical curve (the layered model loses more below −100 dBm) |
+| `radio_if/test_mixed.sh` | `basic` (`MEDIUM_PRESET`) | its checks count events that occur by chance in one seed; with the default, seed 1 had no Wi-SUN frame arriving at a client busy with another frame |
+| Every other test of the LFN suite (`lfn_suite.sh`), `test_lfn_left.sh`, `test_retry_lockstep.sh`, `determinism.sh`, `medium_gate_dag.sh`, `medium_gate_star.sh`, `interf_demo.sh`, `prop_building.sh` | the default (`calibrated`) | behaviour checks; `SIM_OPTS` selects another preset |
+
+`lfn_lib.lfn_reception()` takes the end of a received frame from the radio's `RX_done` line with the central medium (it had no `SIG RX` line there, so frames received just after a window that closed late were counted outside the windows).
+
+**Checks of the presets** (the build of the presets against the builds named):
+
+- `basic` against `e446b87` without options: `medium_gate_star.sh` hidden, seed 1, 600 s: 43 of 43 node logs identical, medium log identical (398 420 lines); `test_mixed.sh SNIFF=1` seed 1: node logs, medium log and sniff log identical.
+- `em4` (and `--medium-model=em4` alone) with `WSSIM_PHY_PREAMBLE=8` against `da8e09c`: the same star run, 43 of 43 node logs and the medium log (397 220 lines) identical.
+- The legacy medium: `nonreg_dag_simple.sh` against `dag_simple_8c5677e`, 10 of 10 identical; the LFN suite in legacy mode (`medium_lfn_suite.sh quick`) 48 of 48.
+- The default: the LFN quick suite 56 of 56, `test_ref_client.py` 21 of 21, `test_mixed.sh` and `SNIFF=1` pass, `test_retry_lockstep.sh` passes.
+
+No permanent reference run depends on the central medium's defaults: the reference runs are made with the legacy medium (`sim_utils/reference-runs.md`), so none was added.
+
+### 14.4 Memory and wall time
+
+Server memory and wall time with the light load of `docs/SCALE.md` (interface clients, a 20 ms window every second, a beacon flood every 60 s, the LFN power profile, no medium log, two cores with `taskset`, on a PC shared with other jobs: ±10 %). "From positions": `run_scale.py --positions`, links from the default indoor model of §11.3 at 14 dBm; otherwise the links of `gen_building.py`.
+
+| Building | Virtual s | Mean degree | `basic`: wall, server RSS | `calibrated`: wall, server RSS |
+| --- | --- | --- | --- | --- |
+| 1000 nodes, `gen_building.py` links | 60 | 38 | 4.5 s, 13 MB | 5.7 s, 24 MB |
+| 4000 nodes, `gen_building.py` links | 30 | 44 | 16.0 s, 86 MB | 23.7 s, 93 MB |
+| 1000 nodes, from positions | 60 | 999 | 10.5 s, 13 MB | 19.9 s, 25 MB |
+| 4000 nodes, from positions | 30 | 2894 | 45.5 s, 82 MB | 97.8 s, 94 MB |
+
+Before the cache was bounded and the variation evaluated lazily, the layered model took 307 MB (1000 nodes, `gen_building.py` links) and 4.4 GB (1000 nodes from positions, 60 s, 33.5 s of wall time); a 4000-node building from positions would have needed tens of GB. Results are identical with and without these changes. A medium log turns the lazy evaluation off (every receiver's power is logged): the 1000-node building over 600 s took 18.0 s with `basic` and 41.9 s with `calibrated`, with a medium log.
+
+### 14.5 Density of buildings from positions
+
+With the default indoor model (P.1238 office, §11.3), every node of a 152 m × 72 m floor hears every other, and floors attenuate little (9, 19, 24 dB, then 5 dB per floor): the 4000-node building of 20 floors has 2894 neighbours per node on average at 14 dBm. The table below tests whether the hearing-graph cutoff (−125 dBm with a 10 dB margin: pairs whose mean level is −135 dBm or more are kept) causes this density. It uses the levels of every pair from three nodes of that building (`--prop-cutoff=-250 --prop-margin=0 --prop-dump-node`; node 0 in the middle of floor 0, node 1000 at a corner of floor 5, node 2100 in the middle of floor 10), with the power that a cutoff would drop. "Expected" assumes each dropped node on air a share of the time, on any of 35 channels with equal chance, coupling into the receiver's channel at 0, 10 and 40 dB (one channel, the next two, the two after): 10 % of the time is far more than a low-power network sends, 1 % is a busy one.
+
+| Pairs kept (mean level at 14 dBm) | Degree, node 0 / 1000 / 2100 | Dropped power if all sent at once on one channel (dBm) | Noise rise from the dropped nodes, 10 % on air | 1 % on air |
+| --- | --- | --- | --- | --- |
+| ≥ −135 dBm (the default) | 2107 / 2861 / 3532 | −113.2 / −112.9 / −112.6 | 0.07 / 0.08 / 0.08 dB | 0.01 dB |
+| ≥ −125 dBm | 1742 / 2472 / 2875 | −103.0 / −102.4 / −100.3 | 0.7 / 0.8 / 1.2 dB | 0.07–0.13 dB |
+| ≥ −120 dBm (the noise floor) | 1582 / 2219 / 2482 | −98.4 / −96.8 / −94.8 | 1.7 / 2.3 / 3.3 dB | 0.2–0.5 dB |
+| ≥ −110 dBm | 1196 / 1579 / 1759 | −87.8 / −85.5 / −85.0 | 8–11 dB | 1.9–3.1 dB |
+| ≥ −100 dBm | 833 / 975 / 1087 | −77.9 / −75.9 / −75.6 | 17–20 dB | 8–10 dB |
+
+**Decision: the cutoff and the margin stay (−125 dBm, 10 dB), and no wall loss is added by default.**
+
+- The cutoff is not the cause of the density: even a cutoff at the noise floor keeps 1600–2500 neighbours per node, and one that brings the degree under a thousand drops interference 8–20 dB above the noise floor. With the default, the dropped nodes raise the noise by at most 0.08 dB even at 10 % on air, so the cutoff keeps the interference that matters.
+- The density comes from the path loss of an open office floor, where P.1238's exponent already includes the walls, and from floors whose loss grows slowly, as measured at 914 MHz (Seidel and Rappaport, §11.3). Adding a wall loss by default would count the walls twice for the building type the model describes; buildings with solid walls should set `--prop-walls` or `--prop-wall-db-per-m` from their construction (§11.3: 1730 neighbours per node with `--prop-walls=8:2.4`, 162 with the `gen_building.py` model).
+- The cost is bounded by the changes of §14.4: the 4000-node building from positions runs at 3.3 s of wall time per virtual second with 94 MB in the server. `--prop-cutoff=-110` (pairs at −120 dBm or more) brings the mean degree to 2236 and the wall time to 2.7 s per virtual second (−19 %), at the price of the noise rise in the third row of the table; the frames received in that run changed by less than 0.1 % (light load, 30 s).
+- With the default preset, the graph is made at most at the PA maximum (16.9 dBm), so with the nodes' default `--prop-tx-dbm` of 20 dBm it is 3.1 dB sparser than before.
+
+### 14.6 Effect on results
+
+Same seeds and scenarios, `basic` against `calibrated` against `realistic`. dag_simple: `run.sh`, 3 seeds × 600 s, FG25 SoC power profile; star: `medium_gate_star.sh` hidden, 3 seeds × 900 s, requests from 300 s; building: `run_scale.py`, 1000 nodes with `gen_building.py` links, light load, 600 s, seed 1, with a medium log; LFN: the quick suite (`lfn_suite.sh quick` for the default, `medium_lfn_suite.sh quick` with `MEDIUM_ARGS=--medium-preset=...` for the others, which leaves the unit tests out). About 4 minutes of wall time in all.
+
+| Scenario and figure | `basic` | `calibrated` | `realistic` |
+| --- | --- | --- | --- |
+| dag_simple: routers ready, median ready time per run | 14/14 each run; 148, 140, 131 s | 14/14; 152, 142, 153 s | 14/14; 152, 142, 154 s |
+| dag_simple: join milestones against `basic` (Mann-Whitney, ready) | — | p = 0.82 | p = 0.82 |
+| dag_simple: frames heard received; collision share | 98.59 %; 1.34 % | 98.39 %; 1.56 % | 98.31 %; 1.64 % |
+| dag_simple: average current per node (3 runs) | 8.85–8.87 mA | 8.86–8.87 mA | 8.84–8.88 mA |
+| Star: routers ready, median ready time per run | 40/40; 116, 115, 99 s | 40/40; 114, 118, 117 s (p = 0.14) | 40/40; 105, 109, 116 s (p = 0.78) |
+| Star: frames heard received; collision share; interference losses per run | 92.01 %; 7.49 %; 667 | 91.88 %; 7.61 %; 654 | 92.41 %; 7.09 %; 616 |
+| Star: requests received (of 2280) | 2272 (99.65 %) | 2280 | 2277 (99.87 %) |
+| Building: frames heard received; interference losses; captures | 57.06 %; 71 105; 22 198 | 57.85 %; 63 987; 27 662 | 57.79 %; 63 966; 27 768 |
+| Building: floods (10 beacons, 2 alarms) | every node reached; latency median 3.0 s, max 9.0 s | the same | the same |
+| LFN quick suite | 48 of 48 | 56 of 56 | 47 of 48 |
+| Wall time per run: dag_simple, star, building | 5.0–5.3 s, 15.2–15.9 s, 18.0 s | 5.3–5.6 s, 18.2–19.7 s, 41.9 s | 5.4–5.6 s, 19.1–19.5 s, 43.3 s |
+
+What changes for users: in these scenarios the networks form as before and delivery does not change significantly; per-frame figures move by fractions of a point (more captures and fewer interference losses with the smooth capture model, a few more noise losses on weak links with fading). The figures that do change are those near sensitivity (the layered model loses more below about −100 dBm, §12.3), those of sniffing under interference (§10.5), and links from positions at 20 dBm (3.1 dB weaker with the PA maximum). The `realistic` failure is `join_mesh2_s1`: the LFN's link to the border router is 1 dB below its minimum sensitivity, and the 2 dB shadowing lifts it above that at times, so the LFN chose the border router; it passes with `--medium-shadowing=off`. This is the behaviour the option models: a 1 dB margin is smaller than the link's variation.
+
+### 14.7 Limits
+
+- The `realistic` additions are illustrative (§14.2): site measurements should replace them.
+- The layered model's calibration holds for its default fading (§12.3); changing K, the coherence time or adding shadowing changes the average loss.
+- A medium log disables the lazy evaluation (§12.1) and costs about twice the wall time with the default preset in large buildings.
+- The presets set only server options. The nodes' own settings (`WSSIM_PHY_PREAMBLE`, the turnaround options of §9.2, `tx_power`) are set in their environment or configuration.

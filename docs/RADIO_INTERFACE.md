@@ -536,10 +536,10 @@ The logs go to a new temporary directory (`radio_if_*` in `$TMPDIR`, by default 
 ## 14. Not in this interface
 
 - **Wall-clock mode and the legacy medium.** The interface needs virtual time and the central medium.
-- **Physical-layer details** listed in `docs/MEDIUM.md` §9 and §9.1: fading and shadowing, external interferers, node positions and path-loss models, RX/TX turnaround and settling times (except the sniff's settling time, §6.7), an error on the reported RSSI. A receiver also decodes frames whatever their bit rate.
+- **Physical-layer details** listed in `docs/MEDIUM.md` §9 and §9.1 that the default preset leaves off (`docs/MEDIUM.md` §14): slow shadowing, bursts, external interferers, node positions and path-loss models, RX/TX turnaround and settling times (except the sniff's settling time, §6.7), an error on the reported RSSI; each is an option. The default has fast fading. A receiver also decodes frames whatever their bit rate.
 - **The receive timestamp** is the frame's start (the time of the wake that delivers it); a radio that timestamps the end of the sync word adds `shr_len × 8 × 10⁶ / rate_bps` itself. After a sniff's lock, it is the detection time.
 - **MCU active time chosen by the client.** The power report models it from cycle counts (§7); code still runs in zero virtual time, so a slow MCU does not delay the protocol.
 - **Peripherals that keep the MCU out of deep sleep** (a UART, for example) cannot be reported yet.
 - **Changes during a reception:** the medium checks the node's state at the frame's end only. A channel change reported while in `RECEIVE` does not lose the frame, nor does a short excursion out of `RECEIVE` reported back before the end (unless another frame reaches the node meanwhile); a client that follows §6.5 does neither.
 - **One radio per node.**
-- **Sniffing limits** (`docs/MEDIUM.md` §10.6): no false detection on noise, detection per frame and not on summed energy, one channel per `"xn"` (a scan of `n` channels costs `n` wakes), no hardware channel hopping between sense windows, and default detection figures that are model values until measured on hardware.
+- **Sniffing limits** (`docs/MEDIUM.md` §10.6): by default no false detection on noise and detection per frame, not on summed energy (both are options, §13.4); one channel per `"xn"` (a scan of `n` channels costs `n` wakes), no hardware channel hopping between sense windows; the detection figures are the FG25 kits' in EU mode 3 against an interferer, not near sensitivity.
