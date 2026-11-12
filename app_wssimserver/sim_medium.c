@@ -178,7 +178,7 @@ static const struct med_smooth med_smooth_fit[MED_PHYS] = {
     // Mode 1a: §5 (+5.5 dB: 65 % at 100-200 us, 21 % at 400 us, 7 % at
     // 600 us; +11 dB: 100 % to 400 us, 94 % at 600 us): the early window
     // grows with the margin
-    [MED_PHY_1A] = { 0, 1.0, 0.5, 12, 3.9, 6, -4, 1, -11.2, 1.5 },
+    [MED_PHY_1A] = { 0, 0.3, 0.5, 12, 3.9, 6, -4, 1, -11.2, 1.5 },
     // Mode 3: §4.2 (early window 50 % at 250 us = 38 bits whatever the
     // margin; SFD window 50 % at about 613 us and 752 us)
     [MED_PHY_3] = { 0, 1.0, 0.5, 38, 0, 2, -4, 1, -11.2, 1.5 },
@@ -1380,7 +1380,7 @@ static double med_logistic(double x)
 // the frame l holds starts now. With d the time into l's own SHR in bits,
 // Tp and Tshr its preamble and SHR in bits:
 //   weight w(d) = max(early, sfd): early = 1 - logistic((d - E) / w),
-//     E = early + slope (margin - 5) within [0, Tp]; sfd (where the profile
+//     E = early + slope max(0, margin - 5) within [0, Tp]; sfd (where the profile
 //     captures during the SFD) = logistic((d - Tp - rise) / w)
 //     (1 - logistic((d - Tshr - fall) / w)); during an "xl" preamble, 1;
 //   P(capture) = w(d) logistic((margin - m50) / s);
@@ -1402,7 +1402,7 @@ static int med_smooth_capture(const struct med_lock *l, const struct med_phy *x,
         // Past the windows' last edge: synchronised, no capture, no break
         if (d >= tshr + (x->sfd_capture ? x->sfd_fall : 0) + 8 * x->edge_w)
             return MED_ACT_NONE;
-        e = x->early_c + x->early_slope * (margin - 5);
+        e = x->early_c + x->early_slope * (margin > 5 ? margin - 5 : 0);
         if (e < 0)
             e = 0;
         if (e > tp)
@@ -1882,7 +1882,7 @@ uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, ui
     }
     // External interferers in the window (§13.4)
     if (intf_any())
-        intf_each(node, x->chan, now, x->t1, sn_add_ext, x);
+        intf_each(node, x->chan, now, x->t1 + 1, sn_add_ext, x);    // + 1: on air at t1 counts (end energy)
     // A false detection on noise (§13.4): its time, drawn now
     if (sn.false_p > 0 && x->t1 > x->t0) {
         double u = sn_uniform_f(node), t;
