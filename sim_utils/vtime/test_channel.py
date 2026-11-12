@@ -320,6 +320,27 @@ def test_layered_average():
             check(1 / 2.5 < lost / (n * emp) < 2.5, f"{lvl} dBm: measured {lost / n} against empirical {emp}")
 
 
+def test_positions():
+    """Links from node positions (§11) vary too: two nodes 20 m apart, no -g
+    value, fading on; the log's mean_dbm is the path-loss level, constant,
+    and rx_dbm = mean + fading, which varies."""
+    pos = os.path.join(ARGS.logdir, "chan.pos")
+    with open(pos, "w") as f:
+        f.write("1 0 0 0\n2 20 0 0\n")
+    n = 20
+    r = {1: Radio(1, {1000 + k * 700000: [("tx", {})] for k in range(n)}), 2: Radio(2)}
+    medium_run(r, [], opts=[f"--positions={pos}", "--medium-fading=10,0.3"])
+    with open(os.path.join(ARGS.logdir, "medium.log")) as f:
+        full = [ln.split() for ln in f if ln.split()[2] == "2"]
+    check(len(full) == n, f"{len(full)} frames at 2")
+    means = {x[7] for x in full}
+    check(len(means) == 1 and float(full[0][7]) < -20, f"means {means}")
+    check(all(abs(float(x[5]) - float(x[7]) - float(x[9])) < 0.02 for x in full), "rx_dbm is not mean + fading")
+    spread = max(float(x[9]) for x in full) - min(float(x[9]) for x in full)
+    check(spread > 1, f"fading spread {spread} dB")
+    print(f"     mean {full[0][7]} dBm from the positions, fading spread {spread:.1f} dB over {n} frames")
+
+
 def test_variation_everywhere():
     """The variation reaches the frame as an interferer and the CCA energy:
     node 3's long frame overlaps node 1's at 2, and 2 senses during it. The
@@ -489,6 +510,7 @@ def main():
         ("frequency", test_frequency),
         ("layered_average", test_layered_average),
         ("variation_everywhere", test_variation_everywhere),
+        ("positions", test_positions),
         ("log_matches_dump", test_log_matches_dump),
         ("run_determinism", test_run_determinism),
         ("combination", test_combination),

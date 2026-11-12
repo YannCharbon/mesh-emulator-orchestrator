@@ -918,8 +918,10 @@ void med_add_rx(struct med_frame *f, int node)
     f->rx_mask[node / 64] |= 1ULL << (node % 64);
     rx->node = node;
     rx->dbm = med_rx_dbm(node, f->src, f->tx_dbm);
-    chan_apply(node, f->src, f->t_start, f->chan, f->rate_bps, sim_link(med.links, node, f->src)->rssi == 0, &rx->dbm,
-               &rx->cs);
+    // Link variation (§12), over the mean from -g or the positions; an edge
+    // without a value (a perfect link) does not vary
+    chan_apply(node, f->src, f->t_start, f->chan, f->rate_bps,
+               !prop_modelled(node, f->src) && sim_link(med.links, node, f->src)->rssi == 0, &rx->dbm, &rx->cs);
     rx->mw = dbm_to_mw(rx->dbm);
 }
 
