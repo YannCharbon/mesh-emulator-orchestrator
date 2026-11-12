@@ -201,8 +201,8 @@ Not answered at once: one `"xd"` comes in a later wake (§6.7).
 | 2 | 1 | detected | 1: a frame was detected; 0: nothing in the window |
 | 3 | 1 | locked | 0: no lock (`LOCK` not asked, or the frame can no longer be received); 1 (`LOCKED`): the medium locked the receiver onto the frame now, and its `"xx"` is the next message of this wake; 2 (`RECEIVING`): the receiver was already locked onto that frame, whose `"xx"` came at its start (with or without `LOCK`) |
 | 4 | 4 | sniff_id | the request's tag |
-| 8 | 4 | frame_id | the frame detected; 0 if none |
-| 12 | 2 | src | its sender's node ID; 0 if none |
+| 8 | 4 | frame_id | the frame detected; 0 if none, or, with `detected` 1, if what was detected is not an emulated frame (an external interferer, the energy detector without a frame, a false detection: [MEDIUM.md](MEDIUM.md) §13.4) |
+| 12 | 2 | src | its sender's node ID; 0 if none; 0xFFFF when `frame_id` is 0 and `detected` 1 |
 | 14 | 2 | reserved | |
 | 16 | 8 | t_us | the detection time, or the window's end if nothing was detected; always the time of this wake |
 | 24 | 4 | rssi_dbm | the detected frame's received power; if none, the energy on the channel at the window's end (as `"xs"` would answer), `float32` |
