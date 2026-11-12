@@ -18,7 +18,7 @@ With the central medium (the default with `--vtime`; `--medium=central` says it 
 
 All powers in dBm at the receiver's antenna; sums are done in mW.
 
-- **Received power.** `P = link(rx, tx)` from the `-g` options (and `--vtime-link`), as today: the value is the received power, whatever TX power the sender uses. With `--medium-tx-ref=DBM`, the value is the received power when the sender transmits at DBM, and `P = link + (tx_dbm − DBM)`, with `tx_dbm` from the frame header: the TX power the MAC last set (`wsnode` and `wsbrd` set it from their `tx_power` setting at start; a radio whose MAC never set one reports 0 dBm). An edge without a value (0 dBm) stays a perfect link; it is also a 0 dBm interferer and 0 dBm of CCA energy, so two frames over such links always destroy each other and neither can capture the other. Give RSSIs to the edges when collisions matter. Pairs that are not graph neighbours do not hear each other at all: no reception, no interference, no energy in CCA.
+- **Received power.** `P = link(rx, tx)` from the `-g` options (and `--vtime-link`), or, with `--positions`, from the node positions and a path-loss model (§11), which also derives who hears whom. With `-g` values: the value is the received power, whatever TX power the sender uses. With `--medium-tx-ref=DBM`, the value is the received power when the sender transmits at DBM, and `P = link + (tx_dbm − DBM)`, with `tx_dbm` from the frame header: the TX power the MAC last set (`wsnode` and `wsbrd` set it from their `tx_power` setting at start; a radio whose MAC never set one reports 0 dBm). An edge without a value (0 dBm) stays a perfect link; it is also a 0 dBm interferer and 0 dBm of CCA energy, so two frames over such links always destroy each other and neither can capture the other. Give RSSIs to the edges when collisions matter. Pairs that are not graph neighbours do not hear each other at all: no reception, no interference, no energy in CCA.
 - **Links and their direction.** `link(rx, tx)` is directional: the power at `rx` of `tx`'s frames. The `-g` options (and `--group-file`, one option per line) set it, in order:
   - `-g A,B:RSSI` (exactly two IDs) sets `A → B` (heard by B) to RSSI, and also `B → A`, unless an option `-g B,A:RSSI` gives that direction itself, before or after. A link given once is therefore the same in both directions, as before 2026-11-09, and a reverse option makes it **asymmetric** (different TX powers, noise or antennas at the two ends): `-g 0,1:-70 -g 1,0:-80` is −70 dBm at node 1 and −80 dBm at node 0. Giving both directions with the same value is the same as giving the link once.
   - Any other list, a range (`0-3:RSSI`, even `0-1:RSSI`) or more than two IDs (`1,2,5:RSSI`), sets every pair of its nodes, both directions.
@@ -107,6 +107,7 @@ Under `NS_PORT_SIM` and `ns_port_sim_medium()` (`app_wshwsim/sl_rf_driver.c`):
 - `--medium=legacy|central` (virtual time only; refused without `--vtime`). Default with `--vtime`: `central`.
 - `--medium-tx-ref=DBM`, `--medium-lock-snr=DB` (refused with `--medium=legacy`).
 - The reception model (§2.1; refused with `--medium=legacy`): `--medium-model=fg25|em4`, and per PHY profile `--medium-int-curve=[MODE:]X0,B|noise`, `--medium-capture-db=[MODE:]DB`, `--medium-capture-early-bits=[MODE:]N|shr`, `--medium-capture-sfd=[MODE:]on|off`, `--medium-break-db=[MODE:]DB|off`, `--medium-adjacent-db=[MODE:]DB|off`.
+- Propagation from node positions: `--positions`, `--prop-*` (both media), `--rssi-offset`, `--rssi-noise` (central only); §11.8.
 - Preamble sniffing: `--sniff-detect`, `--sniff-dwell-bits`, `--sniff-threshold`, `--sniff-curve`, `--sniff-sfd-bits`, `--sniff-log` (§10.5; refused with `--medium=legacy`).
 - `--medium-log=FILE`: one line per (frame, receiver) outcome: `t_end_us src dst frame_id outcome rx_dbm sinr_min_db`, outcome one of `ok`, `noise` (lost, no interferer), `interference` (lost with an interferer), `captured`, `below_lock` (heard, not locked: too weak against the noise and interference), `busy` (heard while receiving another frame and not captured), `not_listening`, `tx_abort`, `left`.
 - At the end of the run, a summary line per outcome (totals), the number of sync searches broken by a stronger frame (§3, counted in `interference`), and the CCA query count with the number of queries that found a frame on air. The server does not know the radios' CCA thresholds: the busy counts are in the radios' exit lines (`rf medium: N CCA, N busy`).
@@ -138,7 +139,7 @@ Most remaining collision losses are `busy` frames (a receiver holds one frame at
 
 ## 9. Not in the MVP
 
-Fading and shadowing, bursts of losses, external interferers, node positions and path-loss models, RX↔TX turnaround and settling times (the kits measured RAIL's RX→TX 130 µs and TX→RX 100 µs, `COCHANNEL_RESULTS.md` §4.5; not applied), a reported RSSI with its own error (Investigation §5, P4–P11 and the layered loss model). The radio still decides its own TX timing; the medium does not delay or refuse a transmission. A frame that will be lost keeps its receiver in RX for its whole airtime, as on a real radio (legacy dropped it at its start), so central runs show more RX time.
+Fading and time-varying shadowing, bursts of losses, external interferers, RX↔TX turnaround and settling times (the kits measured RAIL's RX→TX 130 µs and TX→RX 100 µs, `COCHANNEL_RESULTS.md` §4.5; not applied) (Investigation §5, P4–P11 and the layered loss model). Node positions with path-loss models, static shadowing and a reported RSSI with its own error are in §11. The radio still decides its own TX timing; the medium does not delay or refuse a transmission. A frame that will be lost keeps its receiver in RX for its whole airtime, as on a real radio (legacy dropped it at its start), so central runs show more RX time.
 
 ### 9.1 Limits of the calibration
 
@@ -245,3 +246,126 @@ The run's end prints the number of sniffs per outcome, the locks made by a sniff
 ### 10.7 Checks
 
 `sim_utils/vtime/test_sniff.py` (fake nodes, in the LFN suite as `sniff`): detection of a frame on air at the expected time and power; an empty channel (noise floor, one wake); the threshold; partial overlap at both edges of the window, with both detection modes; an interferer (SINR against the formula, no detection at equal power); the wrong channel; half duplex (deaf during its own frame, a frame sent during the window ends the sniff); one-dwell detection rate at the margin against the curve, and determinism by seed; a table curve (no draws at 0 and 1); a 100 ms `"xl"` preamble detected and locked onto mid-preamble, its `"xx"` and verdict, against a radio that only listened from the start, one that turned on late without a sniff, and a sniff without the lock flag; the lock rules (no lock after the SFD, an existing lock reported, bits counted from the lock, the lock threshold against the frames still on air only, no detection of another frame while locked); the ledger (listening during the window, receiving after the lock, the TX time kept when the sniff is asked during the node's own frame); the settling time; many frames joining a window (one chain of check events); option errors.
+
+## 11. Propagation from node positions
+
+The links of section 2 can come from node positions and a path-loss model instead of `-g` values. The server computes, once at the start, the mean received power of every pair of positioned nodes in each direction, with a static shadowing term, and derives from it who hears whom. The time-varying part of a link (fading, slow shadowing, bursts of losses) is a separate layer that adds to this mean; external interferers are another. The option is disabled by default: without `--positions`, every output is unchanged.
+
+The model lives in `app_wssimserver/sim_propagation.c`. The medium asks it for one value per frame and receiver, `prop_link_dbm(rx, tx, tx_dbm)`, which is a table lookup and one addition; there is no per-frame search.
+
+### 11.1 Positions file
+
+`--positions=FILE`: one node per line, `ID X Y Z [FLOOR [GAIN_DBI]]`, coordinates in metres. Blank lines and lines starting with `#` are skipped. `FLOOR` is an integer; without it, the floor is `Z / --prop-floor-height` rounded (3.5 m). `GAIN_DBI` is the node's antenna gain, applied in transmission and in reception; without it, `--prop-gain` (0 dBi). A node ID may appear once. Nodes that are not in the file keep the `-g` links only.
+
+`radio_if/scale/gen_building.py --positions FILE` writes this format (`ID X Y Z FLOOR` after a `#` header), so a generated building can be used directly: `gen_building.py --nodes 200 -o /dev/null --positions b.pos`.
+
+### 11.2 Received power
+
+For a frame that `tx` sends at `tx_dbm` (from the frame header, as with `--medium-tx-ref`), the mean power at `rx` is
+
+    P(rx ← tx) = tx_dbm + G_tx + G_rx − PL(tx, rx) − X(rx, tx)
+
+with `G` the antenna gains (§11.1), `PL` the path loss of the model (§11.3) and `X` the static shadowing (§11.4). At the start, the server stores `P` at the nominal TX power `--prop-tx-dbm` (14 dBm) in its RSSI map, and the medium adds `tx_dbm − 14` to it for each frame. The legacy medium and wall-clock runs use the map as it is: their radios do not apply the sender's TX power, so `--prop-tx-dbm` should be the TX power the nodes use.
+
+### 11.3 Path-loss models
+
+`d` is the 3-D distance between the two nodes, at least `--prop-min-dist` (1 m); `d_h` the horizontal distance; `k` the number of floors between them; `f` the frequency in MHz (`--prop-freq`, 915).
+
+    PL = PL0 + 10 · n · log10(d) + w · d_h + L_wall · walls + L_floor(k)
+
+| Model (`--prop-model`) | `PL0` (`--prop-pl0`) | `n` (`--prop-exp`) | `L_floor(k)` (`--prop-floor-db`) | Source |
+| --- | --- | --- | --- | --- |
+| `indoor` (default) | `20·log10(f) − 28` (31.2 dB at 915 MHz, 30.8 dB at 868 MHz) | 3.3 | 9, 19, 24 dB for 1, 2, 3 floors; 5 dB more per further floor | ITU-R P.1238 site-general indoor model, office, 900 MHz: `L = 20·log10(f) + N·log10(d) + Lf(n) − 28` with `N` = 33 and `Lf` = 9, 19, 24 dB (versions 0 to 3, 1997–2003). `N` already allows for the walls within a floor. Beyond 3 floors the Recommendation gives no value; the last step is repeated. |
+| `logdist` | free space at 1 m: `20·log10(f) − 27.55` (31.7 dB at 915 MHz) | 3.0 | none | Log-distance model; the exponent is a chosen value for indoor commercial buildings (P.1238 gives 3.3 for offices and 2.0 for commercial areas at 900 MHz) |
+| `freespace` | free space at 1 m | 2.0 | none | Free-space path loss, `20·log10(d) + 20·log10(f) − 27.55` |
+
+Every term is a user setting, for every model:
+
+- `--prop-floor-db=L1[,L2,...]`: the cumulative loss for 1, 2, ... floors apart, not decreasing; beyond the list, its last step is repeated. One value is a loss per floor (`--prop-floor-db=18`: 18 dB per floor). Seidel and Rappaport measured 12.9 and 16.2 dB for one floor at 914 MHz in two office buildings ("914 MHz path loss prediction models for indoor wireless communications in multifloored buildings", IEEE Trans. Antennas Propag., 1992).
+- `--prop-wall-db-per-m=W` (0): a wall loss proportional to the horizontal distance, for a model whose exponent does not include the walls.
+- `--prop-walls=SX[,SY]:DB` (none): a regular grid of walls, every `SX` metres across `x` and every `SY` metres across `y` (`SY` = `SX` if omitted), at `(k + 1/2)·S`, so that nodes on a grid of the same spacing stand in the middle of their rooms; each wall crossed adds `DB`. The same study measured 1.4 dB per cloth-covered office partition and 2.4 dB per concrete wall at 914 MHz.
+
+The model of `gen_building.py` (`docs/SCALE.md` §2) is `--prop-model=logdist --prop-pl0=31.7 --prop-exp=3 --prop-wall-db-per-m=1.8 --prop-floor-db=18 --prop-shadow=0`: with `--prop-cutoff=-100 --prop-margin=0`, the server gives the same links as the generator's topology file (`test_propagation.py`, `gen_building`).
+
+**Choosing the model.** The default is site-general and has no wall term beyond its exponent: in large open floors it predicts long ranges. With the defaults and 14 dBm, the two farthest nodes of a 152 m × 72 m floor of `gen_building.py` receive each other at about −91 dBm before shadowing, and a 4000-node building of 20 such floors has about 2890 neighbours per node on average in the hearing graph. Buildings with many solid walls are closer to the wall grid or the per-metre term: with `--prop-walls=8:2.4`, the same building has about 1730 neighbours per node, and with the `gen_building.py` model, 162. The parameters should be set from measurements in the target building when they exist.
+
+### 11.4 Static shadowing
+
+`X(rx, tx)` is a normal variable with mean 0, drawn once per run:
+
+    X(rx, tx) = σ_link · z(pair) + σ_dir · z(rx, tx) + σ_node · (z(rx) + z(tx))
+
+- `σ_link`, `--prop-shadow` (4 dB): shared by both directions, which keeps the link reciprocal, as the propagation channel is.
+- `σ_dir`, `--prop-shadow-dir` (0 dB): drawn per direction; it makes links asymmetric (the two directions differ with a standard deviation of `√2·σ_dir`). On real hardware, most asymmetry comes from the TX power and receiver sensitivity of each device rather than from the channel.
+- `σ_node`, `--prop-shadow-node` (0 dB): one draw per node, in all its links in both directions: a simple spatial correlation (a node in a poor location is poor with every neighbour). Two links that share a node have the correlation `σ_node² / (σ_link² + σ_dir² + 2·σ_node²)`.
+
+The total standard deviation is `√(σ_link² + σ_dir² + 2·σ_node²)`. Each `z` is a standard normal draw from a hash of the run's seed (`WSSIM_SEED`, 1 by default) and the pair or the node, so the values do not depend on the order of computation, the same seed gives the same links, and another seed gives other links. The default of 4 dB is our choice for the static part only: published standard deviations around indoor path-loss models (several dB to more than 10 dB) also include variations that the time-varying layer models. The value should be fitted from measured links.
+
+### 11.5 Hearing graph and `-g` options
+
+A pair of positioned nodes hears each other when the stronger of its two mean levels at `--prop-tx-dbm`, plus `--prop-margin` (10 dB), reaches `--prop-cutoff` (−125 dBm). The graph stays symmetric (§2). Pairs below that level are neither received nor interferers, nor counted in CCA energy.
+
+- The cutoff is 5 dB below the noise floor (−119.93 dBm, §2): one interferer at −125 dBm raises the noise by 1.2 dB, and a weaker one by less. Weak far nodes therefore still interfere, while a building larger than the model's range stays sparse.
+- The margin leaves room for the time-varying layer: a link whose mean is 10 dB below the cutoff is kept, because fading can raise it above the cutoff for short periods.
+- The graph uses the nominal TX power. A node that sends at a higher power than `--prop-tx-dbm` reaches farther than its graph: set `--prop-tx-dbm` to the highest TX power in use.
+
+**With `-g` options:**
+
+- A `-g` option with a value (`A,B:RSSI`, a range or list with `:RSSI`, `--group-file`) sets the link of those pairs as in §2, for the directions it gives; the model does not change them, and `--medium-tx-ref` applies to them only. The pairs are in the graph whatever their model level.
+- A `-g` option without a value adds its pairs to the graph; a pair of positioned nodes then gets the model's value (a pair below the cutoff is added with its weak level), and any other pair stays a perfect link (0 dBm), as before.
+- `--vtime-link` sets both directions of a pair to its value from its time on, in place of the model's.
+- Without `-g`, the graph is the model's alone (without `--positions`, the absence of `-g` means that every node hears every other one, as before).
+
+`run.sh` takes the node count from its `TOPO` file: for a building, a `TOPO` file with one line `0,N-1` (a link without value between the first and the last node) gives N nodes, and the links come from `--positions` in `SIM_OPTS` (an absolute path).
+
+### 11.6 Reported RSSI
+
+The RSSI that a real receiver reports has its own measurement error, which matters because the stack uses it to select parents. Two optional terms, central medium only, apply to the value the server delivers (the `rx_dbm` of `"xx"` and `"xv"`, and the `rssi_dbm` of a detection in `"xd"`), never to the power the medium uses for its decisions or writes in `--medium-log`:
+
+- `--rssi-offset=σ` (0 dB): a fixed offset per receiver, a normal draw from the seed and the node (a calibration error);
+- `--rssi-noise=σ` (0 dB): a normal draw per frame and receiver, from the seed, the node and the frame ID (the same value in the frame's `"xx"` and its verdict).
+
+The FG25 datasheet (Rev. 1.2, Tables 4.23 and 4.24) gives an RSSI resolution of 0.25 dB and a maximum absolute error, under typical conditions and with offset correction, of 1.2 dB in the 915 MHz band and 1.8 dB in the 868 MHz band, from −100 to −30 dBm. A standard deviation of half the maximum puts 95 % of the receivers within it: `--rssi-offset=0.6` (915 MHz) or `0.9` (868 MHz). The energy that CCA measures (`"xs"`) keeps the true value.
+
+### 11.7 Outputs
+
+- At the start, the server's log gives the model and its parameters, the shadowing, and the graph: the number of pairs that hear each other, the degree (mean, minimum, maximum), the pairs at −100 dBm or more, the asymmetric pairs, the directions set by `-g`, and the time the computation took.
+- `--prop-dump=FILE`: one line per direction of every pair in the graph among the positioned nodes: `rx tx dist_m floors walls pl_db shadow_db gains_db mean_dbm heard given`, `mean_dbm` at `--prop-tx-dbm`, `heard` 1 if the model puts the pair in the graph, `given` 1 if a `-g` value sets that direction (the medium then uses the `-g` value, not `mean_dbm`).
+- `-l`/`--dump` prints the full map as before; for large buildings, `--prop-dump` is more practical.
+
+### 11.8 Options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--positions=FILE` | none | positions (§11.1); enables the model |
+| `--prop-model=indoor\|logdist\|freespace` | `indoor` | path-loss model (§11.3) |
+| `--prop-freq=MHZ` | 915 | frequency |
+| `--prop-pl0=DB`, `--prop-exp=N` | per model | path loss at 1 m, distance exponent |
+| `--prop-min-dist=M` | 1 | shortest distance in the formula |
+| `--prop-wall-db-per-m=DB` | 0 | wall loss per horizontal metre |
+| `--prop-walls=SX[,SY]:DB` | none | wall grid |
+| `--prop-floor-db=L1[,L2,...]` | indoor: 9,19,24; others: none | floor loss |
+| `--prop-floor-height=M` | 3.5 | floor of a node without a `FLOOR` column |
+| `--prop-shadow=DB`, `--prop-shadow-dir=DB`, `--prop-shadow-node=DB` | 4, 0, 0 | shadowing (§11.4) |
+| `--prop-gain=DBI` | 0 | antenna gain of a node without a `GAIN` column |
+| `--prop-tx-dbm=DBM` | 14 | nominal TX power: the RSSI map and the graph |
+| `--prop-cutoff=DBM`, `--prop-margin=DB` | −125, 10 | hearing graph (§11.5) |
+| `--prop-dump=FILE` | none | the computed links (§11.7) |
+| `--rssi-offset=DB`, `--rssi-noise=DB` | 0, 0 | reported RSSI error (§11.6), central medium only |
+
+The `--prop-*` options need `--positions`.
+
+### 11.9 Checks
+
+`sim_utils/vtime/test_propagation.py <wssimserver>` (fake nodes and `--prop-dump`): option errors; each model against hand computation (floors from the column and from `Z`, the floor table and its extrapolation, the wall grid, the per-metre walls, the minimum distance, the gains, the nominal TX power); shadowing reproducible by seed and different with another seed, its standard deviation over 44 850 pairs, reciprocal by default, the per-direction and per-node parts and their correlation; the graph cutoff and margin, in the dump and in the medium (no lock and no log line beyond the cutoff); a `-g` link without value below the cutoff, with the model's level; the frame's TX power applied to a modelled link, a `-g` value overriding it with `--medium-tx-ref`, `--vtime-link` replacing it; the `gen_building.py` model reproduced link for link; a 4000-node building built in 0.53 s; the reported RSSI (offset fixed per receiver, noise per frame with its standard deviation, the same value in `"xx"` and `"xv"`, the true power in the medium log, reproducible by seed).
+
+Without the new options, the outputs are unchanged: `nonreg_dag_simple.sh` against the permanent reference runs, `medium_gate_star.sh` (seed 1, hidden, central) with node logs and medium log identical to a build without the model, `test_conductor.py`, `test_sniff.py`, `radio_if/test_ref_client.py` and `lfn_suite.sh quick` pass.
+
+### 11.10 Limits
+
+- **Walls are not geometric.** The model knows no floor plan: the walls are an average (the exponent, a loss per metre) or a regular grid. Paths through windows, stairwells or around corners, and corridor guiding, are not modelled.
+- **One site-general model per run.** Every pair uses the same parameters; a building with mixed construction needs the parameters of its dominant part, or `-g` values for the pairs that differ.
+- **Static mean.** The values are fixed for the run (apart from `--vtime-link`); time variation is the business of a separate layer.
+- **Nominal TX power for the graph and for the legacy medium** (§11.2, §11.5).
+- **Memory.** The model uses the server's existing RSSI map (4096 × 4096 values in shared memory) and a bitmap of 2 MB; nothing grows with the number of frames. Runs with very dense graphs (thousands of neighbours per node) cost more per frame in the medium, in proportion to the number of receivers.
+- **Reported RSSI:** a normal error only; no quantisation to the 0.25 dB resolution or to the integer dBm the MAC stores, no saturation outside −100 to −30 dBm, and no error on the CCA energy.

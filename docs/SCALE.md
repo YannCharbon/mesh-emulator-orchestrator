@@ -68,7 +68,7 @@ TOPO=topo48.txt IF_NODES="$(seq -s ' ' 0 47)" IF_CMD=./my_client sim_utils/vtime
 | `--tx-dbm`, `--pl-exp`, `--wall-db-per-m`, `--floor-db` | `tx_dbm`, `n`, `w`, `f` of the formula above | 14, 3.0, 1.8, 18 |
 | `--min-rssi DBM` | no link below this | −100 |
 | `-o FILE` | the topology (default: stdout) | |
-| `--positions FILE` | also each node's position: `ID X Y Z FLOOR` in metres, after a `#` header line | |
+| `--positions FILE` | also each node's position: `ID X Y Z FLOOR` in metres, after a `#` header line; the format of `wssimserver --positions`, which computes the links from the positions with its own models and shadowing (`docs/MEDIUM.md` §11) | |
 
 The output has one line per link, `A,B:RSSI` with `A < B`, RSSI rounded to 0.1 dB, sorted: a `wssimserver --group-file` and a `TOPO=` file of `run.sh` (`sim_utils/vtime/README.md`, "Topology files"). Each link is given once, so it holds in both directions (`docs/MEDIUM.md` §2). The summary on stderr gives the number of links, the degree (mean, minimum, maximum) and the hops from node 0 (BFS over the links). The generator draws nothing at random: the same options give the same file. `run_scale.py` takes the same options and calls it.
 
