@@ -42,6 +42,8 @@ void prop_build(uint64_t (*graph)[SIM_MAX_NODES / 64], struct node_infos *links,
 bool prop_modelled(int rx, int tx);
 // The mean received power at rx of a frame tx sends at tx_dbm (§11.2)
 float prop_link_dbm(int rx, int tx, int8_t tx_dbm);
+// Both nodes are positioned (their pair may be below the cutoff)
+bool prop_positioned(int a, int b);
 // --vtime-link changed the pair a-b: its value is no longer the model's
 void prop_override(int a, int b);
 

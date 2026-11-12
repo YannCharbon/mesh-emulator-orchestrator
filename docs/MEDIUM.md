@@ -255,7 +255,7 @@ The model lives in `app_wssimserver/sim_propagation.c`. The medium asks it for o
 
 ### 11.1 Positions file
 
-`--positions=FILE`: one node per line, `ID X Y Z [FLOOR [GAIN_DBI]]`, coordinates in metres. Blank lines and lines starting with `#` are skipped. `FLOOR` is an integer; without it, the floor is `Z / --prop-floor-height` rounded (3.5 m). `GAIN_DBI` is the node's antenna gain, applied in transmission and in reception; without it, `--prop-gain` (0 dBi). A node ID may appear once. Nodes that are not in the file keep the `-g` links only.
+`--positions=FILE`: one node per line, `ID X Y Z [FLOOR [GAIN_DBI]]`, coordinates in metres. Blank lines and lines starting with `#` are skipped. `FLOOR` is an integer; without it, the floor is `Z / --prop-floor-height` rounded (3.5 m). `GAIN_DBI` is the node's antenna gain, applied in transmission and in reception; without it, `--prop-gain` (0 dBi). A node ID may appear once. The ID is an integer from 0 to 4095; the coordinates are finite numbers within ±10⁶ m, `FLOOR` within ±10 000 and `GAIN_DBI` within ±50 dBi; a line with anything else is an error. Lines may have any length, and a `#` starts a comment anywhere on a line. Nodes that are not in the file keep the `-g` links only.
 
 `radio_if/scale/gen_building.py --positions FILE` writes this format (`ID X Y Z FLOOR` after a `#` header), so a generated building can be used directly: `gen_building.py --nodes 200 -o /dev/null --positions b.pos`.
 
@@ -265,7 +265,9 @@ For a frame that `tx` sends at `tx_dbm` (from the frame header, as with `--mediu
 
     P(rx ← tx) = tx_dbm + G_tx + G_rx − PL(tx, rx) − X(rx, tx)
 
-with `G` the antenna gains (§11.1), `PL` the path loss of the model (§11.3) and `X` the static shadowing (§11.4). At the start, the server stores `P` at the nominal TX power `--prop-tx-dbm` (14 dBm) in its RSSI map, and the medium adds `tx_dbm − 14` to it for each frame. The legacy medium and wall-clock runs use the map as it is: their radios do not apply the sender's TX power, so `--prop-tx-dbm` should be the TX power the nodes use.
+with `G` the antenna gains (§11.1), `PL` the path loss of the model (§11.3) and `X` the static shadowing (§11.4). At the start, the server stores `P` at the nominal TX power `--prop-tx-dbm` (20 dBm, the default `tx_power` of `wsbrd` and `wsnode`) in its RSSI map, and the medium adds `tx_dbm − 20` to it for each frame. The legacy medium and wall-clock runs use the map as it is: their radios do not apply the sender's TX power, so `--prop-tx-dbm` should be the TX power the nodes use.
+
+The TX power is the one in each frame's header. A Nanostack node sets it from its `tx_power` setting (`-o tx_power=14`, or `NODE_OPTS_<i>` in `run.sh`). A client of the radio interface sets the header's `tx_dbm` field of every frame ([RADIO_INTERFACE.md](RADIO_INTERFACE.md)); a client that leaves it at 0 sends at 0 dBm, so its frames arrive 20 dB below the stored levels with the default `--prop-tx-dbm`. Such a client should fill the field with its real TX power, and `--prop-tx-dbm` should then match it.
 
 ### 11.3 Path-loss models
 
@@ -287,7 +289,7 @@ Every term is a user setting, for every model:
 
 The model of `gen_building.py` (`docs/SCALE.md` §2) is `--prop-model=logdist --prop-pl0=31.7 --prop-exp=3 --prop-wall-db-per-m=1.8 --prop-floor-db=18 --prop-shadow=0`: with `--prop-cutoff=-100 --prop-margin=0`, the server gives the same links as the generator's topology file (`test_propagation.py`, `gen_building`).
 
-**Choosing the model.** The default is site-general and has no wall term beyond its exponent: in large open floors it predicts long ranges. With the defaults and 14 dBm, the two farthest nodes of a 152 m × 72 m floor of `gen_building.py` receive each other at about −91 dBm before shadowing, and a 4000-node building of 20 such floors has about 2890 neighbours per node on average in the hearing graph. Buildings with many solid walls are closer to the wall grid or the per-metre term: with `--prop-walls=8:2.4`, the same building has about 1730 neighbours per node, and with the `gen_building.py` model, 162. The parameters should be set from measurements in the target building when they exist.
+**Choosing the model.** The default is site-general and has no wall term beyond its exponent: in large open floors it predicts long ranges. With the default model at 14 dBm (`--prop-tx-dbm=14`), the two farthest nodes of a 152 m × 72 m floor of `gen_building.py` receive each other at about −91 dBm before shadowing, and a 4000-node building of 20 such floors has about 2890 neighbours per node on average in the hearing graph. Buildings with many solid walls are closer to the wall grid or the per-metre term: with `--prop-walls=8:2.4`, the same building has about 1730 neighbours per node, and with the `gen_building.py` model, 162. The parameters should be set from measurements in the target building when they exist.
 
 ### 11.4 Static shadowing
 
@@ -313,7 +315,7 @@ A pair of positioned nodes hears each other when the stronger of its two mean le
 
 - A `-g` option with a value (`A,B:RSSI`, a range or list with `:RSSI`, `--group-file`) sets the link of those pairs as in §2, for the directions it gives; the model does not change them, and `--medium-tx-ref` applies to them only. The pairs are in the graph whatever their model level.
 - A `-g` option without a value adds its pairs to the graph; a pair of positioned nodes then gets the model's value (a pair below the cutoff is added with its weak level), and any other pair stays a perfect link (0 dBm), as before.
-- `--vtime-link` sets both directions of a pair to its value from its time on, in place of the model's.
+- `--vtime-link` sets both directions of a pair to its value from its time on, in place of the model's, whatever the TX power of the frames. A pair of positioned nodes below the cutoff joins the graph, both ways, at that time; a pair with an unpositioned node must already be in the graph (from `-g`).
 - Without `-g`, the graph is the model's alone (without `--positions`, the absence of `-g` means that every node hears every other one, as before).
 
 `run.sh` takes the node count from its `TOPO` file: for a building, a `TOPO` file with one line `0,N-1` (a link without value between the first and the last node) gives N nodes, and the links come from `--positions` in `SIM_OPTS` (an absolute path).
@@ -329,8 +331,8 @@ The FG25 datasheet (Rev. 1.2, Tables 4.23 and 4.24) gives an RSSI resolution of 
 
 ### 11.7 Outputs
 
-- At the start, the server's log gives the model and its parameters, the shadowing, and the graph: the number of pairs that hear each other, the degree (mean, minimum, maximum), the pairs at −100 dBm or more, the asymmetric pairs, the directions set by `-g`, and the time the computation took.
-- `--prop-dump=FILE`: one line per direction of every pair in the graph among the positioned nodes: `rx tx dist_m floors walls pl_db shadow_db gains_db mean_dbm heard given`, `mean_dbm` at `--prop-tx-dbm`, `heard` 1 if the model puts the pair in the graph, `given` 1 if a `-g` value sets that direction (the medium then uses the `-g` value, not `mean_dbm`).
+- At the start, the server's log gives the model and its parameters, the shadowing, and the graph among the positioned nodes: the pairs in it, how many of them come from the model and how many from `-g` options alone (below the cutoff), the degree (mean, minimum, maximum; both kinds of pairs), the pairs at −100 dBm or more, the asymmetric pairs, the directions set by `-g`, and the time the computation took.
+- `--prop-dump=FILE`: the links at start-up, one line per direction of every pair in the graph among the positioned nodes: `rx tx dist_m floors walls pl_db shadow_db gains_db mean_dbm heard given`, `mean_dbm` at `--prop-tx-dbm`, `heard` 1 if the model puts the pair in the graph (0: a `-g` option alone does), `given` 1 if a `-g` value sets that direction (the medium then uses the `-g` value, not `mean_dbm`). Later changes by `--vtime-link` are not in it. The file grows with the square of the number of nodes: about 0.5 GB for the 4000-node building of §11.3. `--prop-dump-node=ID` keeps only the lines of one node.
 - `-l`/`--dump` prints the full map as before; for large buildings, `--prop-dump` is more practical.
 
 ### 11.8 Options
@@ -348,16 +350,17 @@ The FG25 datasheet (Rev. 1.2, Tables 4.23 and 4.24) gives an RSSI resolution of 
 | `--prop-floor-height=M` | 3.5 | floor of a node without a `FLOOR` column |
 | `--prop-shadow=DB`, `--prop-shadow-dir=DB`, `--prop-shadow-node=DB` | 4, 0, 0 | shadowing (§11.4) |
 | `--prop-gain=DBI` | 0 | antenna gain of a node without a `GAIN` column |
-| `--prop-tx-dbm=DBM` | 14 | nominal TX power: the RSSI map and the graph |
+| `--prop-tx-dbm=DBM` | 20 | nominal TX power: the RSSI map and the graph (§11.2) |
 | `--prop-cutoff=DBM`, `--prop-margin=DB` | −125, 10 | hearing graph (§11.5) |
-| `--prop-dump=FILE` | none | the computed links (§11.7) |
+| `--prop-dump=FILE` | none | the computed links at start-up (§11.7) |
+| `--prop-dump-node=ID` | none | with `--prop-dump`, only the links of this node |
 | `--rssi-offset=DB`, `--rssi-noise=DB` | 0, 0 | reported RSSI error (§11.6), central medium only |
 
 The `--prop-*` options need `--positions`.
 
 ### 11.9 Checks
 
-`sim_utils/vtime/test_propagation.py <wssimserver>` (fake nodes and `--prop-dump`): option errors; each model against hand computation (floors from the column and from `Z`, the floor table and its extrapolation, the wall grid, the per-metre walls, the minimum distance, the gains, the nominal TX power); shadowing reproducible by seed and different with another seed, its standard deviation over 44 850 pairs, reciprocal by default, the per-direction and per-node parts and their correlation; the graph cutoff and margin, in the dump and in the medium (no lock and no log line beyond the cutoff); a `-g` link without value below the cutoff, with the model's level; the frame's TX power applied to a modelled link, a `-g` value overriding it with `--medium-tx-ref`, `--vtime-link` replacing it; the `gen_building.py` model reproduced link for link; a 4000-node building built in 0.53 s; the reported RSSI (offset fixed per receiver, noise per frame with its standard deviation, the same value in `"xx"` and `"xv"`, the true power in the medium log, reproducible by seed).
+`sim_utils/vtime/test_propagation.py <wssimserver>` (fake nodes and `--prop-dump`): option errors and malformed positions (a non-integer ID, non-finite or out-of-range values, extra columns), lines of any length; each model against hand computation (floors from the column and from `Z`, the floor table and its extrapolation, the wall grid, the per-metre walls, the minimum distance, the gains, the nominal TX power); shadowing reproducible by seed and different with another seed, its standard deviation over 44 850 pairs, reciprocal by default, the per-direction and per-node parts and their correlation; the graph cutoff and margin, in the dump and in the medium (no lock and no log line beyond the cutoff); a `-g` link without value below the cutoff, with the model's level; the frame's TX power applied to a modelled link, a `-g` value overriding it with `--medium-tx-ref`, `--vtime-link` replacing it (frames sent below the nominal TX power, so that the model's value would differ) and adding a positioned pair below the cutoff to the graph; `--prop-dump-node`; the RSSI map at the nominal TX power with `--medium=legacy`; the `gen_building.py` model reproduced link for link; a 4000-node building built in under a second (0.53–0.89 s); the reported RSSI (offset fixed per receiver, noise per frame with its standard deviation, the same value in `"xx"` and `"xv"`, the true power in the medium log, reproducible by seed; with `--positions`, the model's level plus the error; the same value in a detection's `"xd"` and its frame's `"xx"`).
 
 Without the new options, the outputs are unchanged: `nonreg_dag_simple.sh` against the permanent reference runs, `medium_gate_star.sh` (seed 1, hidden, central) with node logs and medium log identical to a build without the model, `test_conductor.py`, `test_sniff.py`, `radio_if/test_ref_client.py` and `lfn_suite.sh quick` pass.
 

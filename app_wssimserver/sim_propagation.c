@@ -13,6 +13,7 @@
  * power: one addition, no per-frame search.
  */
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -45,6 +46,7 @@ enum {
     OPT_PROP_CUTOFF,
     OPT_PROP_MARGIN,
     OPT_PROP_DUMP,
+    OPT_PROP_DUMP_NODE,
     OPT_RSSI_OFFSET,
     OPT_RSSI_NOISE,
 };
@@ -68,6 +70,7 @@ const struct option prop_long_options[] = {
     { "prop-cutoff", required_argument, 0, OPT_PROP_CUTOFF },
     { "prop-margin", required_argument, 0, OPT_PROP_MARGIN },
     { "prop-dump", required_argument, 0, OPT_PROP_DUMP },
+    { "prop-dump-node", required_argument, 0, OPT_PROP_DUMP_NODE },
     { "rssi-offset", required_argument, 0, OPT_RSSI_OFFSET },
     { "rssi-noise", required_argument, 0, OPT_RSSI_NOISE },
     { 0, 0, 0, 0 }
@@ -95,6 +98,7 @@ static struct {
     double gain;
     double tx_dbm, cutoff, margin;
     const char *dump_path;
+    int dump_node;              // --prop-dump-node, -1: every pair
     double rssi_offset, rssi_noise;
     uint64_t seed;
     bool seed_set;
@@ -114,9 +118,10 @@ static struct {
     .min_dist = 1,
     .floor_height = 3.5,
     .sh_link = 4,
-    .tx_dbm = 14,
+    .tx_dbm = 20,
     .cutoff = -125,
     .margin = 10,
+    .dump_node = -1,
 };
 
 // Directed pairs whose value is the model's: modelled[rx] bit tx
@@ -240,6 +245,15 @@ bool prop_option(int opt, const char *arg)
     case OPT_PROP_DUMP:
         prop.dump_path = arg;
         break;
+    case OPT_PROP_DUMP_NODE:
+    {
+        char *end;
+        long id = strtol(arg, &end, 10);
+
+        FATAL_ON(end == arg || *end || id < 0 || id >= MAX_NODES, 1, "--prop-dump-node: expected a node ID: %s", arg);
+        prop.dump_node = (int)id;
+        break;
+    }
     case OPT_RSSI_OFFSET:
         prop.rssi_offset = prop_number("rssi-offset", arg, 0, 30);
         break;
@@ -270,10 +284,11 @@ void prop_print_help(FILE *stream)
     fprintf(stream, "  --prop-shadow-dir=DB      shadowing sigma of each direction on its own (0)\n");
     fprintf(stream, "  --prop-shadow-node=DB     shadowing sigma of a term per node, in all its links (0)\n");
     fprintf(stream, "  --prop-gain=DBI           antenna gain of a node without a GAIN column (0)\n");
-    fprintf(stream, "  --prop-tx-dbm=DBM         TX power of the hearing graph and of the RSSI map (14)\n");
+    fprintf(stream, "  --prop-tx-dbm=DBM         TX power of the hearing graph and of the RSSI map (20)\n");
     fprintf(stream, "  --prop-cutoff=DBM, --prop-margin=DB  a pair hears each other when its mean level at\n");
     fprintf(stream, "                            --prop-tx-dbm plus the margin reaches the cutoff (-125, 10)\n");
-    fprintf(stream, "  --prop-dump=FILE          the computed links, one line per direction\n");
+    fprintf(stream, "  --prop-dump=FILE          the computed links at start-up, one line per direction\n");
+    fprintf(stream, "  --prop-dump-node=ID       with --prop-dump, only the links of this node\n");
     fprintf(stream, "  --rssi-offset=DB, --rssi-noise=DB  central medium: error of the RSSI reported to the\n");
     fprintf(stream, "                            receivers, sigma per receiver (fixed) and per frame (0, 0)\n");
 }
@@ -281,6 +296,7 @@ void prop_print_help(FILE *stream)
 void prop_check_options(bool central)
 {
     FATAL_ON((prop.tuning || prop.dump_path) && !prop.path, 1, "--prop-* options need --positions");
+    FATAL_ON(prop.dump_node >= 0 && !prop.dump_path, 1, "--prop-dump-node needs --prop-dump");
     FATAL_ON((prop.rssi_offset > 0 || prop.rssi_noise > 0) && !central, 1,
              "--rssi-offset and --rssi-noise need the central medium (--vtime, not --medium=legacy)");
 }
@@ -313,52 +329,66 @@ static double prop_normal(uint64_t key, uint64_t a, uint64_t b)
 
 /* ---- positions */
 
+#define PROP_MAX_COORD 1e6         // m
+#define PROP_MAX_FLOOR 10000
+
+// One number token, whole and finite, within [min, max]
+static bool prop_token(const char *tok, double min, double max, double *v)
+{
+    char *end;
+
+    *v = strtod(tok, &end);
+    return end != tok && !*end && isfinite(*v) && *v >= min && *v <= max;
+}
+
 static void prop_read_positions(void)
 {
     FILE *f = fopen(prop.path, "r");
-    char line[512];
+    char *line = NULL;
+    size_t cap = 0;
     int lineno = 0;
 
     FATAL_ON(!f, 1, "--positions: %s: %m", prop.path);
-    while (fgets(line, sizeof(line), f)) {
-        char *p = line, *end;
-        double v[6];
+    // getline: lines of any length (a long comment included)
+    while (getline(&line, &cap, f) >= 0) {
+        char *tok[7], *save = NULL, *hash, *t, *end;
+        double v[5];
         int n = 0;
         long id;
 
         lineno++;
-        while (*p == ' ' || *p == '\t')
-            p++;
-        if (*p == '#' || *p == '\n' || *p == '\r' || !*p)
+        hash = strchr(line, '#');
+        if (hash)
+            *hash = '\0';
+        for (t = strtok_r(line, " \t\r\n", &save); t && n < 7; t = strtok_r(NULL, " \t\r\n", &save))
+            tok[n++] = t;
+        if (!n)
             continue;
-        id = strtol(p, &end, 10);
-        FATAL_ON(end == p || id < 0 || id >= MAX_NODES, 1, "--positions: %s:%d: bad node ID (0 to %d)",
-                 prop.path, lineno, MAX_NODES - 1);
-        p = end;
-        while (n < 5) {
-            v[n] = strtod(p, &end);
-            if (end == p)
-                break;
-            p = end;
-            n++;
+        FATAL_ON(n < 4 || n > 6, 1, "--positions: %s:%d: expected ID X Y Z [FLOOR [GAIN_DBI]]", prop.path, lineno);
+        id = strtol(tok[0], &end, 10);
+        FATAL_ON(end == tok[0] || *end || id < 0 || id >= MAX_NODES, 1,
+                 "--positions: %s:%d: bad node ID \"%s\" (an integer from 0 to %d)", prop.path, lineno, tok[0],
+                 MAX_NODES - 1);
+        for (int k = 1; k < n; k++) {
+            double lim = k <= 3 ? PROP_MAX_COORD : k == 4 ? PROP_MAX_FLOOR : 50;
+            FATAL_ON(!prop_token(tok[k], -lim, lim, &v[k - 1]), 1,
+                     "--positions: %s:%d: bad %s \"%s\" (a finite number from %g to %g)", prop.path, lineno,
+                     k <= 3 ? "coordinate" : k == 4 ? "FLOOR" : "GAIN_DBI", tok[k], -lim, lim);
         }
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-            p++;
-        FATAL_ON(n < 3 || (*p && *p != '#'), 1, "--positions: %s:%d: expected ID X Y Z [FLOOR [GAIN_DBI]]",
-                 prop.path, lineno);
         FATAL_ON(prop.has[id], 1, "--positions: %s:%d: node %ld given twice", prop.path, lineno, id);
         prop.has[id] = true;
         prop.x[id] = v[0];
         prop.y[id] = v[1];
         prop.z[id] = v[2];
-        if (n >= 4) {
+        if (n >= 5) {
             FATAL_ON(v[3] != floor(v[3]), 1, "--positions: %s:%d: FLOOR must be an integer", prop.path, lineno);
             prop.floor[id] = (int)v[3];
         } else {
             prop.floor[id] = (int)floor(v[2] / prop.floor_height + 0.5);
         }
-        prop.g[id] = n >= 5 ? v[4] : prop.gain;
+        prop.g[id] = n >= 6 ? v[4] : prop.gain;
     }
+    free(line);
     fclose(f);
     for (int i = 0; i < MAX_NODES; i++)
         if (prop.has[i])
@@ -447,7 +477,7 @@ void prop_build(uint64_t (*graph)[MAX_NODES / 64], struct node_infos *links, con
     const char *seed_env = getenv("WSSIM_SEED");
     struct timespec t0, t1;
     FILE *dump = NULL;
-    long heard = 0, usable = 0, asym = 0, overridden = 0;
+    long heard = 0, by_model = 0, usable = 0, asym = 0, overridden = 0;
     int deg_min = MAX_NODES, deg_max = 0;
     static int deg[MAX_NODES];
     char floors[128] = "none";
@@ -467,7 +497,8 @@ void prop_build(uint64_t (*graph)[MAX_NODES / 64], struct node_infos *links, con
         dump = fopen(prop.dump_path, "w");
         FATAL_ON(!dump, 1, "--prop-dump: %s: %m", prop.dump_path);
         fprintf(dump, "# rx tx dist_m floors walls pl_db shadow_db gains_db mean_dbm heard given\n"
-                      "# mean_dbm at --prop-tx-dbm %.1f dBm; given: 1 if a -g option or --vtime-link sets the value\n",
+                      "# at start-up; mean_dbm at --prop-tx-dbm %.1f dBm; heard: 1 if the model puts the pair in the graph "
+                      "(0: added by a -g option only); given: 1 if a -g value sets that direction\n",
                 prop.tx_dbm);
     }
     for (int ka = 0; ka < prop.n_pos; ka++) {
@@ -491,6 +522,7 @@ void prop_build(uint64_t (*graph)[MAX_NODES / 64], struct node_infos *links, con
                 graph[b][a / 64] |= 1ULL << (a % 64);
             }
             heard++;
+            by_model += hears;
             deg[a]++;
             deg[b]++;
             if (fmax(p_ab, p_ba) >= -100)
@@ -506,7 +538,7 @@ void prop_build(uint64_t (*graph)[MAX_NODES / 64], struct node_infos *links, con
             overridden += g_ab + g_ba;
             if (!g_ab && !g_ba && (float)p_ab != (float)p_ba)
                 asym++;
-            if (dump) {
+            if (dump && (prop.dump_node < 0 || prop.dump_node == a || prop.dump_node == b)) {
                 fprintf(dump, "%d %d %.2f %d %d %.2f %.2f %.2f %.2f %d %d\n", b, a, pp.d, pp.floors, pp.walls,
                         pp.pl, s_ab, gains, p_ab, hears, g_ab);
                 fprintf(dump, "%d %d %.2f %d %d %.2f %.2f %.2f %.2f %d %d\n", a, b, pp.d, pp.floors, pp.walls,
@@ -536,9 +568,10 @@ void prop_build(uint64_t (*graph)[MAX_NODES / 64], struct node_infos *links, con
         INFO("propagation: walls every %g m (x) and %g m (y), %.1f dB each", prop.walls_x, prop.walls_y, prop.wall_db);
     INFO("propagation: shadowing %.1f dB both ways, %.1f dB per direction, %.1f dB per node, seed %llu",
          prop.sh_link, prop.sh_dir, prop.sh_node, (unsigned long long)prop.seed);
-    INFO("propagation: %ld pairs hear each other (mean level at %.1f dBm TX + %.1f dB >= %.1f dBm), degree %.1f "
+    INFO("propagation: %ld pairs in the graph among the positioned nodes, %ld of them from the model (mean level at "
+         "%.1f dBm TX + %.1f dB >= %.1f dBm) and %ld from -g only; degree %.1f "
          "(%d-%d), %ld pairs at -100 dBm or more, %ld asymmetric, %ld directions set by -g; %.2f s",
-         heard, prop.tx_dbm, prop.margin, prop.cutoff, prop.n_pos ? 2.0 * heard / prop.n_pos : 0.0,
+         heard, by_model, prop.tx_dbm, prop.margin, prop.cutoff, heard - by_model, prop.n_pos ? 2.0 * heard / prop.n_pos : 0.0,
          deg_min, deg_max, usable, asym, overridden,
          (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9);
 }
@@ -551,6 +584,11 @@ bool prop_modelled(int rx, int tx)
 float prop_link_dbm(int rx, int tx, int8_t tx_dbm)
 {
     return sim_link(prop.links, rx, tx)->rssi + (float)(tx_dbm - prop.tx_dbm);
+}
+
+bool prop_positioned(int a, int b)
+{
+    return prop.built && prop.has[a] && prop.has[b];
 }
 
 void prop_override(int a, int b)

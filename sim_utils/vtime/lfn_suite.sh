@@ -97,7 +97,7 @@ echo "medium_left|WSSIM_SEED=1|$V/test_lfn_left.sh $BIN $WORK <out>"
 echo "conductor||python3 $V/test_conductor.py $BIN/wssimserver --sock /tmp/lfn_suite_$$.sock"
 echo "power||python3 $V/test_power.py $BIN/wssimserver"
 echo "sniff||python3 $V/test_sniff.py $BIN/wssimserver --sock /tmp/lfn_suite_sniff_$$.sock"
-echo "propagation||python3 $V/test_propagation.py $BIN/wssimserver --sock /tmp/lfn_suite_prop_$$.sock"
+echo "propagation||python3 $V/test_propagation.py $BIN/wssimserver --sock /tmp/lfn_suite_prop_$$.sock --logdir <out>"
 } | { [ -n "${ONLY:-}" ] && grep -E "^[^|]*(${ONLY})" || cat; } > "$OUT/jobs.txt"
 
 run() {   # run <job line>

@@ -1880,6 +1880,12 @@ static int vt_ctl_run(struct ctxt *ctxt, struct vt_ctl *c, struct nsim_welcome *
         bitmap_set(c->src, vt_cut[c->node], MAX_NODES / 64);
         return 0;
     case VT_CTL_LINK:
+        // A positioned pair below the hearing cutoff joins the graph, both
+        // ways (docs/MEDIUM.md §11.5)
+        if (!bitmap_get(c->node, ctxt->node_graph[c->src], MAX_NODES / 64) && prop_positioned(c->src, c->node)) {
+            bitmap_set(c->node, ctxt->node_graph[c->src], MAX_NODES / 64);
+            bitmap_set(c->src, ctxt->node_graph[c->node], MAX_NODES / 64);
+        }
         if (!bitmap_get(c->node, ctxt->node_graph[c->src], MAX_NODES / 64)) {
             WARN("virtual time: no link %d-%d to change", c->src, c->node);
             return -1;

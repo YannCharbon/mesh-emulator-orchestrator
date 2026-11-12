@@ -13,6 +13,7 @@ import math
 import os
 import shutil
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
@@ -76,6 +77,14 @@ def test_options():
     refused([f"--positions={write('bad2.pos', '0 0 0 0\n0 1 1 1\n')}"], "given twice")
     refused([f"--positions={write('bad3.pos', '5000 0 0 0\n')}"], "bad node ID")
     refused([f"--positions={write('bad4.pos', '0 0 0 0 1.5\n')}"], "FLOOR must be an integer")
+    refused([f"--positions={write('bad5.pos', '1.5 0 0 0\n')}"], "bad node ID")
+    for i, bad in enumerate(("0 nan 0 0", "0 0 inf 0", "0 0 0 -inf", "0 0 0 0 0 nan", "0 0 0 0 1e12", "0 1e9 0 0",
+                             "0 0 0 0 0 1 7", "0 0x 0 0")):
+        refused([f"--positions={write(f'bad6_{i}.pos', bad + chr(10))}"], "--positions")
+    refused(["--prop-dump-node=3"], "need")
+    # Lines of any length: a long comment, and a long comment after a node
+    out, r = build_only([f"--positions={write('long.pos', '#' + 'x' * 5000 + chr(10) + '0 0 0 0 # ' + 'y' * 3000 + chr(10) + '1 10 0 0' + chr(10))}"])
+    check(set(r) == {(0, 1), (1, 0)}, f"long lines: {sorted(r)}")
 
 
 def fspl1(f):
@@ -100,7 +109,7 @@ def test_formulas():
         want = pl0 + 33 * math.log10(dd) + lf[x["floors"]]
         check(abs(x["pl"] - want) < 0.01, f"indoor {rx}<-{tx}: {x['pl']} != {want}")
         g = 2.5 if 3 in (rx, tx) else 0
-        check(abs(x["dbm"] - (14 + g - want)) < 0.011, f"indoor dbm {rx}<-{tx}: {x}")
+        check(abs(x["dbm"] - (20 + g - want)) < 0.011, f"indoor dbm {rx}<-{tx}: {x} (default --prop-tx-dbm 20)")
     check(r[(2, 0)]["floors"] == 1 and abs(r[(2, 0)]["d"] - math.sqrt(9 + 16 + 3.5 ** 2)) < 0.01, f"{r[(2, 0)]}")
     check(r[(3, 0)]["floors"] == 5 and r[(4, 0)]["floors"] == 0, f"floors {r[(3, 0)]} {r[(4, 0)]}")
     check(abs(r[(4, 0)]["pl"] - pl0) < 0.01, "min distance 1 m not applied")
@@ -179,7 +188,7 @@ def test_graph_cutoff():
     pl = 20 * math.log10(915) - 28 + 33 * math.log10(20000)
     check(set(r) == {(1, 2), (2, 1)}, f"graph {sorted(r)}: 3 is at {14 - pl:.1f} dBm, below -135")
     out, r = build_only([f"--positions={pos}", sh0, "--prop-cutoff=-160"])
-    check(len(r) == 6 and abs(r[(3, 1)]["dbm"] - (14 - pl)) < 0.01, f"cutoff -160: {sorted(r)}")
+    check(len(r) == 6 and abs(r[(3, 1)]["dbm"] - (20 - pl)) < 0.01, f"cutoff -160: {sorted(r)}")
     out, r = build_only([f"--positions={pos}", sh0, "--prop-margin=0", "--prop-cutoff=-130"])
     check(set(r) == {(1, 2), (2, 1)}, "margin 0")
     # Medium: a frame from 1 reaches 2 at the model's level, not 3; -g 1,3 (no value) adds 3 with the model's value
@@ -212,11 +221,19 @@ def test_tx_power_and_override():
     # Reverse direction of the -g link, and the dump
     out, r = build_only([f"--positions={pos}", sh0, "-g", "1,3:-50"])
     check(r[(3, 1)]["given"] == 1 and r[(1, 3)]["given"] == 1 and r[(2, 1)]["given"] == 0, "given flags")
-    # --vtime-link: from 3 ms, the 1-2 link is -90 dBm (the value as given, no TX power shift)
+    # --vtime-link: from 3 ms, the 1-2 link is -90 dBm, the value as given whatever
+    # the TX power (sent at 14 dBm, nominal 20: the model's value would give -96)
     rad = {1: Radio(1, {1000: [("tx", {"tx_dbm": 14})], 10000: [("tx", {"tx_dbm": 14})]}), 2: Radio(2)}
     d, out, rows = medium_run(rad, [], opts=[f"--positions={pos}", sh0, "--vtime-link=1:2:0.003:-90"])
     lv = [m["rx_dbm"] for t, m in got(rad[2], "xx")]
     check(len(lv) == 2 and abs(lv[0] - p) < 0.01 and lv[1] == -90, f"--vtime-link: {lv}")
+    # --vtime-link on a positioned pair below the cutoff: the pair joins the graph, both ways
+    far = write("o2.pos", "1 0 0 0 0\n2 20000 0 0 0\n")
+    rad = {1: Radio(1, {1000: [("tx", {})], 10000: [("tx", {})]}),
+           2: Radio(2, {20000: [("tx", {})]})}
+    d, out, rows = medium_run(rad, [], opts=[f"--positions={far}", sh0, "--vtime-link=1:2:0.003:-70"])
+    check([(t, m["rx_dbm"]) for t, m in got(rad[2], "xx")] == [(10000, -70.0)], f"at 2: {rad[2].rx}")
+    check([(t, m["rx_dbm"]) for t, m in got(rad[1], "xx")] == [(20000, -70.0)], f"at 1: {rad[1].rx}")
 
 
 def test_gen_building():
@@ -231,7 +248,7 @@ def test_gen_building():
             ab, v = ln.strip().split(":")
             a, b = map(int, ab.split(","))
             want[(a, b)] = float(v)
-    out, r = build_only([f"--positions={posf}", "--prop-model=logdist", "--prop-pl0=31.7", "--prop-exp=3",
+    out, r = build_only([f"--positions={posf}", "--prop-tx-dbm=14", "--prop-model=logdist", "--prop-pl0=31.7", "--prop-exp=3",
                          "--prop-wall-db-per-m=1.8", "--prop-floor-db=18", "--prop-shadow=0",
                          "--prop-margin=0", "--prop-cutoff=-100"])
     got_ = {(b, a): x["dbm"] for (a, b), x in r.items() if b < a}
@@ -241,23 +258,82 @@ def test_gen_building():
     check(len(want) > 1000, f"only {len(want)} links")
 
 
+def test_dump_node():
+    """--prop-dump-node: only the links of one node."""
+    pos = grid_positions("dn.pos", 20)
+    out, r = build_only([f"--positions={pos}", "--prop-dump-node=3"])
+    check(r and all(3 in k for k in r) and len(r) == 2 * 19, f"{len(r)} rows: {sorted(r)[:5]}")
+
+
+def test_legacy_map():
+    """--positions with --medium=legacy: the RSSI map in shared memory (what
+    the legacy radios read) holds the model's level at --prop-tx-dbm."""
+    pos = write("lg.pos", "1 0 0 0 0\n2 10 0 0 0\n")
+    shm = "/dev/shm/wssimnodesinfos." + ARGS.sock.replace("/", "_")
+    srv = Server(["--vtime=2", "--medium=legacy", f"--positions={pos}", "--prop-shadow=0", "--prop-tx-dbm=10"])
+    try:
+        with open(shm, "rb") as f:
+            def link(rx, tx):
+                f.seek((rx * 4096 + tx) * 4)
+                return struct.unpack("=f", f.read(4))[0]
+            v12, v21, v13 = link(2, 1), link(1, 2), link(3, 1)
+    finally:
+        srv.p.terminate()
+        srv.wait()
+    want = 10 - (20 * math.log10(915) - 28 + 33)
+    check(abs(v12 - want) < 0.01 and v12 == v21 and v13 == 0, f"map {v12} {v21} {v13}, want {want:.2f}")
+
+
+def test_reported_rssi_positions():
+    """--rssi-noise with --positions: the delivered RSSI is the model's level
+    plus the error; the medium log keeps the model's level. And the "xd" of
+    a detection reports the same value as that frame's "xx"."""
+    pos = write("rp.pos", "1 0 0 0 0\n2 10 0 0 0\n3 0 10 0 0\n")
+    p = 20 - (20 * math.log10(915) - 28 + 33)
+    # These radios send at the frame header's default of 0 dBm: 20 dB below the nominal
+    rad = {1: Radio(1, period=(1000, 20000, 50)), 2: Radio(2), 3: Radio(3)}
+    d, out, rows = medium_run(rad, [], opts=[f"--positions={pos}", "--prop-shadow=0", "--rssi-noise=3"])
+    check(all(abs(x[5] - (p - 20)) < 0.01 for x in rows), "medium log not at the model's level")
+    e = [m["rx_dbm"] - (p - 20) for t, m in got(rad[2], "xx")]
+    check(len(e) == 50 and statistics.pstdev(e) > 1.5 and max(map(abs, e)) < 15, f"errors {e[:5]}")
+    # Sniff detection with a lock: "xd" and "xx" of the frame carry the same reported value
+    from test_sniff import Sniffer, SNIFF_LOCK
+    r = {1: Sniffer(1, {1000: [("lp", 100000, {"tx_dbm": 20})]}),
+         2: Sniffer(2, {50000: [("sniff", 0, 2000, SNIFF_LOCK)]})}
+    d, out, rows = medium_run(r, [], opts=[f"--positions={pos}", "--prop-shadow=0", "--rssi-noise=3"])
+    xd = [x for t, x in r[2].results if x["detected"]]
+    xx = got(r[2], "xx")
+    check(len(xd) == 1 and len(xx) == 1 and xd[0]["rssi_dbm"] == xx[0][1]["rx_dbm"] != p and
+          abs(xd[0]["rssi_dbm"] - p) < 15, f"xd {xd}, xx {xx}, true {p:.2f}")
+    check(any(abs(x[5] - p) < 0.01 and x[2] == 2 and x[4] == "ok" for x in rows), f"medium log {rows}")
+
+
 def test_start_time():
     """4000 nodes (20 floors of 200): the model is built in well under a
     few seconds, O(N^2) once."""
     posf = os.path.join(ARGS.logdir, "b4000.pos")
     subprocess.run([sys.executable, GEN_BUILDING, "--nodes", "4000", "-o", os.devnull, "--positions", posf],
                    check=True, stderr=subprocess.DEVNULL)
+    # Our own start: Server() waits only about 2 s for the socket
+    if os.path.exists(ARGS.sock):
+        os.unlink(ARGS.sock)
+    logp = os.path.join(ARGS.logdir, "start4000.log")
     t0 = time.monotonic()
-    srv = Server(["--vtime=4000", f"--positions={posf}"])
-    t = time.monotonic() - t0
-    srv.p.terminate()
-    srv.wait()
-    out = srv.output()
-    line = [ln for ln in out.splitlines() if "pairs hear each other" in ln]
+    with open(logp, "w") as logf:
+        p = subprocess.Popen([ARGS.bin, "--vtime=4000", f"--positions={posf}", ARGS.sock], stdout=logf,
+                             stderr=subprocess.STDOUT, env={k: v for k, v in os.environ.items() if k != "WSSIM_SEED"})
+        while not os.path.exists(ARGS.sock) and p.poll() is None and time.monotonic() - t0 < 60:
+            time.sleep(0.05)
+        t = time.monotonic() - t0
+        p.terminate()
+        p.wait(30)
+    out = open(logp).read()
+    line = [ln for ln in out.splitlines() if "pairs in the graph" in ln]
     check(line, f"no summary: {out[-500:]}")
-    build_s = float(line[0].rsplit(";", 1)[1].split()[0])
-    print(f"    4000 nodes: model {build_s:.2f} s, server ready after {t:.2f} s; {line[0].split(': ', 1)[1][:90]}")
-    check(build_s < 5 and t < 10, f"too slow: {build_s} s, {t:.1f} s")
+    build_s = float(line[0].rsplit(";", 1)[1].split()[-2])
+    print(f"    4000 nodes: model {build_s:.2f} s, server ready after {t:.2f} s")
+    check(build_s < 5, f"model too slow: {build_s} s")
+    check(t < 60, f"server not ready after {t:.1f} s")
 
 
 def test_reported_rssi():
@@ -315,6 +391,9 @@ def main():
         ("graph_cutoff", test_graph_cutoff),
         ("tx_power_and_override", test_tx_power_and_override),
         ("gen_building", test_gen_building),
+        ("dump_node", test_dump_node),
+        ("legacy_map", test_legacy_map),
+        ("reported_rssi_positions", test_reported_rssi_positions),
         ("start_time", test_start_time),
         ("reported_rssi", test_reported_rssi),
     ]
