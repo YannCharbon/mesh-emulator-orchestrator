@@ -165,24 +165,26 @@ static const struct med_phy med_phy_em4 = { .int_noise = true, .int_x0 = 0, .int
                                             .early_bits = MED_EARLY_SHR };
 
 /* --medium-capture-model=smooth (§13.3): probabilities fitted to the FG25
- * kit measurements (firmware repo docs/COCHANNEL_RESULTS.md §4.2, §5; the
- * fit is in docs/MEDIUM.md §13.3). Capture: logistic in the margin, centre
- * cap_m50, scale cap_s, times a weight in time (early window, SFD window)
- * with edges of width edge_w bits. Break: logistic around the break margin.
- * Interferers already on air at the end of the received frame's SHR: their
- * own curve (pre_x0, pre_b), fitted together with the capture margin. */
+ * kit measurements (firmware repo docs/COCHANNEL_RESULTS.md §4.2, §5: all
+ * 256 power pairs of the capture runs, sim_utils/vtime/capture_kit_points.json)
+ * by sim_utils/vtime/capture_fit.py (maximum likelihood, with the kits' SIR
+ * error; cross-validated in docs/MEDIUM.md §13.3). Capture: logistic in the
+ * margin, centre cap_m50, scale cap_s, times a weight in time (early window,
+ * SFD window) with edges of width edge_w bits. Break: logistic around the
+ * break margin (brk_s assumed: measured only from +5 dB). Interferers already
+ * on air at the end of the received frame's SHR: their own curve (pre_x0,
+ * pre_b), fitted with the rest, one curve for both PHYs. */
 struct med_smooth {
     float cap_m50, cap_s, brk_s, early_c, early_slope, edge_w, sfd_rise, sfd_fall, pre_x0, pre_b;
 };
 static const struct med_smooth med_smooth_fit[MED_PHYS] = {
-    // Mode 1a: §5 (+5.5 dB: 65 % at 100-200 us, 21 % at 400 us, 7 % at
-    // 600 us; +11 dB: 100 % to 400 us, 94 % at 600 us): the early window
-    // grows with the margin
-    [MED_PHY_1A] = { 0, 0.3, 0.5, 12, 3.9, 6, -4, 1, -11.2, 1.5 },
-    // Mode 3: §4.2 (early window 50 % at 250 us = 38 bits whatever the
-    // margin; SFD window 50 % at about 613 us and 752 us)
-    [MED_PHY_3] = { 0, 1.0, 0.5, 38, 0, 2, -4, 1, -11.2, 1.5 },
-    [MED_PHY_OTHER] = { 0, 1.0, 0.5, 38, 0, 2, -4, 1, -11.2, 1.5 },
+    // Mode 1a (§5): the early window grows with the margin above 5 dB; no
+    // SFD window (rise, fall unused)
+    [MED_PHY_1A] = { 0, 0.85, 0.5, 12.55, 3.94, 4.64, -4, 1, -2.72, 0.54 },
+    // Mode 3 (§4.2)
+    [MED_PHY_3] = { 0.99, 0.49, 0.5, 38.0, 0, 1.59, -4.53, 0.75, -2.72, 0.54 },
+    // Other rates: not measured; the mode-3 values
+    [MED_PHY_OTHER] = { 0.99, 0.49, 0.5, 38.0, 0, 1.59, -4.53, 0.75, -2.72, 0.54 },
 };
 
 // A per-PHY option, applied over the model's values at med_start()

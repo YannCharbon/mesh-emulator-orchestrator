@@ -114,8 +114,8 @@ def test_intf_options():
              ["interferer lora: noise, 1 channel, burst 50000/5000000 us", "interferer wide: noise, 5 channels, constant"]),
             (["--medium-adjacent-table=10/45", "--medium-capture-model=3:smooth"],
              ["PHY 1a: adjacent-channel table (dB, 1 to 2 channels away): 10.0/45.0",
-              "PHY 3: smooth capture: margin 50 % at 0.0 dB, scale 1.00 dB",
-              "PHY 3: interference already on air at the SHR's end: x0 -11.20 dB, b 1.50 dB"]),
+              "PHY 3: smooth capture: margin 50 % at 1.0 dB, scale 0.49 dB",
+              "PHY 3: interference already on air at the SHR's end: x0 -2.72 dB, b 0.54 dB"]),
             (["--medium-capture-model=smooth", "--medium-int-curve-presync=same"], ["PHY 1a: smooth capture"]),
             (["--medium-int-curve-presync=1a:-5,1"],
              ["PHY 1a: interference already on air at the SHR's end: x0 -5.00 dB, b 1.00 dB"])):
@@ -330,8 +330,9 @@ def test_intf_adjacent_table():
 
 # --- smooth capture (§13.3), the model in Python --------------------------
 
-SMOOTH = {50000: dict(m50=0, s=0.3, brk=2.5, brk_s=0.5, early=12, slope=3.9, w=6, rise=-4, fall=1, sfd=False),
-          150000: dict(m50=0, s=1.0, brk=2.5, brk_s=0.5, early=38, slope=0, w=2, rise=-4, fall=1, sfd=True)}
+SMOOTH = {50000: dict(m50=0, s=0.85, brk=2.5, brk_s=0.5, early=12.55, slope=3.94, w=4.64, rise=-4, fall=1, sfd=False),
+          150000: dict(m50=0.99, s=0.49, brk=2.5, brk_s=0.5, early=38.0, slope=0, w=1.59, rise=-4.53, fall=0.75,
+                       sfd=True)}
 
 
 def logistic(x):
