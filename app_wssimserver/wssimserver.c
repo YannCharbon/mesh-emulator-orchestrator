@@ -354,6 +354,10 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "                            of the permanent reference runs)\n");
     fprintf(stream, "  --medium-tx-ref=DBM       central: link values are the received power when the sender\n");
     fprintf(stream, "                            transmits at DBM (default: whatever its TX power)\n");
+    fprintf(stream, "  --medium-tx-max=DBM|profile|off  central: the most a sender radiates, for the links\n");
+    fprintf(stream, "                            that depend on its TX power (--medium-tx-ref, positions):\n");
+    fprintf(stream, "                            profile (default) the top of its power profile's TX table\n");
+    fprintf(stream, "                            (no limit without --power)\n");
     fprintf(stream, "  --medium-lock-snr=DB      central: lowest SINR at which a receiver locks onto a frame (0)\n");
     fprintf(stream, "  --medium-model=fg25|em4   central: reception model: the FG25 kit measurements (fg25, the\n");
     fprintf(stream, "                            default) or the MVP's (em4: interference as noise, capture by\n");
@@ -412,6 +416,7 @@ enum {
     OPT_VTIME_DROP,
     OPT_MEDIUM,
     OPT_MEDIUM_TX_REF,
+    OPT_MEDIUM_TX_MAX,
     OPT_MEDIUM_LOCK_SNR,
     OPT_MEDIUM_CAPTURE_DB,
     OPT_MEDIUM_MODEL,
@@ -600,6 +605,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "vtime-drop", required_argument, 0, OPT_VTIME_DROP },
         { "medium", required_argument, 0, OPT_MEDIUM },
         { "medium-tx-ref", required_argument, 0, OPT_MEDIUM_TX_REF },
+        { "medium-tx-max", required_argument, 0, OPT_MEDIUM_TX_MAX },
         { "medium-lock-snr", required_argument, 0, OPT_MEDIUM_LOCK_SNR },
         { "medium-capture-db", required_argument, 0, OPT_MEDIUM_CAPTURE_DB },
         { "medium-model", required_argument, 0, OPT_MEDIUM_MODEL },
@@ -799,6 +805,9 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             case OPT_MEDIUM_TX_REF:
                 med_set_tx_ref(optarg);
                 break;
+            case OPT_MEDIUM_TX_MAX:
+                med_set_tx_max(optarg);
+                break;
             case OPT_MEDIUM_LOCK_SNR:
                 med_set_lock_snr(optarg);
                 break;
@@ -876,7 +885,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     if (ctxt->vtime_nodes)
         med_default_central();
     FATAL_ON(med_tuning_given() && !med_central(), 1,
-             "--medium-tx-ref, --medium-lock-snr, --medium-model, --medium-int-curve, --medium-capture-*, "
+             "--medium-tx-ref, --medium-tx-max, --medium-lock-snr, --medium-model, --medium-int-curve, --medium-capture-*, "
              "--medium-break-db, --medium-adjacent-*, --medium-log, --sniff-* and --interferer* need the central "
              "medium (not --medium=legacy)");
     chan_options_done();

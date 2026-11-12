@@ -39,5 +39,6 @@ void pwr_finish(uint64_t t_end_us, uint64_t seed);
 // or the common value), rounded; 0 without power recording. Sent in a radio
 // interface client's welcome (docs/RADIO_INTERFACE.md §4.3)
 uint32_t pwr_cca_us(int node);
+double pwr_tx_max_dbm(int node);   // the node's TX table top (PA maximum), NAN without a profile
 
 #endif

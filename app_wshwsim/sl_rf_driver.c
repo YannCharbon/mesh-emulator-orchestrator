@@ -459,7 +459,8 @@ static uint8_t rf_power_state(void)
     case DRVSTATE_IDLE:
         return SIM_RADIO_IDLE;
     case DRVSTATE_CSMA_STARTED:
-        return rf_csma_deaf ? SIM_RADIO_IDLE : SIM_RADIO_LISTEN;
+        // A backoff that starts during the TX-to-RX turnaround listens at its end
+        return rf_csma_deaf || rf_rx_turnaround ? SIM_RADIO_IDLE : SIM_RADIO_LISTEN;
     case DRVSTATE_IDLE_WAITING_RX:
         return SIM_RADIO_LISTEN;
     case DRVSTATE_RX:
@@ -889,7 +890,7 @@ void phy_rf_rx_now(void)
              rf_frames_lost_off);
         goto CANCEL_RX;
     }
-    if (rf_rx_turnaround && driver_state == DRVSTATE_IDLE) {
+    if (rf_rx_turnaround && (driver_state == DRVSTATE_IDLE || driver_state == DRVSTATE_CSMA_STARTED)) {
         rf_frames_lost_turnaround++;
         INFO("rf rx lost: TX-to-RX turnaround, chan=%d len=%d rxseq=%d (%lu lost)", pkt_chan, pkt_len, pkt_seq,
              rf_frames_lost_turnaround);
@@ -1089,6 +1090,10 @@ static int _rf_set_rx(){
     /*Set channel*/
     _rf_check_and_change_channel(new_channel);
 
+    // TX-to-RX turnaround (WSSIM_PHY_RX_DELAY_US): the receiver comes on at
+    // its end (_rf_rx_delay_timer_cb), whatever the MAC asks meanwhile
+    if (rf_rx_turnaround && driver_state == DRVSTATE_IDLE)
+        return 1;
     if (driver_state != DRVSTATE_CSMA_STARTED) {
         driver_state = DRVSTATE_IDLE_WAITING_RX;
         set_shm_cca_state();
@@ -1160,6 +1165,10 @@ static void _rf_tx_sleep_timeout_timer_cb(int timer_id, uint16_t slots)
 static void _rf_rx_delay_timer_cb(int timer_id, uint16_t slots)
 {
     rf_rx_turnaround = false;
+    if (driver_state == DRVSTATE_CSMA_STARTED) {
+        set_shm_cca_state();    // the backoff now listens
+        return;
+    }
     if (driver_state != DRVSTATE_IDLE)
         return;
     driver_state = DRVSTATE_IDLE_WAITING_RX;

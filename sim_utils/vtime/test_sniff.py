@@ -444,6 +444,37 @@ def test_sniff_kit_defaults():
     check([(s["node"], s["t0"]) for s in sn if s["node"] == 2] == [(2, 1325)], f"log {sn}")
 
 
+KIT_CURVE = ((-2.8, 0), (0.6, 0.002), (3.9, 0.65), (5.4, 1))
+
+
+def kit_p(sinr):
+    """The default curve (docs/MEDIUM.md §10.5) at this SINR."""
+    if sinr <= KIT_CURVE[0][0]:
+        return KIT_CURVE[0][1]
+    for (x0, p0), (x1, p1) in zip(KIT_CURVE, KIT_CURVE[1:]):
+        if sinr < x1:
+            return p0 + (p1 - p0) * (sinr - x0) / (x1 - x0)
+    return KIT_CURVE[-1][1]
+
+
+def test_sniff_kit_curve():
+    """The default curve inside its range: 200 sniffs of one try each (225 us
+    of settling and one 140 us dwell at 50 kbit/s from the frame's start), a
+    frame at SINR 3.9 dB (p 0.65 per try): the detection rate within 4
+    sigma."""
+    n = 200
+    p_dbm = round(NOISE_DBM + 3.9, 2)
+    acts1 = {10000 * (k + 1): [("tx", {})] for k in range(n)}
+    acts2 = {10000 * (k + 1): [("sniff", 0, 225 + 140)] for k in range(n)}
+    r = {1: Sniffer(1, acts1), 2: Sniffer(2, acts2)}
+    d, out, rows, sn = sniff_run(r, [(1, 2, p_dbm)], model=False)
+    p = kit_p(sinr_db(p_dbm))
+    det = sum(x["detected"] for t, x in r[2].results)
+    sigma = math.sqrt(n * p * (1 - p))
+    print(f"     {det}/{len(r[2].results)} detected, curve {n * p:.1f} (sigma {sigma:.1f})")
+    check(len(r[2].results) == n and abs(det - n * p) < 4 * sigma and 0.6 < p < 0.7, f"{det}/{n}, p {p}")
+
+
 def test_sniff_options():
     for args, msg in ((["--vtime=1", "--medium=legacy", "--sniff-dwell-bits=8"], "need the central medium"),
                       (["--vtime=1", "--sniff-detect=x"], "preamble or frame"),

@@ -24,6 +24,7 @@
 #include "sim_interf.h"
 #include "sim_medium.h"
 #include "sim_propagation.h"
+#include "sim_power.h"
 
 // kTB at 293 K and 100 kHz, NF 4 dB: the constant of the radio's loss curve
 // (app_wshwsim/sl_rf_driver.c)
@@ -203,6 +204,8 @@ struct med_phy_opt {
 static struct {
     bool given, tuning, central, mode_given;
     bool has_tx_ref;
+    int tx_max_mode;            // --medium-tx-max: 0 profile (default), 1 a value, 2 off
+    float tx_max;
     bool em4;                   // --medium-model=em4
     float tx_ref, lock_snr;
     struct med_phy phy[MED_PHYS];
@@ -287,6 +290,7 @@ static struct {
     bool has_threshold;
     float threshold;
     int curve_ber_bits;         // > 0: P = (1 - BER(SINR))^bits; 0: the table
+    bool curve_given;           // --sniff-curve given (else the layered model takes ber:16)
     int curve_n;
     float curve_x[SN_CURVE_MAX], curve_p[SN_CURVE_MAX];
     unsigned int sfd_bits;
@@ -352,6 +356,19 @@ void med_set_tx_ref(const char *arg)
 {
     med.tx_ref = med_number("--medium-tx-ref", arg, -100, 100);
     med.has_tx_ref = true;
+}
+
+void med_set_tx_max(const char *arg)
+{
+    med.given = med.tuning = true;
+    if (!strcmp(arg, "profile")) {
+        med.tx_max_mode = 0;
+    } else if (!strcmp(arg, "off")) {
+        med.tx_max_mode = 2;
+    } else {
+        med.tx_max = med_number("--medium-tx-max", arg, -100, 100);
+        med.tx_max_mode = 1;
+    }
 }
 
 void med_set_lock_snr(const char *arg)
@@ -752,6 +769,7 @@ void med_set_sniff_curve(const char *arg)
     long bits;
 
     med.given = med.tuning = true;
+    sn.curve_given = true;
     if (!strncmp(arg, "ber:", 4)) {
         bits = strtol(arg + 4, &end, 10);
         FATAL_ON(*end || bits < 1 || bits > 100000, 1, "--sniff-curve: ber:N with N from 1 to 100000: %s", arg);
@@ -875,16 +893,28 @@ static uint16_t med_chan(int node)
 
 // Received power: the link's value, the power at the sender's TX power, or at
 // --medium-tx-ref. An edge without a value (0) stays a perfect link.
+// The sender's radiated power: the TX power in the frame's header (what its
+// MAC asked for), at most the PA's maximum (--medium-tx-max; by default the
+// top of the sender's power profile's TX table, as the ledger clamps it;
+// no limit without a profile). Only links that depend on the TX power use
+// it: --medium-tx-ref and positions (§2, §11).
+static float med_tx_eff(int src, int8_t tx_dbm)
+{
+    double max = med.tx_max_mode == 1 ? med.tx_max : med.tx_max_mode == 0 ? pwr_tx_max_dbm(src) : NAN;
+
+    return isnan(max) || tx_dbm <= max ? tx_dbm : max;
+}
+
 static float med_rx_dbm(int rx, int src, int8_t tx_dbm)
 {
     float link = sim_link(med.links, rx, src)->rssi;
 
     // From node positions (docs/MEDIUM.md §11), unless a -g value overrides
     if (prop_modelled(rx, src))
-        return prop_link_dbm(rx, src, tx_dbm);
+        return prop_link_dbm(rx, src, tx_dbm) + (med_tx_eff(src, tx_dbm) - tx_dbm);
     if (link == 0 || !med.has_tx_ref)
         return link;
-    return link + (tx_dbm - med.tx_ref);
+    return link + (med_tx_eff(src, tx_dbm) - med.tx_ref);
 }
 
 static const struct med_rx *med_find_rx(const struct med_frame *f, int node)
@@ -1215,6 +1245,11 @@ void med_start(uint64_t seed, const uint8_t *cca_shm, struct node_infos *links)
     intf_start(seed);
     if (med.has_tx_ref)
         INFO("medium: link values are the received power at %.1f dBm TX power", med.tx_ref);
+    if (med.tx_max_mode == 1)
+        INFO("medium: radiated power at most %.1f dBm (--medium-tx-max)", med.tx_max);
+    else if (med.tx_max_mode == 0)
+        INFO("medium: radiated power at most the top of each sender's power profile TX table%s",
+             pwr_enabled() ? "" : " (no profile: no limit)");
 }
 
 struct med_frame *med_frame_start(int src, const struct sim_frame_hdr *hdr, uint64_t now)
@@ -1647,13 +1682,17 @@ static double sn_uniform(int node)
 static double sn_curve(double sinr)
 {
     double ber;
-    int i;
+    int i, bits = sn.curve_ber_bits;
 
-    if (sn.curve_ber_bits) {
+    // The kits' table is the default with the empirical receiver curve; the
+    // layered model's default is ber:16 on its own noise curve (§10.5)
+    if (!sn.curve_given && chan_layered())
+        bits = 16;
+    if (bits) {
         ber = chan_layered() ? chan_noise_ber(sinr) : 0.5 * exp(-0.5 * sinr);
         if (ber > 0.5)
             ber = 0.5;
-        return exp(sn.curve_ber_bits * log1p(-ber));
+        return exp(bits * log1p(-ber));
     }
     if (sinr <= sn.curve_x[0])
         return sn.curve_p[0];
@@ -1907,12 +1946,15 @@ uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, ui
     const struct med_frame *f;
     const struct med_rx *rx;
 
-    if (!sn.next_serial)
+    if (!sn.next_serial) {
+        bool layered16 = !sn.curve_given && chan_layered();
+
         INFO("medium: sniffing: %s detection, dwell %u bits, threshold %s%.1f dBm, curve %s%d, SFD %u bits, "
              "margin %u bits, settling %u us", sn.frame_mode ? "frame" : "preamble", sn.dwell_bits, sn.has_threshold ? "" : "off ",
-             sn.has_threshold ? sn.threshold : 0.0, sn.curve_ber_bits ? "ber:" : "table of ",
-             sn.curve_ber_bits ? sn.curve_ber_bits : sn.curve_n, sn.sfd_bits, sn.margin_bits,
+             sn.has_threshold ? sn.threshold : 0.0, layered16 || sn.curve_ber_bits ? "ber:" : "table of ",
+             layered16 ? 16 : sn.curve_ber_bits ? sn.curve_ber_bits : sn.curve_n, sn.sfd_bits, sn.margin_bits,
              sn.settle_us);
+    }
     if (!x) {
         x = sn.s[node] = calloc(1, sizeof(*x));
         FATAL_ON(!x, 1, "calloc: %m");

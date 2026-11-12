@@ -273,6 +273,81 @@ def run_power_up(server, work, up_us):
     return bad
 
 
+# Measured transitions (efr32fg25-soc.ini, docs/POWER_MODEL.md §12.10): the
+# radio goes listen > idle > TX > idle > listen, as with the emulated radio's
+# turnaround options. Entries into idle are cut from the idle's start, entries
+# out of idle marked "before" from the idle's end: each adds its measured
+# charge above idle (idle_ma 0), and the TX state keeps its whole airtime.
+PROFILE_TA = PROFILE.replace("idle_ma = 0.1", "idle_ma = 0") + """listen_idle = 40 1.1
+idle_tx = 100 3.7 before
+tx_idle = 50 3.4
+idle_listen = 80 2.0 before
+"""
+TA_END = 50_000
+TA_SCRIPT = [
+    (0,      [xr(LISTEN), wake()],            10_000),
+    (10_000, [xr(IDLE_ST), wake(radio=1)],    10_192),
+    (10_192, [xr(TX, 12), wake(radio=1)],     11_192),
+    (11_192, [xr(IDLE_ST), wake(radio=1)],    11_374),
+    (11_374, [xr(LISTEN), wake(radio=1)],     NEVER),
+]
+TA_EXPECT = {
+    'radio': {'listen': (10_000 + TA_END - 11_374, (10_000 + TA_END - 11_374) * 5 / 1000),
+              'idle': (192 - 40 - 100 + 182 - 50 - 80, 0), 'tx': (1000, 32.0)},
+    'transitions': {'listen>idle': (40, 0.044), 'idle>tx': (100, 0.37), 'tx>idle': (50, 0.17),
+                    'idle>listen': (80, 0.16)},
+}
+
+
+def run_turnaround(server, work):
+    """The script TA_SCRIPT with PROFILE_TA: radio times and charges exact."""
+    os.makedirs(work, exist_ok=True)
+    prof = os.path.join(work, "test.ini")
+    out = os.path.join(work, "power.json")
+    sock = tempfile.mktemp(prefix="wssim-power-", suffix=".sock", dir="/tmp")
+    with open(prof, "w") as f:
+        f.write(PROFILE_TA)
+    log = open(os.path.join(work, "simserver.log"), "w")
+    p = subprocess.Popen([server, "--vtime=1", f"--vtime-end={TA_END / 1e6}", f"--power={prof}",
+                          f"--power-out={out}", f"--power-log={work}/power_log.txt", sock],
+                         stdout=log, stderr=subprocess.STDOUT)
+    for _ in range(100):
+        if os.path.exists(sock):
+            break
+        time.sleep(0.05)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    s.connect(sock)
+    s.send(HELLO.pack(b"xh", 0, 1, 0))
+    recv_exact(s, WELCOME)
+    for i, (t, msgs, nxt) in enumerate(TA_SCRIPT):
+        if i:
+            magic, frames, _, _, now = recv_exact(s, ADVANCE)
+            assert magic == b"xa" and now == t, (magic, now, t)
+        for m in msgs:
+            s.send(m)
+        s.send(IDLE.pack(b"xi", 0, 0, 0, nxt))
+    assert s.recv(64)[:2] == b"xq"
+    s.close()
+    p.wait(10)
+    log.close()
+    if os.path.exists(sock):
+        os.unlink(sock)
+    n = json.load(open(out))['nodes'][0]
+    bad = []
+    for st, (t, q) in TA_EXPECT['radio'].items():
+        for what, got, want in ((f"radio {st} time", n['radio']['states'][st]['time_us'], t),
+                                (f"radio {st} charge", n['radio']['states'][st]['charge_uc'], q)):
+            if abs(got - want) > 1e-6:
+                bad.append(f"{what}: {got}, expected {want}")
+    for tr, (t, q) in TA_EXPECT['transitions'].items():
+        got = n['radio']['transitions'].get(tr, {'time_us': None, 'charge_uc': None})
+        if got['time_us'] is None or abs(got['time_us'] - t) > 1e-6 or abs(got['charge_uc'] - q) > 1e-6:
+            bad.append(f"{tr}: {got}, expected {t} us, {q} uC")
+    if abs(n['check']['radio_time_us'] - TA_END) > 1e-6:
+        bad.append(f"radio sum {n['check']['radio_time_us']}")
+    return bad
+
+
 def main():
     server = sys.argv[1]
     work = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="test_power.")
@@ -283,6 +358,13 @@ def main():
             print(f"FAIL [{case[0]}]", b)
         print(f"  {case[0]}: {'FAILED' if bad else 'ok'}")
         failed += bool(bad)
+    global PHY_MODE
+    PHY_MODE = 0
+    bad = run_turnaround(server, os.path.join(work, "turnaround"))
+    for b in bad:
+        print("FAIL [measured transitions]", b)
+    print(f"  measured transitions, listen > idle > TX > idle > listen: {'FAILED' if bad else 'ok'}")
+    failed += bool(bad)
     for name, up in (("powered up at 1.5 s", 1_500_000), ("powered up after the end", END_US + 1_000_000)):
         bad = run_power_up(server, os.path.join(work, f"up{up}"), up)
         for b in bad:
@@ -296,6 +378,7 @@ def main():
          "[profile] keys do not depend"),
         ("mode value twice", PROFILE_MODES + "cca_us@3 = 1\n", "radio.cca_us given twice"),
         ("unknown key per mode", PROFILE + "[radio]\nfoo@3 = 1\n", "unknown key radio.foo"),
+        ("transition, bad third word", PROFILE + "idle_tx = 1 2 after\n", "expected \"<us> <mA> [before]\""),
     ]:
         d = os.path.join(work, "reject")
         os.makedirs(d, exist_ok=True)

@@ -743,6 +743,24 @@ def test_medium_tx_ref():
           f"{r[2].rx} {r[3].rx}")
 
 
+def test_medium_tx_max():
+    """--medium-tx-max: a frame sent at +20 dBm with --medium-tx-ref=0
+    arrives at link + 16.9 dB with --medium-tx-max=16.9 or with the FG25
+    power profile (default: profile), at link + 20 dB with off or without a
+    profile."""
+    for opts, want in ((["--medium-tx-max=16.9"], -43.1), (["--medium-tx-max=off"], -40.0), ([], -40.0)):
+        r = {1: Radio(1, {1000: [("tx", {"tx_dbm": 20})]}), 2: Radio(2)}
+        d, out, rows = medium_run(r, [(1, 2, -60)], opts=["--medium-tx-ref=0", *opts])
+        check(abs(got(r[2], "xx")[0][1]["rx_dbm"] - want) < 0.01, f"{opts}: {r[2].rx}")
+    # The FG25 profile's TX table ends at 16.9 dBm: the default takes it
+    prof = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "examples", "power",
+                        "efr32fg25-soc.ini")
+    r = {1: Radio(1, {1000: [("tx", {"tx_dbm": 20})]}), 2: Radio(2)}
+    d, out, rows = medium_run(r, [(1, 2, -60)], opts=["--medium-tx-ref=0", f"--power={prof}",
+                                                      f"--power-out={ARGS.logdir}/txmax_power.json"])
+    check(abs(got(r[2], "xx")[0][1]["rx_dbm"] - (-43.1)) < 0.01, f"profile: {r[2].rx}")
+
+
 def test_medium_left():
     """A receiver stopped (--vtime-kill) or whose radio is off by the next
     decision leaves its frame: no verdict, outcome "left". The kill writes
@@ -1281,6 +1299,7 @@ def main():
         ("medium_same_time", test_medium_same_time),
         ("medium_cca", test_medium_cca),
         ("medium_tx_ref", test_medium_tx_ref),
+        ("medium_tx_max", test_medium_tx_max),
         ("medium_left", test_medium_left),
         ("medium_curve", test_medium_curve),
         ("medium_determinism", test_medium_determinism),

@@ -143,7 +143,7 @@ charge      = active time × active_ma + wake_charge_uc     (per wake)
 
 ### 5.2 Accounting rules
 
-- **Transitions are cut out of the states they join,** so the sums hold: a sleep is `enter`, then the sleep, then `wake` (no wake at the end of the run); a radio transition is charged at the start of the state it enters; a CCA at the end of the listening before it. A transition longer than the interval is cut to fit.
+- **Transitions are cut out of the states they join,** so the sums hold: a sleep is `enter`, then the sleep, then `wake` (no wake at the end of the run); a radio transition is charged at the start of the state it enters, or, marked `before` in the profile, at the end of the state it leaves; a CCA at the end of the listening before it. A transition longer than the interval is cut to fit.
 - **Charge** = time × current of the state, in µC. Chip current = MCU state current + radio state current: the profile's radio currents are what the radio adds to the MCU's.
 - **End of the run:** every node runs until `--vtime-end` (or the last wake if the run stopped early).
 
@@ -165,7 +165,7 @@ An INI file; `#` or `;` start a comment; every key is required unless said other
 | `[mcu]` | `clock_mhz`; `active_ma`, `sleep_ma`, `deep_sleep_ma`; `sleep_enter_us/_ma`, `sleep_wake_us/_ma`, `deep_enter_us/_ma`, `deep_wake_us/_ma`; `wake_charge_uc` (optional, default 0: µC charged per wake on top of the cycles, §5.1) |
 | `[cycles]` | `wake`, `tick`, `protocol`, `mac`, `fhss`, `radio`, `other`, `event`, `frame_in`, `rx_frame`, `tx_frame` |
 | `[radio]` | `off_ma`, `idle_ma`, `listen_ma`, `receive_ma`, `cca_ma`, `cca_us`, `idle_holds_clock` (0/1), `tx_ma = dBm:mA dBm:mA ...` (increasing dBm; linear in between, clamped outside, and the report flags a clamped level) |
-| `[radio_transitions]` (optional) | `<from>_<to> = <µs> <mA>` for the states `off idle listen receive tx`; unlisted transitions are free |
+| `[radio_transitions]` (optional) | `<from>_<to> = <µs> <mA> [before]` for the states `off idle listen receive tx`; unlisted transitions are free. The time is cut out of the start of the state entered, or with `before` out of the end of the state left, and charged at the given current instead of that state's |
 | `[link]` | later (EM3 step 2): link current, bytes per second, per-message cost |
 
 **MCU + external transceiver** (STM32F769 + S2-LP, the MTS bench): the same machines; the transceiver's currents go in `[radio]`, and the SPI work per frame in `rx_frame`/`tx_frame`. No such profile yet.
@@ -190,7 +190,7 @@ The profiles are examples, not fixed models: a user sets them to the hardware an
 | PHY overhead per frame (it lengthens every TX and RX) | `WSSIM_PHY_PREAMBLE` (bytes, default 8, Wi-SUN FAN's minimum; with the central medium 12 in mode 3, the FG25's PHY, [MEDIUM.md](MEDIUM.md) §2.1; when set, every mode), `WSSIM_PHY_SFD` (2), `WSSIM_PHY_PHR` (2), `WSSIM_PHY_FCS` (4 or 2, default 4 as FAN requires) in the nodes' environment. `WSSIM_PHY_LEGACY=1`: the PHY before 2026-10-28 (150 kbit/s whatever the mode, PSDU only), to compare with older runs | `run.sh`: `NODE_ENV_<i>="WSSIM_PHY_PREAMBLE=16"`, `BR_ENV` |
 | RX timestamp error (timing jitter) | `WSSIM_PHY_RX_TS_JITTER_US=<µs>` in the nodes' environment: each received frame's timestamp off by a uniform draw in ±that many µs, from the node's own generator (the loss draws are unchanged), default 0 (exact). The FG25 kits' router TX starts spread by ±30 µs (one 80 µs case) in the 2026-11-04 overnight run; 40 reproduces the LFN rate fault of that run (stack's `docs/LFN_MAC.md` §4) | `run.sh`: `NODE_ENV_<i>`, `BR_ENV`, or exported for all nodes |
 
-The profile's TX table clamps the requested power to the hardware's maximum, as the radio would (the FG25 on the BRD4271A: 16.9 dBm, measured since 2026-11-12, §12.10; 15.9 dBm, the datasheet's, before).
+The profile's TX table clamps the requested power to the hardware's maximum, as the radio would (the FG25 on the BRD4271A: 16.9 dBm since 2026-11-12, RAIL's reported maximum for RAILtest's PA configuration, §12.10; 15.9 dBm, the datasheet's, before). The medium uses the same top level as the most a sender radiates ([MEDIUM.md](MEDIUM.md) §2, `--medium-tx-max`).
 
 ### 6.2 Values per PHY mode
 
@@ -518,9 +518,9 @@ Source: the firmware repo's `docs/RADIO_TIMING_POWER_RESULTS.md` §6 (EM5): RAIL
 | EM1, radio idle | 4.75 mA (SYSCLK from the RF PLL; the datasheet's EM1 at 97.5 MHz is 2.145 mA) |
 | EM2, radio off | 7–8 µA (as §12.8) |
 | RX listening (EM0) | 11.15 mA: the radio adds 3.86 mA to EM0 |
-| RX while receiving | 0.2 mA below listening (a 250-byte frame at −21 dBm) |
-| TX, PN9 stream (EM0), −10.1 / 0 / +9.9 / +14.0 / +16.9 dBm | 19.78 / 27.42 / 40.98 / 57.39 / 75.20 mA; +16.9 dBm is the most the PA gives (`setPower` 20 dBm) |
-| idle→RX, RX→idle, idle→TX, TX→idle | 80 µs 0.16 µC, 40 µs 0.045 µC, 100 µs 0.37 µC, 50 µs 0.17 µC above the idle current |
+| RX while receiving | 0.2 mA below listening (250-byte frames at −43 dBm, RSSI at the kit; run `power_440290182_gap20`) |
+| TX, PN9 stream (EM0), −10.1 / 0 / +9.9 / +14.0 / +16.9 dBm | 19.78 / 27.42 / 40.98 / 57.39 / 75.20 mA. The levels are RAIL's reported values (`setPower` 200 deci-dBm gives 169: RAILtest's PA configuration), not RF measurements; our firmware's PA configuration was not checked |
+| idle→RX, RX→idle, idle→TX, TX→idle | 80 µs 0.16 µC, 40 µs 0.045 µC, 100 µs 0.37 µC (0.37–0.40 depending on where the ramp is cut), 50 µs 0.17 µC (0.17–0.22) above the idle current |
 
 **Profile changes** (`efr32fg25-soc.ini`; `efr32fg25-lfn.ini` for TX only):
 
@@ -529,10 +529,10 @@ Source: the firmware repo's `docs/RADIO_TIMING_POWER_RESULTS.md` §6 (EM5): RAIL
 | `radio.tx_ma` | 0:17.59 10:35.75 12:39.38 15.9:55.80 (datasheet curve scaled) | -10.1:14.15 0:21.79 10:35.75 14:51.76 16.9:69.57 | the RAILtest levels as increments over +10 dBm (41.38 mA, interpolated), added to HW5's +10 dBm value, so the +10 dBm figure of our firmware is kept |
 | `radio.tx_ma@3` | 0:17.36 10:35.29 12:38.88 15.9:55.09 | -10.1:13.69 0:21.33 10:35.29 14:51.30 16.9:69.11 | the same increments over 35.29 |
 | LFN `tx_ma`, `tx_ma@3` | 0:16.36 10:33.26 12:36.64 15.9:51.92 | -10.1:11.66 0:19.30 10:33.26 14:49.27 16.9:67.08 | the same increments over 33.26 |
-| `radio.receive_ma` | 6.0 (as listening) | 5.8 | 0.2 mA below listening |
-| `radio_transitions` | none | `idle_listen = 80 2.0`, `listen_idle = 40 1.1`, `idle_tx = 100 3.7`, `tx_idle = 50 3.4` | duration and mean current above idle |
+| `radio.receive_ma` | 6.0 (as listening); LFN 4.32 | 5.8; LFN 4.12 | 0.2 mA below listening, in both profiles |
+| `radio_transitions` | none | `idle_listen = 80 2.0 before`, `listen_idle = 40 1.1`, `idle_tx = 100 3.7 before`, `tx_idle = 50 3.4` | duration and mean current above idle. Each is cut out of the idle next to it (idle_ma 0), so it adds exactly its measured charge and the listening or TX that follows keeps its whole time (`test_power.py`, measured transitions) |
 
-**What changes in default runs.** The stack asks for 20 dBm by default, clamped to the table's top: TX now costs 69.57 mA (69.11 in mode 3) instead of 55.80 (55.09), +25 %, for every node that keeps the default `tx_power`; a run at +10 dBm (`-o tx_power=10`, HW5's setting) is unchanged in TX. Receiving costs 0.2 mA less. The idle transitions are charged only when the radio goes through idle: rare in FFN runs (a deaf CSMA backoff, a failed TX), at every frame with the radio's turnaround options (`MEDIUM.md` §9.2: listening → idle → TX). The LFN profile's own `listen_off` cost (§12.9) is unchanged.
+**What changes in default runs.** The stack asks for 20 dBm by default, clamped to the table's top (16.9 dBm, RAIL's reported maximum for RAILtest's PA configuration): TX now costs 69.57 mA (69.11 in mode 3) instead of 55.80 (55.09), +25 %, for every node that keeps the default `tx_power`; a run at +10 dBm (`-o tx_power=10`, HW5's setting) is unchanged in TX. Receiving costs 0.2 mA less. The medium radiates at most the same top level where a link depends on the TX power (`--medium-tx-ref`, positions; `--medium-tx-max`, [MEDIUM.md](MEDIUM.md) §2): with positions and the default 20 dBm, links are 3.1 dB weaker than before when the nodes have this profile. The idle transitions are charged only when the radio goes through idle: rare in FFN runs (a deaf CSMA backoff, a failed TX), at every frame with the radio's turnaround options (`MEDIUM.md` §9.2: listening → idle → TX). The LFN profile's own `listen_off` cost (§12.9) is unchanged.
 
 **MCU states, not applied.** RAILtest's EM1 (4.75 mA) is 2.6 mA above the datasheet's: SYSCLK from the RF PLL, as in our firmware. The profile keeps the datasheet's EM1 (2.145 mA) and gives the radio the rest (listening 6.0 = 8.15 − 2.145, HW5), which gives the chip's measured totals in every state an FFN uses (EM1 + listening, EM1 + TX). The split matters only when the MCU is in EM1 with the radio idle or off: the profile then draws 2.6 mA less than the chip would if the RF PLL stays on. Likewise EM0 − EM1 is 2.5 mA under RAILtest against 0.875 mA in the profile, which `mcu.wake_charge_uc` makes up per wake (§12.1). Changing the split would change every FFN figure through the wakes; it needs our firmware's EM0 and EM1 measured on their own, not RAILtest's.
 

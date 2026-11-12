@@ -54,6 +54,9 @@ struct pwr_profile {
     double tx_dbm[PWR_TX_LEVELS_MAX], tx_ma[PWR_TX_LEVELS_MAX];
     // [radio_transitions]
     double t_rt[SIM_RADIO_STATES][SIM_RADIO_STATES], i_rt[SIM_RADIO_STATES][SIM_RADIO_STATES];
+    // "before": the transition is cut out of the end of the state it leaves
+    // (default: out of the start of the state it enters)
+    bool rt_before[SIM_RADIO_STATES][SIM_RADIO_STATES];
     struct ns_port_sleep_rule rule;
     // Per PHY mode (docs/POWER_MODEL.md §6.2): the profile with the values
     // of "key@MODE" lines, NULL for a mode without any. mode: the PHY mode
@@ -168,11 +171,11 @@ static void parse_tx_levels(struct pwr_profile *p, int line, char *val)
     }
 }
 
-// "<from>_<to> = <µs> <mA>"
+// "<from>_<to> = <µs> <mA> [before]"
 static void parse_transition(struct pwr_profile *p, int line, const char *key, char *val)
 {
     const char *sep = strchr(key, '_'), *us;
-    char *ma;
+    char *ma, *when;
     int from, to;
 
     from = sep ? radio_state_by_name(key, sep - key) : -1;
@@ -181,9 +184,14 @@ static void parse_transition(struct pwr_profile *p, int line, const char *key, c
              "%s:%d: radio_transitions: unknown transition \"%s\" (states: off idle listen receive tx)",
              p->path, line, key);
     us = strtok_r(val, " \t", &ma);
-    FATAL_ON(!us || !*trim(ma), 1, "%s:%d: %s: expected \"<us> <mA>\"", p->path, line, key);
+    FATAL_ON(!us || !*trim(ma), 1, "%s:%d: %s: expected \"<us> <mA> [before]\"", p->path, line, key);
+    ma = strtok_r(ma, " \t", &when);
+    when = trim(when);
+    FATAL_ON(*when && strcmp(when, "before"), 1, "%s:%d: %s: expected \"<us> <mA> [before]\", got \"%s\"",
+             p->path, line, key, when);
     p->t_rt[from][to] = parse_number(p->path, line, key, us);
     p->i_rt[from][to] = parse_number(p->path, line, key, trim(ma));
+    p->rt_before[from][to] = *when != '\0';
 }
 
 static void parse_string(char *dst, size_t size, const char *path, int line, const char *val)
@@ -665,6 +673,15 @@ void pwr_start(int num_nodes, const int *nodes)
     }
 }
 
+// The highest level of the node's TX table: the PA's maximum, to which the
+// ledger clamps a requested power. NAN for a node without a profile.
+double pwr_tx_max_dbm(int node)
+{
+    const struct pwr_node *n = node >= 0 && node < SIM_MAX_NODES ? pwr.nodes[node] : NULL;
+
+    return n && n->p->tx_n ? n->p->tx_dbm[n->p->tx_n - 1] : NAN;
+}
+
 uint32_t pwr_cca_us(int node)
 {
     const struct pwr_node *n = node >= 0 && node < SIM_MAX_NODES ? pwr.nodes[node] : NULL;
@@ -737,10 +754,12 @@ static void mcu_sleep(struct pwr_node *n, double start, double end, bool woken)
 /* ---- radio */
 
 // Close the radio's current interval at t. A transition into the state is
-// charged at its start, a CCA (cca_us) at its end; both are cut to fit.
-static void radio_close(struct pwr_node *n, double t, double cca_us)
+// charged at its start, a CCA (cca_us) at its end, a "before" transition
+// out of it (to: the state it goes to, -1 if none) at its very end; all are
+// cut to fit.
+static void radio_close(struct pwr_node *n, double t, double cca_us, int to)
 {
-    double len = t - n->r_since, start = n->r_since, c;
+    double len = t - n->r_since, start = n->r_since, c, pre = 0;
     int i;
 
     if (n->r_carve_from >= 0) {
@@ -752,6 +771,14 @@ static void radio_close(struct pwr_node *n, double t, double cca_us)
         start += c;
         len -= c;
         n->r_carve_from = -1;
+    }
+    if (to >= 0 && n->p->rt_before[n->r_state][to] && len > 0) {
+        pre = fmin(n->p->t_rt[n->r_state][to], len);
+        len -= pre;
+        n->rt_time[n->r_state][to] += pre;
+        if (pre > 0 && pwr.log)
+            fprintf(pwr.log, "%.3f %.3f %d radio %s>%s\n", t - pre, t, n->id,
+                    radio_names[n->r_state], radio_names[to]);
     }
     c = cca_us > 0 ? fmin(cca_us, fmax(len, 0)) : 0;
     len -= c;
@@ -801,14 +828,14 @@ void pwr_radio(int node, uint64_t t, const struct sim_radio_report *r)
         }
     }
     if (r->events & SIM_RADIO_EV_CCA)
-        radio_close(n, t, n->p->t_cca);
+        radio_close(n, t, n->p->t_cca, -1);
     if (r->state == n->r_state && (r->state != SIM_RADIO_TX || r->tx_dbm == n->r_dbm))
         return;
-    radio_close(n, t, 0);
+    radio_close(n, t, 0, r->state);
     n->rt_count[n->r_state][r->state]++;
     n->r_carve_from = n->r_state;
     n->r_carve_to = r->state;
-    n->r_carve = n->p->t_rt[n->r_state][r->state];
+    n->r_carve = n->p->rt_before[n->r_state][r->state] ? 0 : n->p->t_rt[n->r_state][r->state];
     n->r_state = r->state;
     n->r_count[r->state]++;
     if (r->state == SIM_RADIO_TX) {
@@ -945,7 +972,7 @@ static void node_close(struct pwr_node *n, double t_end)
         mcu_add(n, MCU_ACTIVE, n->act_start, n->busy_until - n->act_start);
         mcu_sleep(n, n->busy_until, t_end, false);
     }
-    radio_close(n, t_end, 0);
+    radio_close(n, t_end, 0, -1);
 }
 
 static void node_totals(const struct pwr_node *n, struct pwr_totals *tt)
