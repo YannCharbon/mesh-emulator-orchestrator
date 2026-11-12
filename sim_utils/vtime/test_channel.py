@@ -37,7 +37,7 @@ ARGS = None
 def dump(opts, specs, seed="1"):
     """--medium-var-dump samples: {spec: [(t_us, shadow_db, fading_db, bad)]}."""
     env = dict(os.environ, WSSIM_SEED=seed)
-    args = [ARGS.bin, *opts] + [f"--medium-var-dump={s}" for s in specs] + ["unused_socket"]
+    args = [ARGS.bin, *tc.pin_basic(opts)] + [f"--medium-var-dump={s}" for s in specs] + ["unused_socket"]
     p = subprocess.run(args, capture_output=True, text=True, env=env, timeout=120)
     check(p.returncode == 0, f"dump exit {p.returncode}: {p.stderr[-500:]}")
     out, i = {}, 0

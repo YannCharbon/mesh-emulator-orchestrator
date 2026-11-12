@@ -320,7 +320,7 @@ def test_start_time():
     logp = os.path.join(ARGS.logdir, "start4000.log")
     t0 = time.monotonic()
     with open(logp, "w") as logf:
-        p = subprocess.Popen([ARGS.bin, "--vtime=4000", f"--positions={posf}", ARGS.sock], stdout=logf,
+        p = subprocess.Popen([ARGS.bin, "--medium-preset=basic", "--vtime=4000", f"--positions={posf}", ARGS.sock], stdout=logf,
                              stderr=subprocess.STDOUT, env={k: v for k, v in os.environ.items() if k != "WSSIM_SEED"})
         while not os.path.exists(ARGS.sock) and p.poll() is None and time.monotonic() - t0 < 60:
             time.sleep(0.05)

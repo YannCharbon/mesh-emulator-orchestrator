@@ -31,7 +31,7 @@
 # (400), BELOW (-96), STRICT (-100), MIN_DELIVERY (90), RSSI (-60), FADE_RSSI (-115), FADE_AT (600),
 # FADE_FOR (600), RECOVER (300), DUR (1800), WSSIM_SEED (1), TUN (none),
 # BR_PERIOD (37), LFN_PERIOD (53), JOIN_MAX (300), SIM_OPTS
-# (--drift-random=20), LFN_EXTRA, KEEP.
+# (--drift-random=20; the script adds --medium-preset=basic before it), LFN_EXTRA, KEEP.
 # Exit status 0 if every check passes.
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
@@ -39,6 +39,10 @@ MODE=${MODE:-sweep}; LEVELS=${LEVELS:--90 -96 -100 -103 -106}; WEAK_AT=${WEAK_AT
 RSSI=${RSSI:--60}; FADE_RSSI=${FADE_RSSI:--115}; FADE_AT=${FADE_AT:-600}; FADE_FOR=${FADE_FOR:-600}; RECOVER=${RECOVER:-300}
 DUR=${DUR:-1800}; TUN=${TUN:-none}; BR_PERIOD=${BR_PERIOD:-37}; LFN_PERIOD=${LFN_PERIOD:-53}; JOIN_MAX=${JOIN_MAX:-300}
 SIM_OPTS=${SIM_OPTS---drift-random=20}
+# The levels above come from the empirical curve: the medium's basic preset
+# (docs/MEDIUM.md §14), whose noise curve is that formula. The calibrated
+# default (layered curve with fading) loses more below -100 dBm (§12.3).
+SIM_OPTS="--medium-preset=basic $SIM_OPTS"
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT" && OUT=$(realpath "$OUT")
 [ -z "$(ls -A "$OUT")" ] || { echo "test_lfn_weak: $OUT is not empty" >&2; exit 1; }

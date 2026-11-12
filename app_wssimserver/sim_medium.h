@@ -49,6 +49,8 @@ void med_set_sniff_false(const char *arg);      // --sniff-false=P|RATE/s
 // (1 for d = 0), from the profile's adjacent-channel table; valid from med_start()
 double med_adjacent_factor(uint32_t rate_bps, int d);
 bool med_options_given(void);                   // any of the above
+// The preset in force (MEDIUM.md §14) and the options it added, printed at the start
+void med_set_preset_note(const char *name, const char *how, const char *opts);
 bool med_tuning_given(void);                    // any of them but --medium
 void med_default_central(void);                 // --vtime: central unless --medium=legacy
 bool med_central(void);

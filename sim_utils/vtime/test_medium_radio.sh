@@ -34,7 +34,11 @@
 # usage: test_medium_radio.sh <bindir> <workdir(holds examples/)> <outdir>
 # Environment: WSSIM_SEED (1), DUR (600), SIM_OPTS (more wssimserver
 # options, e.g. --drift-random=20 as lfn_suite.sh sets; --medium=central is
-# always given, after them). TUN is always none.
+# always given, after them). TUN is always none. The run uses the medium's
+# basic preset (docs/MEDIUM.md §14, given before SIM_OPTS): the CCA check
+# rebuilds each busy answer's energy from the links' fixed levels, which the
+# calibrated default's fading changes frame by frame (test_channel.py checks
+# the CCA energy with fading).
 # Exit status 0 if every check passes.
 set -u
 [ $# = 3 ] || { echo "usage: test_medium_radio.sh <bindir> <workdir> <outdir>" >&2; exit 2; }
@@ -46,7 +50,7 @@ mkdir -p "$OUT" && OUT=$(realpath "$OUT")
 printf '0,1:-60\n0,2:-60\n' > "$OUT/topology.in"
 
 TUN=none TOPO="$OUT/topology.in" LINK="0:2:400:-50" \
-    SIM_OPTS="${SIM_OPTS:-} --medium=central --medium-log=$OUT/run/medium.log" \
+    SIM_OPTS="--medium-preset=basic ${SIM_OPTS:-} --medium=central --medium-log=$OUT/run/medium.log" \
     BR_OPTS="-o test_udp_echo=true" \
     NODE_OPTS="-o test_udp_dst=fd12:3456::1615:16ff:fe17:1819 -o test_udp_period_s=1 -o test_udp_start_s=150" \
     "$HERE/run.sh" "$BIN" "$WORK" "$OUT/run" "$DUR" > "$OUT/run.txt" 2>&1 ||
@@ -72,7 +76,7 @@ if not any('medium: central' in l for l in open(f'{out}/simserver.log')):
 # The server: outcome of (frame, receiver), and its totals
 rows = {}
 for l in open(f'{out}/medium.log'):
-    t_end, src, dst, fid, outcome, dbm, sinr = l.split()
+    t_end, src, dst, fid, outcome, dbm, sinr = l.split()[:7]   # more columns when links vary (MEDIUM.md §12.6)
     rows[(int(fid), int(dst))] = (int(t_end), int(src), outcome, float(dbm))
 srv = {}
 for l in open(f'{out}/simserver.log'):

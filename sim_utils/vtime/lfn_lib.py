@@ -194,7 +194,9 @@ ACK_ON_S = 0.010        # the LFN stays on this long after a frame it received (
 def lfn_reception(path, t_from=0.0):
     """Every frame an LFN's radio received (from its log), against its
     windows. Airtimes are those the emulated PHY used ("SIG TX in N us",
-    "SIG RX in N us": the configured rate and overheads).
+    "SIG RX in N us": the configured rate and overheads); with the central
+    medium, which has no "SIG RX" line, a received frame ends at its
+    "RX_done" (a frame lost at its verdict has no end).
 
     Returns a dict: rx (frame start times), acks (frames received while the
     LFN waits for the ACK of a frame it sent, the ACK itself included: from
@@ -238,6 +240,11 @@ def lfn_reception(path, t_from=0.0):
             rx.append(pend_rx)
         elif m.startswith('SIG RX in') and pend_rx is not None:
             pend_rx[1] = pend_rx[0] + int(re.search(r'in (\d+) us', m).group(1)) / 1e6
+            pend_rx = None
+        elif m.endswith(' RX_done') and pend_rx is not None:
+            # central medium: no airtime timer ("SIG RX in"); the frame ends
+            # at the server's verdict, when the radio hands it to the MAC
+            pend_rx[1] = t
             pend_rx = None
         elif 'ACK TX' in m:
             ack_tx = True       # the next "Transmitting" is the ACK...

@@ -825,6 +825,17 @@ void med_set_sniff_log(const char *path)
     med.given = med.tuning = true;
 }
 
+static struct {
+    const char *name, *how, *opts;
+} med_preset;
+
+void med_set_preset_note(const char *name, const char *how, const char *opts)
+{
+    med_preset.name = name;
+    med_preset.how = how;
+    med_preset.opts = opts;
+}
+
 bool med_options_given(void)
 {
     return med.given;
@@ -1199,6 +1210,9 @@ void med_start(uint64_t seed, const uint8_t *cca_shm, struct node_infos *links)
         sn.log = fopen(sn.log_path, "w");
         FATAL_ON(!sn.log, 1, "%s: %m", sn.log_path);
     }
+    if (med_preset.name)
+        INFO("medium: preset %s (%s): %s", med_preset.name, med_preset.how,
+             med_preset.opts && *med_preset.opts ? med_preset.opts : "no option added");
     med_phy_setup();
     chan_start(seed);
     for (int p = 0; p < MED_PHYS; p++)

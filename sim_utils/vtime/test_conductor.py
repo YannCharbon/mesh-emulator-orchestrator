@@ -32,6 +32,17 @@ ARGS = None
 LEGACY = "--medium=legacy"
 
 
+def pin_basic(args):
+    """The fake-node tests check the medium's rules and formulas option by
+    option, from the behaviour before the presets: they run the basic preset
+    (docs/MEDIUM.md §14) unless they choose one. Only with --vtime (a preset
+    needs it)."""
+    args = list(args)
+    if any(a.startswith("--vtime=") for a in args) and not any(a.startswith("--medium-preset") for a in args):
+        args.insert(0, "--medium-preset=basic")
+    return args
+
+
 class Server:
     def __init__(self, args, env=None):
         fd, self.log_path = tempfile.mkstemp(prefix="em3c_", suffix=".log", dir=ARGS.logdir)
@@ -41,7 +52,7 @@ class Server:
         e.update(env or {})
         if os.path.exists(ARGS.sock):
             os.unlink(ARGS.sock)
-        self.p = subprocess.Popen([ARGS.bin] + args + [ARGS.sock], stdout=self.logf,
+        self.p = subprocess.Popen([ARGS.bin] + pin_basic(args) + [ARGS.sock], stdout=self.logf,
                                   stderr=subprocess.STDOUT, env=e)
         for _ in range(200):
             if os.path.exists(ARGS.sock):

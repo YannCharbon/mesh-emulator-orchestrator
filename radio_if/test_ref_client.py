@@ -29,6 +29,8 @@ C_SRC = os.path.join(HERE, "c_example", "rif_node.c")
 PROFILE = os.path.join(ROOT, "examples/power/efr32fg25-lfn.ini")
 # The sniffing model these tests were written for, before the kit calibration
 # of its defaults (docs/MEDIUM.md §10.5): 16-bit dwells, no margin, no settling
+# The fake-node formulas assume the behaviour before the presets (docs/MEDIUM.md §14)
+MEDIUM_PRESET = "--medium-preset=basic"
 SNIFF_MODEL = ["--sniff-dwell-bits=16", "--sniff-margin-bits=0", "--sniff-settle-us=0", "--sniff-curve=ber:16"]
 NOISE_DBM = -119.93
 ARGS = None
@@ -60,7 +62,7 @@ class Run:
         self.mlog = os.path.join(self.dir, "medium.log")
         self.power = os.path.join(self.dir, "power.json")
         g = sum((["-g", f"{a},{b}:{r}"] for a, b, r in links), [])
-        cmd = [ARGS.bin, f"--vtime={len(nodes)}", f"--vtime-end={end_s}", f"--medium-log={self.mlog}",
+        cmd = [ARGS.bin, f"--vtime={len(nodes)}", MEDIUM_PRESET, f"--vtime-end={end_s}", f"--medium-log={self.mlog}",
                f"--power={PROFILE}", f"--power-out={self.power}", *SNIFF_MODEL, *opts, *g, self.sock]
         env = dict(os.environ, WSSIM_SEED=seed)
         self.srv_log = os.path.join(self.dir, "server.log")
@@ -491,7 +493,7 @@ def raw_server(name, n, opts=(), links=("1,2:-60",), end="0.01"):
     lf = open(os.path.join(d, "server.log"), "w")
     g = sum((["-g", x] for x in links), [])
     model = [] if "--medium=legacy" in opts else SNIFF_MODEL
-    srv = subprocess.Popen([ARGS.bin, f"--vtime={n}", f"--vtime-end={end}", *model, *opts, *g, sock],
+    srv = subprocess.Popen([ARGS.bin, f"--vtime={n}", MEDIUM_PRESET, f"--vtime-end={end}", *model, *opts, *g, sock],
                            stdout=lf, stderr=subprocess.STDOUT)
     for _ in range(500):
         if os.path.exists(sock) or srv.poll() is not None:

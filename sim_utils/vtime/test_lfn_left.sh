@@ -96,7 +96,7 @@ if not any('medium: central' in l for l in open(f'{out}/simserver.log')):
 # The server: outcome of (frame, receiver)
 rows = {}
 for l in open(f'{out}/medium.log'):
-    t_end, src, dst, fid, outcome, dbm, sinr = l.split()
+    t_end, src, dst, fid, outcome, dbm, sinr = l.split()[:7]   # more columns when links vary (MEDIUM.md §12.6)
     rows[(int(fid), int(dst))] = (int(t_end), int(src), outcome, float(dbm))
 LOCKED = {'ok', 'noise', 'interference', 'captured', 'left', 'tx_abort'}
 DROP = re.compile(r'Packet from node (\d+) was lost: (.*) \(RSSI (\S+) dBm.* frame (\d+)\)')

@@ -352,6 +352,13 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --medium=legacy|central   virtual time: who decides reception: the server (central, the\n");
     fprintf(stream, "                            default; docs/MEDIUM.md) or each radio (legacy: the behaviour\n");
     fprintf(stream, "                            of the permanent reference runs)\n");
+    fprintf(stream, "  --medium-preset=calibrated|realistic|basic|em4  central: a set of medium options, given\n");
+    fprintf(stream, "                            before the command line's own (which override it): calibrated\n");
+    fprintf(stream, "                            (the default: layered receiver curve with fading, adjacent-channel\n");
+    fprintf(stream, "                            table 10/40, smooth capture), realistic (calibrated + slow\n");
+    fprintf(stream, "                            shadowing 2 dB/60 s and RSSI offset 0.9 dB, illustrative), basic\n");
+    fprintf(stream, "                            (the defaults before the presets), em4 (the MVP; also implied\n");
+    fprintf(stream, "                            by --medium-model=em4 without a preset); docs/MEDIUM.md §14\n");
     fprintf(stream, "  --medium-tx-ref=DBM       central: link values are the received power when the sender\n");
     fprintf(stream, "                            transmits at DBM (default: whatever its TX power)\n");
     fprintf(stream, "  --medium-tx-max=DBM|profile|off  central: the most a sender radiates, for the links\n");
@@ -426,6 +433,7 @@ enum {
     OPT_MEDIUM_BREAK_DB,
     OPT_MEDIUM_ADJACENT_DB,
     OPT_MEDIUM_LOG,
+    OPT_MEDIUM_PRESET,
     OPT_GROUP_FILE,
     OPT_SNIFF_DETECT,
     OPT_SNIFF_DWELL,
@@ -577,6 +585,33 @@ static int32_t drift_of(int node, uint64_t seed)
     return ppb;
 }
 
+// Presets of the central medium (docs/MEDIUM.md §14): their options go before
+// the command line's own, so that every option given overrides them.
+static const struct med_preset {
+    const char *name;
+    const char *opts[6];
+} med_presets[] = {
+    // The behaviour of the defaults before the presets (emulator e446b87)
+    { "basic", { NULL } },
+    // Calibrated on the FG25 kits, or fitted to reproduce the empirical curve
+    { "calibrated", { "--medium-rx-model=layered", "--medium-adjacent-table=10/40",
+                      "--medium-capture-model=smooth", NULL } },
+    // calibrated + illustrative indoor values (slow shadowing, RSSI offset)
+    { "realistic", { "--medium-rx-model=layered", "--medium-adjacent-table=10/40",
+                     "--medium-capture-model=smooth", "--medium-shadowing=2,60", "--rssi-offset=0.9", NULL } },
+    // The MVP's reception model (MEDIUM.md §2.1)
+    { "em4", { "--medium-model=em4", NULL } },
+};
+#define MED_PRESET_DEFAULT 1    // calibrated
+
+static const struct med_preset *med_preset_find(const char *name)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(med_presets); i++)
+        if (!strcmp(med_presets[i].name, name))
+            return &med_presets[i];
+    FATAL(1, "--medium-preset: expected basic, calibrated, realistic or em4: %s", name);
+}
+
 void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
 {
     const char *opts_short = "hlvf::g:";
@@ -615,6 +650,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "medium-break-db", required_argument, 0, OPT_MEDIUM_BREAK_DB },
         { "medium-adjacent-db", required_argument, 0, OPT_MEDIUM_ADJACENT_DB },
         { "medium-log", required_argument, 0, OPT_MEDIUM_LOG },
+        { "medium-preset", required_argument, 0, OPT_MEDIUM_PRESET },
         { "group-file", required_argument, 0, OPT_GROUP_FILE },
         { "sniff-detect", required_argument, 0, OPT_SNIFF_DETECT },
         { "sniff-dwell-bits", required_argument, 0, OPT_SNIFF_DWELL },
@@ -653,8 +689,72 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     for (int k = 0; chan_option_names[k]; k++)
         all_opts[n++] = (struct option){ chan_option_names[k], required_argument, 0, OPT_CHAN };
     BUG_ON(n >= (int)ARRAY_SIZE(all_opts));
+
+    // First pass, on a copy (getopt_long permutes its array): the preset, and
+    // what decides whether one applies (--vtime, --medium, --medium-model)
+    {
+        char **scan = calloc(argc + 1, sizeof(*scan));
+        const char *preset_arg = NULL, *how;
+        bool vtime = false, legacy = false, model_em4 = false;
+        const struct med_preset *mp = NULL;
+        static char preset_opts[512];
+        char **argv2;
+        int argc2 = 0;
+
+        FATAL_ON(!scan, 1, "calloc: %m");
+        memcpy(scan, argv, argc * sizeof(*scan));
+        opterr = 0;
+        optind = 0;
+        while ((opt = getopt_long(argc, scan, opts_short, all_opts, &longindex)) != -1) {
+            if (opt == OPT_MEDIUM_PRESET)
+                preset_arg = optarg;
+            else if (opt == OPT_VTIME)
+                vtime = true;
+            else if (opt == OPT_MEDIUM)
+                legacy = !strcmp(optarg, "legacy");
+            else if (opt == OPT_MEDIUM_MODEL)
+                model_em4 = !strcmp(optarg, "em4");
+        }
+        free(scan);
+        opterr = 1;
+        optind = 0;
+        if (preset_arg) {
+            mp = med_preset_find(preset_arg);
+            FATAL_ON(!vtime, 1, "--medium-preset needs --vtime");
+            FATAL_ON(legacy && mp != &med_presets[0], 1,
+                     "--medium-preset=%s needs the central medium (not --medium=legacy)", mp->name);
+            how = "--medium-preset";
+        } else if (model_em4) {
+            // --medium-model=em4 alone keeps meaning the MVP (MEDIUM.md §2.1)
+            mp = med_preset_find("em4");
+            how = "implied by --medium-model=em4";
+        } else {
+            mp = &med_presets[MED_PRESET_DEFAULT];
+            how = "the default";
+        }
+        if (!vtime || legacy)
+            mp = NULL;
+        argv2 = calloc(argc + ARRAY_SIZE(mp->opts) + 1, sizeof(*argv2));
+        FATAL_ON(!argv2, 1, "calloc: %m");
+        argv2[argc2++] = argv[0];
+        for (int k = 0; mp && mp->opts[k]; k++) {
+            argv2[argc2++] = (char *)mp->opts[k];
+            if (k)
+                strcat(preset_opts, " ");
+            strcat(preset_opts, mp->opts[k]);
+        }
+        for (int k = 1; k < argc; k++)
+            argv2[argc2++] = argv[k];
+        argc = argc2;
+        argv = argv2;           // kept for the run (getopt's optarg points into it)
+        if (mp)
+            med_set_preset_note(mp->name, how, preset_opts);
+    }
+
     while ((opt = getopt_long(argc, argv, opts_short, all_opts, &longindex)) != -1) {
         switch (opt) {
+            case OPT_MEDIUM_PRESET:
+                break;          // the first pass applied it
             case OPT_CHAN:
                 chan_set_option(all_opts[longindex].name, optarg);
                 break;

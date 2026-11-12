@@ -69,8 +69,12 @@
 #              frame sent
 #
 # Environment: WSSIM_SEED (default 1), DUR (virtual seconds, default 600),
-# POWER (default examples/power/efr32fg25-soc.ini), SNIFF (0). About 10 s of
-# wall time.
+# POWER (default examples/power/efr32fg25-soc.ini), SNIFF (0), MEDIUM_PRESET
+# (basic: the medium's preset, docs/MEDIUM.md §14). About 10 s of wall time.
+# The checks count events that occur by chance in one seed (cross-kind
+# collisions, detections), sized on the medium before the presets: the runs
+# use the basic preset. With the calibrated default, seed 1 had no Wi-SUN
+# frame arriving at a client busy with another frame (collisions check).
 set -u
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3
 DUR=${DUR:-600}
@@ -86,19 +90,20 @@ cc -std=gnu11 -O2 -Wall -Wextra -Werror -o "$OUT/bin/rif_node" "$HERE/c_example/
 DAG_SIMPLE="0,1:-34.0 0,2:-36.0 0,3:-71.0 2,4:-21.0 2,5:-45.0 4,6:-2.0 0,7:-80.0 1,7:-39.0 4,7:-67.0 0,8:-16.0 3,8:-41.0 5,8:-80.0 7,8:-12.0 3,9:-56.0 4,9:-20.0 7,9:-33.0 8,9:-21.0 7,10:-29.0 8,11:-22.0 9,12:-30.0 9,13:-74.0 10,14:-59.0"
 IF_LINKS="20,21:-60 20,22:-62 21,22:-64 20,8:-55 20,9:-58 21,8:-65 21,7:-60 22,9:-50 22,4:-70"
 SNIFF=${SNIFF:-0}
+MEDIUM_PRESET=${MEDIUM_PRESET:-basic}
 [ "$SNIFF" = 1 ] && IF_LINKS="$IF_LINKS 23,20:-63 23,21:-61 23,22:-66 23,8:-60 23,7:-62"
 tr ' ' '\n' <<< "$DAG_SIMPLE" > "$OUT/topo_base.txt"
 tr ' ' '\n' <<< "$DAG_SIMPLE $IF_LINKS" > "$OUT/topo_mixed.txt"
 
 PHY="--chan 8 --rate 150000"
 export TUN=none WSSIM_SEED=$SEED POWER FRAMES=1
-TOPO=$OUT/topo_base.txt SIM_OPTS="--medium-log=$OUT/base/medium.log" "$WORK/sim_utils/vtime/run.sh" "$BIN" "$WORK" "$OUT/base" "$DUR" > "$OUT/base.out" 2>&1
+TOPO=$OUT/topo_base.txt SIM_OPTS="--medium-preset=$MEDIUM_PRESET --medium-log=$OUT/base/medium.log" "$WORK/sim_utils/vtime/run.sh" "$BIN" "$WORK" "$OUT/base" "$DUR" > "$OUT/base.out" 2>&1
 BASE_RC=$?
 if [ "$SNIFF" = 1 ]; then
 	SN="--if-version 2 --sniff-period-ms 100 --sniff-us 1000"
 	LP="--lp-preamble-ms 110 --period-ms 2000 --payload-len 100"
 	TOPO=$OUT/topo_mixed.txt IF_NODES="20 21 22 23" \
-		SIM_OPTS="--medium-log=$OUT/mixed/medium.log --sniff-log=$OUT/mixed/sniff.log" \
+		SIM_OPTS="--medium-preset=$MEDIUM_PRESET --medium-log=$OUT/mixed/medium.log --sniff-log=$OUT/mixed/sniff.log" \
 		IF_CMD_20="$OUT/bin/rif_node" IF_OPTS_20="$PHY $SN $LP --offset-ms 250" \
 		IF_CMD_21="python3 $HERE/ref_client.py" IF_OPTS_21="$PHY --sniff-period-ms 47 --sniff-us 20000 --sniff-phase-ms 37" \
 		IF_CMD_22="$OUT/bin/rif_node" IF_OPTS_22="$PHY $SN --sniff-phase-ms 63 $LP --offset-ms 1250" \
@@ -108,7 +113,7 @@ if [ "$SNIFF" = 1 ]; then
 	python3 "$HERE/check_mixed.py" "$OUT" "$BASE_RC" "$MIXED_RC" "$DUR" sniff
 	exit
 fi
-TOPO=$OUT/topo_mixed.txt SIM_OPTS="--medium-log=$OUT/mixed/medium.log" IF_NODES="20 21 22" \
+TOPO=$OUT/topo_mixed.txt SIM_OPTS="--medium-preset=$MEDIUM_PRESET --medium-log=$OUT/mixed/medium.log" IF_NODES="20 21 22" \
 	IF_CMD_20="$OUT/bin/rif_node" IF_OPTS_20="$PHY --listen --period-ms 100 --offset-ms 0 --payload-len 100" \
 	IF_CMD_21="python3 $HERE/ref_client.py" IF_OPTS_21="$PHY --period-ms 500 --window-ms 450 --tx 130 --tx 330 --payload-len 60" \
 	IF_CMD_22="$OUT/bin/rif_node" IF_OPTS_22="$PHY --listen --period-ms 50 --offset-ms 7 --payload-len 100" \
