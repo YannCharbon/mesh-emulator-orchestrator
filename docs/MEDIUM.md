@@ -361,6 +361,21 @@ The `--prop-*` options need `--positions`.
 
 Without the new options, the outputs are unchanged: `nonreg_dag_simple.sh` against the permanent reference runs, `medium_gate_star.sh` (seed 1, hidden, central) with node logs and medium log identical to a build without the model, `test_conductor.py`, `test_sniff.py`, `radio_if/test_ref_client.py` and `lfn_suite.sh quick` pass.
 
+**Network-level demonstration** (`sim_utils/vtime/prop_building.sh`, defaults): a border router and 149 FAN 1.0 routers on 3 floors of a generated building (`gen_building.py`, 5 × 10 nodes per floor, 10 m apart, the border router in the middle of floor 0), the default model and shadowing, the routers' default TX power of 20 dBm (`--prop-tx-dbm=20`), no `-g` link, central medium, 3 seeds × 1200 virtual seconds. 111 s of wall time for the three runs at once.
+
+| Figure | Seed 1 | Seed 2 | Seed 3 |
+| --- | --- | --- | --- |
+| Pairs in the hearing graph (of 11 175) | 11 175 | 11 175 | 11 175 |
+| Link level at 20 dBm, 5th / 50th / 95th percentile (dBm) | −89.2 / −70.5 / −49.6 | −89.2 / −70.6 / −49.8 | −89.5 / −70.7 / −49.5 |
+| Links at −80 dBm or more | 78.5 % | 78.8 % | 78.9 % |
+| Shadowing, measured standard deviation (dB) | 4.03 | 4.02 | 4.01 |
+| Routers ready at the end | 149 / 149 | 149 / 149 | 149 / 149 |
+| Median / last router ready (s) | 210 / 476 | 205 / 478 | 208 / 464 |
+| RPL depth at the end: 1 / 2 / 3 hops | 36 / 98 / 15 | 40 / 94 / 15 | 38 / 95 / 16 |
+| Frames heard received / collision share | 98.87 % / 0.88 % | 99.03 % / 0.77 % | 99.06 % / 0.72 % |
+
+With the default model, every node of this building hears every other one, and most links are strong; the network still forms a tree of up to 3 hops, because parent selection prefers the stronger links. The same command repeated gives the same figures.
+
 ### 11.10 Limits
 
 - **Walls are not geometric.** The model knows no floor plan: the walls are an average (the exponent, a loss per metre) or a regular grid. Paths through windows, stairwells or around corners, and corridor guiding, are not modelled.
