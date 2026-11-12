@@ -98,6 +98,7 @@ echo "conductor||python3 $V/test_conductor.py $BIN/wssimserver --sock /tmp/lfn_s
 echo "power||python3 $V/test_power.py $BIN/wssimserver"
 echo "sniff||python3 $V/test_sniff.py $BIN/wssimserver --sock /tmp/lfn_suite_sniff_$$.sock"
 echo "propagation||python3 $V/test_propagation.py $BIN/wssimserver --sock /tmp/lfn_suite_prop_$$.sock --logdir <out>"
+echo "channel||python3 $V/test_channel.py $BIN/wssimserver --sock /tmp/lfn_suite_chan_$$.sock --logdir <out>"
 } | { [ -n "${ONLY:-}" ] && grep -E "^[^|]*(${ONLY})" || cat; } > "$OUT/jobs.txt"
 
 run() {   # run <job line>

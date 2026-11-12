@@ -35,7 +35,9 @@
 #define CHAN_TRUNC 1e-3         // the AR(1) sum stops where a^M falls below this
 #define CHAN_MAX_TERMS 128
 
-enum { CP_SHADOW_LINK = 1, CP_SHADOW_NODE, CP_FADING, CP_BURST_LINK, CP_BURST_RX };
+enum { CP_SHADOW_LINK = 1, CP_SHADOW_NODE, CP_FADING, CP_BURST_LINK, CP_BURST_NODE };
+enum { BURST_LINK, BURST_RX, BURST_NODE };
+static const char *const burst_scopes[] = { "link", "receiver", "node" };
 
 struct chan_ent {
     uint64_t key;               // 0: empty
@@ -60,7 +62,8 @@ static struct {
     double sigma_db, tau_s;
     double node_share;
     bool reciprocal;
-    bool burst, burst_rx;       // burst process per link or per receiver
+    bool burst;
+    int burst_scope;            // BURST_*: one process per link, per receiver, or per node
     double good_s, bad_s, burst_db;
     // --medium-var-dump
     int n_dumps;
@@ -174,16 +177,18 @@ bool chan_set_option(const char *name, const char *arg)
             ch.burst = false;
         } else {
             n = chan_list(name, arg, w, 4);
-            FATAL_ON(n != 3 && n != 4, 1, "--medium-burst: expected GOOD_S,BAD_S,DB[,link|rx] or off: %s", arg);
+            FATAL_ON(n != 3 && n != 4, 1, "--medium-burst: expected GOOD_S,BAD_S,DB[,link|rx|node] or off: %s", arg);
             ch.good_s = chan_number(name, w[0], 1e-4, 1e7);
             ch.bad_s = chan_number(name, w[1], 1e-4, 1e7);
             ch.burst_db = chan_number(name, w[2], 0, 200);
-            ch.burst_rx = false;
+            ch.burst_scope = BURST_LINK;
             if (n == 4) {
                 if (!strcmp(w[3], "rx"))
-                    ch.burst_rx = true;
+                    ch.burst_scope = BURST_RX;
+                else if (!strcmp(w[3], "node"))
+                    ch.burst_scope = BURST_NODE;
                 else
-                    FATAL_ON(strcmp(w[3], "link"), 1, "--medium-burst: the scope is link or rx: %s", arg);
+                    FATAL_ON(strcmp(w[3], "link"), 1, "--medium-burst: the scope is link, rx or node: %s", arg);
             }
             ch.burst = true;
         }
@@ -224,8 +229,8 @@ void chan_help(FILE *stream)
     fprintf(stream, "  --medium-shadowing=SIGMA_DB,TAU_S|off  slow shadowing (Gauss-Markov) (off)\n");
     fprintf(stream, "  --medium-node-share=F     share of the shadowing variance common to a node's links (0)\n");
     fprintf(stream, "  --medium-reciprocal=on|off  the same variation in both directions of a link (on)\n");
-    fprintf(stream, "  --medium-burst=GOOD_S,BAD_S,DB[,link|rx]|off  loss bursts: mean good and bad durations,\n");
-    fprintf(stream, "                            attenuation in the bad state, per link or per receiver (off)\n");
+    fprintf(stream, "  --medium-burst=GOOD_S,BAD_S,DB[,link|rx|node]|off  loss bursts: mean good and bad\n");
+    fprintf(stream, "                            durations, attenuation in the bad state, per link, receiver or node (off)\n");
     fprintf(stream, "  --medium-var-dump=RX,TX,FROM_S,STEP_S,COUNT[,shuffle]  print a link's variation and exit\n");
 }
 
@@ -423,7 +428,7 @@ void chan_start(uint64_t seed)
         INFO("medium: shadowing sigma %g dB, decorrelation time %g s, node share %g", ch.sigma_db, ch.tau_s,
              ch.node_share);
     if (ch.burst)
-        INFO("medium: bursts per %s: good %g s, bad %g s, %g dB", ch.burst_rx ? "receiver" : "link", ch.good_s,
+        INFO("medium: bursts per %s: good %g s, bad %g s, %g dB", burst_scopes[ch.burst_scope], ch.good_s,
              ch.bad_s, ch.burst_db);
     if (chan_varies())
         INFO("medium: links vary%s", ch.reciprocal ? ", the same in both directions" : ", each direction apart");
@@ -477,8 +482,13 @@ void chan_apply(int rx, int tx, uint64_t t, bool perfect, float *dbm, struct cha
         s->fading_db = 10 * log10(gain);
     }
     if (ch.burst) {
-        if (ch.burst_rx)
-            s->bad = chan_burst_bad(chan_key(CP_BURST_RX, rx, 0), t);
+        // Per receiver: the receiver's own process; per node: either end's
+        // process (a node in its bad state attenuates all its links, both
+        // ways); the node processes are the same in both scopes
+        if (ch.burst_scope == BURST_RX)
+            s->bad = chan_burst_bad(chan_key(CP_BURST_NODE, rx, 0), t);
+        else if (ch.burst_scope == BURST_NODE)
+            s->bad = chan_burst_bad(chan_key(CP_BURST_NODE, rx, 0), t) | chan_burst_bad(chan_key(CP_BURST_NODE, tx, 0), t);
         else
             s->bad = chan_burst_bad(chan_key(CP_BURST_LINK, a, b), t);
         if (s->bad) {

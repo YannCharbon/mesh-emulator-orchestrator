@@ -227,7 +227,9 @@ def test_bursts():
     in the bad state 2 / 22 = 0.091 (within 0.02), the mean sojourns 2 s
     (within 15 %) and 20 s (within 20 %), exponential (coefficient of
     variation near 1). Per link, two links of one receiver are independent;
-    per receiver (rx), they are in the bad state together."""
+    per receiver (rx), they are in the bad state together; per node, a link
+    is bad when either end is (share 1 - (1 - p)^2), and two links sharing
+    a node are bad together at least while that node is."""
     specs = ["1,2,0,0.05,400000", "1,3,0,0.05,400000"]
     r = dump(["--medium-burst=20,2,20"], specs)
     bad = [v[3] for v in r[specs[0]]]
@@ -246,6 +248,17 @@ def test_bursts():
     check(all(v[2] == 0 and v[1] == 0 for v in r[specs[0]][:100]), "bursts alone: no fading, no shadowing")
     r = dump(["--medium-burst=20,2,20,rx"], specs)
     check([v[3] for v in r[specs[0]]] == [v[3] for v in r[specs[1]]], "per receiver: links of 1 differ")
+    # Per node: a link is bad when either end is; 1-2 and 3-1 share node 1
+    specs = ["1,2,0,0.05,400000", "3,1,0,0.05,400000", "2,1,0,0.05,400000"]
+    r = dump(["--medium-burst=20,2,20,node"], specs)
+    x, y = [v[3] for v in r[specs[0]]], [v[3] for v in r[specs[1]]]
+    p = 2 / 22
+    both = mean([a & b for a, b in zip(x, y)])
+    print(f"     per node: bad share {mean(x):.4f} (1 - (1 - p)^2 = {1 - (1 - p) ** 2:.4f}), "
+          f"links sharing a node both bad {both:.4f} (at least p = {p:.4f})")
+    check(abs(mean(x) - (1 - (1 - p) ** 2)) < 0.03, f"per node: bad share {mean(x)}")
+    check(abs(both - (p + p * p * (1 - p))) < 0.03, f"per node: both bad {both}")
+    check(r[specs[0]] == r[specs[2]], "per node: the two directions differ")
 
 
 # ---- the medium
@@ -368,7 +381,7 @@ def test_options():
     for args, msg in ((["--vtime=1", "--medium=legacy", "--medium-fading=10,0.4"], "need the central medium"),
                       (["--vtime=1", "--medium-fading=10"], "expected K,TC_S"),
                       (["--vtime=1", "--medium-rx-model=x"], "empirical or layered"),
-                      (["--vtime=1", "--medium-burst=1,2,3,all"], "link or rx"),
+                      (["--vtime=1", "--medium-burst=1,2,3,all"], "link, rx or node"),
                       (["--vtime=1", "--medium-node-share=2"], "expected a number"),
                       (["--vtime=1", "--medium-combine=0.1"], "expected a number")):
         srv = Server(args)

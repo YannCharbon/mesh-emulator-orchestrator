@@ -13,8 +13,8 @@
 # links to <bindir>'s programs and a wssimserver wrapper that puts
 # MEDIUM_ARGS before the call's own options.
 #
-# The suite's unit tests are left out: test_conductor.py, test_power.py and
-# test_sniff.py copy and run the server with options of their own,
+# The suite's unit tests are left out: test_conductor.py, test_power.py,
+# test_sniff.py and test_channel.py copy and run the server with options of their own,
 # test_medium_radio.sh and test_lfn_left.sh are about the central medium:
 # ONLY defaults to every other test.
 #
