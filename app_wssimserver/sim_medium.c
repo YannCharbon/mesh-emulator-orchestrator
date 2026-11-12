@@ -817,6 +817,10 @@ void med_start(uint64_t seed, const uint8_t *cca_shm, struct node_infos *links)
     }
     med_phy_setup();
     chan_start(seed);
+    for (int p = 0; p < MED_PHYS; p++)
+        if (chan_combine_given() && med.phy[p].int_noise)
+            WARN("medium: PHY %s: interference counts as noise (em4 or --medium-int-curve=noise): "
+                 "--medium-combine does not apply to it", phy_names[p]);
     INFO("medium: central, model %s, lock threshold %.1f dB%s", med.em4 ? "em4" : "fg25", med.lock_snr,
          med.has_tx_ref ? "" : ", link values are the received power");
     for (int p = 0; p < MED_PHYS; p++) {
@@ -914,7 +918,8 @@ void med_add_rx(struct med_frame *f, int node)
     f->rx_mask[node / 64] |= 1ULL << (node % 64);
     rx->node = node;
     rx->dbm = med_rx_dbm(node, f->src, f->tx_dbm);
-    chan_apply(node, f->src, f->t_start, sim_link(med.links, node, f->src)->rssi == 0, &rx->dbm, &rx->cs);
+    chan_apply(node, f->src, f->t_start, f->chan, f->rate_bps, sim_link(med.links, node, f->src)->rssi == 0, &rx->dbm,
+               &rx->cs);
     rx->mw = dbm_to_mw(rx->dbm);
 }
 

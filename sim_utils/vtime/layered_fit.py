@@ -9,7 +9,7 @@ averaged over Rician fading (mean power 1), against the empirical curve
 BER = 0.5 exp(-SNR / 2), as functions of the mean received power, for 50-,
 100- and 250-byte PSDUs (8 (2 + PSDU + 4) counted bits). Prints the table
 and the 10 % points of §12.3; --search also prints the K search and the
-fit of X0 (about a minute).
+fit of X0 (a few seconds).
 """
 import argparse
 import math

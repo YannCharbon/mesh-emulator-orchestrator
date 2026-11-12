@@ -36,8 +36,12 @@ bool chan_set_option(const char *name, const char *arg);
 bool chan_options_given(void);
 // The long option names of this module, NULL-terminated
 extern const char *const chan_option_names[];
-// After the command line: --medium-var-dump prints its samples and exits
-void chan_dump_if_asked(void);
+// After the command line: refuses options without effect; --medium-var-dump
+// prints its samples and exits
+void chan_options_done(void);
+// --medium-combine was given (the medium warns for profiles where
+// interference counts as noise, which ignore it)
+bool chan_combine_given(void);
 void chan_help(FILE *stream);
 
 void chan_start(uint64_t seed);
@@ -45,10 +49,11 @@ void chan_finish(void);
 
 // Any variation process is on (the medium log then has the extra columns)
 bool chan_varies(void);
-// The variation of link (rx hears tx) at t (µs) is added to *dbm, the
-// link's mean received power; *s gets the parts. A perfect link (an edge
-// without a value) does not vary.
-void chan_apply(int rx, int tx, uint64_t t, bool perfect, float *dbm, struct chan_sample *s);
+// The variation of link (rx hears tx) at t (µs), for a frame on chan at
+// rate_bps, is added to *dbm, the link's mean received power; *s gets the
+// parts. A perfect link (an edge without a value) does not vary.
+void chan_apply(int rx, int tx, uint64_t t, uint16_t chan, uint32_t rate_bps, bool perfect, float *dbm,
+                struct chan_sample *s);
 // The extra columns of a medium log line (empty when nothing varies)
 int chan_log_columns(char *buf, size_t size, const struct chan_sample *s);
 

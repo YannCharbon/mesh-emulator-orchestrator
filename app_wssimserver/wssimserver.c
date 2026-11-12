@@ -853,7 +853,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
              "--medium-tx-ref, --medium-lock-snr, --medium-model, --medium-int-curve, --medium-capture-*, "
              "--medium-break-db, --medium-adjacent-db, --medium-log and --sniff-* need the central medium "
              "(not --medium=legacy)");
-    chan_dump_if_asked();
+    chan_options_done();
     FATAL_ON(chan_options_given() && !med_central(), 1,
              "--medium-rx-model, --medium-rx-curve, --medium-combine, --medium-fading, --medium-shadowing, "
              "--medium-node-share, --medium-reciprocal and --medium-burst need the central medium (--vtime, not "

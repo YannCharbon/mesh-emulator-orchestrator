@@ -74,21 +74,75 @@ from layered_fit import rician_cdf, per_layered_avg, per_empirical  # noqa: E402
 
 def test_shadowing():
     """sigma 4 dB, tau 30 s, a sample every 3 s over 3e5 s (1e4 tau): the
-    standard deviation within 5 %, the autocorrelation exp(-1) = 0.37 at tau
-    and exp(-3) = 0.05 at 3 tau (within 0.04), the mean within 0.3 dB."""
+    standard deviation within 3 %, the autocorrelation exp(-1) = 0.37 at tau
+    and exp(-3) = 0.05 at 3 tau (within 0.02), the mean within 0.3 dB."""
     s = "1,2,0,3,100000"
     x = [r[1] for r in dump(["--medium-shadowing=4,30"], [s])[s]]
     sd = math.sqrt(mean([v * v for v in x]) - mean(x) ** 2)
     a1, a3 = autocorr(x, 10), autocorr(x, 30)
     print(f"     sigma {sd:.3f} dB, mean {mean(x):+.3f} dB, autocorrelation {a1:.3f} at tau, {a3:.3f} at 3 tau")
-    check(abs(sd - 4) < 0.2, f"sigma {sd}")
+    check(abs(sd - 4) < 0.12, f"sigma {sd}")
     check(abs(mean(x)) < 0.3, f"mean {mean(x)}")
-    check(abs(a1 - math.exp(-1)) < 0.04 and abs(a3 - math.exp(-3)) < 0.04, f"autocorrelation {a1} {a3}")
+    check(abs(a1 - math.exp(-1)) < 0.02 and abs(a3 - math.exp(-3)) < 0.02, f"autocorrelation {a1} {a3}")
     # Between grid points (an offset of 1/3 of a grid step): the same spread
     s2 = "1,2,1.25,3,100000"
     y = [r[1] for r in dump(["--medium-shadowing=4,30"], [s2])[s2]]
     sd2 = math.sqrt(mean([v * v for v in y]) - mean(y) ** 2)
-    check(abs(sd2 - 4) < 0.2, f"sigma between grid points {sd2}")
+    check(abs(sd2 - 4) < 0.12, f"sigma at other times {sd2}")
+
+
+def test_short_lags():
+    """The correlation at short lags is exp(-dt / tau), at times that are no
+    grid or anchor point: 1e5 pairs (t, t + dt), t = 0.1234 s + 37.3 s * i,
+    shadowing tau 30 s, dt = 0.002 tau (60 ms, an ACK or a retry after a
+    frame), 0.05 tau and tau / 16; 1 - rho within 5 % of 1 - exp(-dt / tau).
+    The same for the fading's power (K = 10, Tc 0.3 s) at dt = 0.01 Tc
+    (3 ms) against (rho^2 + 2 K rho) / (1 + 2 K)."""
+    n = 100000
+    for frac in (0.002, 0.05, 1 / 16):
+        dt = frac * 30
+        a, b = "1,2,0.1234,37.3,%d" % n, "1,2,%.6f,37.3,%d" % (0.1234 + dt, n)
+        r = dump(["--medium-shadowing=4,30"], [a, b])
+        c = corr([v[1] for v in r[a]], [v[1] for v in r[b]])
+        want = 1 - math.exp(-frac)
+        print(f"     shadowing, dt {frac:.4f} tau: 1 - rho {1 - c:.5f}, exp {want:.5f}")
+        check(abs((1 - c) - want) < 0.05 * want, f"dt {frac} tau: 1 - rho {1 - c}, expected {want}")
+    k, frac = 10, 0.01
+    a, b = "1,2,0.1234,1.73,%d" % n, "1,2,%.6f,1.73,%d" % (0.1234 + frac * 0.3, n)
+    r = dump([f"--medium-fading={k},0.3"], [a, b])
+    c = corr([10 ** (v[2] / 10) for v in r[a]], [10 ** (v[2] / 10) for v in r[b]])
+    rho = math.exp(-frac)
+    want = 1 - (rho * rho + 2 * k * rho) / (1 + 2 * k)
+    print(f"     fading power, dt {frac} Tc: 1 - corr {1 - c:.5f}, formula {want:.5f}")
+    check(abs((1 - c) - want) < 0.06 * want, f"fading dt {frac} Tc: 1 - corr {1 - c}, expected {want}")
+
+
+def test_frequency():
+    """Frequency selectivity, Rayleigh (K = 0) so that the power correlation
+    is |rho_f|^2: 100 links, 300 samples each 1 s apart (Tc 0.05 s:
+    independent in time), on channel 0 and on a channel Df away (mode 3,
+    200 kHz). Pooled over links, the power correlation is
+    1 / L + (1 - 1 / L) / (1 + (2 pi sigma_tau Df)^2), L = 8 taps,
+    sigma_tau = sqrt(3) / (2 pi Bc): 0.5 at Bc for the mean field
+    correlation (within 0.07). With --medium-fading-bc=inf every channel has
+    the same fading, bit for bit."""
+    bc = 5.5e6
+    st = math.sqrt(3) / (2 * math.pi * bc)
+    for nch in (5, 27, 100):
+        df = nch * 200e3
+        specs = [f"{i},{i + 200},0,1,300,ch=0" for i in range(100)] + \
+                [f"{i},{i + 200},0,1,300,ch={nch}" for i in range(100)]
+        r = dump(["--medium-fading=0,0.05"], specs)
+        x = sum(([10 ** (v[2] / 10) for v in r[sp]] for sp in specs[:100]), [])
+        y = sum(([10 ** (v[2] / 10) for v in r[sp]] for sp in specs[100:]), [])
+        c = corr(x, y)
+        want = 1 / 8 + (7 / 8) / (1 + (2 * math.pi * st * df) ** 2)
+        print(f"     Df {df / 1e6:.1f} MHz: power correlation {c:.3f}, expected {want:.3f}")
+        check(abs(c - want) < 0.07, f"Df {df}: correlation {c}, expected {want}")
+    r = dump(["--medium-fading=0,0.05", "--medium-fading-bc=inf"], ["1,2,0,1,200,ch=0", "1,2,0,1,200,ch=20"])
+    check(r["1,2,0,1,200,ch=0"] == r["1,2,0,1,200,ch=20"], "Bc inf: channels differ")
+    r = dump(["--medium-fading=0,0.05"], ["1,2,0,1,200,ch=0", "1,2,0,1,200,ch=20"])
+    check(r["1,2,0,1,200,ch=0"] != r["1,2,0,1,200,ch=20"], "Bc 5.5 MHz: channels equal")
 
 
 def test_fading():
@@ -234,11 +288,13 @@ BITS100 = 8 * (2 + 100 + 4)
 def test_layered_average():
     """Node 1 sends a 100-byte frame every second for 3000 s to 2, 3 and 4 at
     mean levels -90, -95 and -100 dBm, --medium-rx-model=layered (fading
-    K = 10, 0.4 s). The loss rate at each equals the layered curve averaged
-    over the Rician distribution (within 4.5 sigma; frames 2.5 coherence
-    times apart, so nearly independent), and is within a factor 2.1 of the
-    empirical curve's (the fit, §12.4). The medium log has the variation columns: rx_dbm =
-    mean + shadowing + fading."""
+    K = 10, 0.3 s, 5.5 MHz). Measured by the medium: the loss rate at each
+    level equals the layered curve averaged over the Rician distribution
+    (within 4 sigma; frames 3.3 coherence times apart, so nearly
+    independent); at -100 dBm, where the count is large enough, the measured
+    rate is within a factor 2.5 of the empirical curve's (the fit's factor
+    is 1.9 there, §12.3). The medium log has the variation columns:
+    rx_dbm = mean + shadowing + fading."""
     levels = {2: -90, 3: -95, 4: -100}
     n = 3000
     r = {1: Radio(1, {1000 + k * 1000000: [("tx", {"payload": PAY})] for k in range(n)})}
@@ -249,7 +305,7 @@ def test_layered_average():
     check(all(len(x) == 11 for x in full), "medium log: 11 columns with variation")
     check(all(abs(float(x[5]) - (float(x[7]) + float(x[8]) + float(x[9]))) < 0.02 for x in full),
           "rx_dbm is not mean + shadowing + fading")
-    check("fading Rician K 10, coherence time 0.4 s" in out, "default fading not printed")
+    check("fading Rician K 10, coherence time 0.3 s, coherence bandwidth 5.5 MHz" in out, "default fading not printed")
     for k, lvl in levels.items():
         xv = [m for t, m in got(r[k], "xv")]
         check(len(xv) == n, f"node {k}: {len(xv)} verdicts")
@@ -259,28 +315,68 @@ def test_layered_average():
         sigma = math.sqrt(n * want * (1 - want))
         print(f"     {lvl} dBm: {lost}/{n} lost, layered average {n * want:.1f} (sigma {sigma:.1f}), "
               f"empirical curve {n * emp:.1f}")
-        check(abs(lost - n * want) < 4.5 * sigma + 1, f"{lvl} dBm: {lost} lost, expected {n * want:.1f}")
-        check(1 / 2.1 < want / emp < 2.1, f"{lvl} dBm: layered {want} against empirical {emp}")
+        check(abs(lost - n * want) < 4 * sigma + 1, f"{lvl} dBm: {lost} lost, expected {n * want:.1f}")
+        if lvl == -100:
+            check(1 / 2.5 < lost / (n * emp) < 2.5, f"{lvl} dBm: measured {lost / n} against empirical {emp}")
+
+
+def test_variation_everywhere():
+    """The variation reaches the frame as an interferer and the CCA energy:
+    node 3's long frame overlaps node 1's at 2, and 2 senses during it. The
+    verdict's lowest SINR is P1 - (N + P3), and the sensed energy N + P3,
+    with P1 and P3 the varied powers of the medium log (fading 10, 0.3 s,
+    shadowing 4 dB, bursts), for 30 cases."""
+    n = 30
+    opts = ["--medium-fading=10,0.3", "--medium-shadowing=4,30", "--medium-burst=3,1,20"]
+    acts1 = {50000 + k * 900000: [("tx", {})] for k in range(n)}
+    acts3 = {48000 + k * 900000: [("tx", {"payload": b"i" * 60, "chan": 1})] for k in range(n)}
+    acts2 = {}
+    for k in range(n):
+        acts2[49000 + k * 900000] = [("sense", 1)]
+    r = {1: Radio(1, acts1), 2: Radio(2, acts2), 3: Radio(3, acts3)}
+    d, out, rows = medium_run(r, [(1, 2, -80), (3, 2, -85)], opts=opts + ["--medium-adjacent-db=0"], seed="2")
+    with open(os.path.join(ARGS.logdir, "medium.log")) as f:
+        full = [ln.split() for ln in f]
+    p3 = {int(x[0]) // 900000: float(x[5]) for x in full if x[1] == "3"}
+    p1 = {int(x[0]) // 900000: (float(x[5]), float(x[6])) for x in full if x[1] == "1" and x[4] != "not_listening"}
+    nmw = 10 ** (NOISE_DBM / 10)
+    xs = [dbm for t, c, dbm in r[2].sensed]
+    check(len(xs) == n and len(p1) == n and len(p3) == n, f"{len(xs)} senses, {len(p1)} {len(p3)} frames")
+    varied = 0
+    for k in range(n):
+        want_e = 10 * math.log10(nmw + 10 ** (p3[k] / 10))
+        check(abs(xs[k] - want_e) < 0.02, f"case {k}: sensed {xs[k]}, expected {want_e}")
+        want_s = p1[k][0] - 10 * math.log10(nmw + 10 ** (p3[k] / 10))
+        check(abs(p1[k][1] - want_s) < 0.02, f"case {k}: SINR {p1[k][1]}, expected {want_s}")
+        varied += abs(p3[k] + 85) > 0.5
+    check(varied > n // 2, f"interferer power varied in {varied} of {n} cases only")
+    print(f"     {n} cases: sensed energy and SINR from the varied powers ({varied} interferer powers "
+          f"more than 0.5 dB from the mean)")
 
 
 def test_log_matches_dump():
     """The variation the medium applies to a frame (its log line) is the one
     the dump gives for that link at the frame's start."""
     n = 12
-    opts = ["--medium-fading=10,0.4", "--medium-shadowing=4,30", "--medium-burst=5,1,20"]
+    n = 30
+    opts = ["--medium-fading=10,0.4", "--medium-shadowing=4,30", "--medium-burst=3,1,20"]
     r = {1: Radio(1, {1000 + k * 700000: [("tx", {"payload": PAY})] for k in range(n)}), 2: Radio(2)}
     medium_run(r, [(1, 2, -70)], opts=opts, seed="3")
     with open(os.path.join(ARGS.logdir, "medium.log")) as f:
         full = [ln.split() for ln in f]
     air = (10 + 2 + 100 + 4) * 8 * 1000000 // 50000
-    specs = [f"2,1,{(int(x[0]) - air) / 1e6:.6f},1,1" for x in full]
+    specs = [f"2,1,{(int(x[0]) - air) / 1e6:.6f},1,1,ch=0,rate=50000" for x in full]
     dd = dump(opts, specs, "3")
     for x, s in zip(full, specs):
         t, sh, fa, bad = dd[s][0]
         check(t == int(x[0]) - air, f"start {t}")
         check(abs(float(x[8]) - sh) < 0.006 and abs(float(x[9]) - fa) < 0.006 and int(x[10]) == bad,
               f"log {x[7:]} against dump {dd[s][0]}")
-    print(f"     {len(full)} frames: the log's shadowing, fading and burst state equal the dump's")
+        want = float(x[7]) + sh + fa - 20 * bad
+        check(abs(float(x[5]) - want) < 0.02, f"rx_dbm {x[5]}, expected {want}")
+    check(any(int(x[10]) for x in full), "no frame in a bad state")
+    print(f"     {len(full)} frames: the log's shadowing, fading and burst state equal the dump's, "
+          f"rx_dbm = mean + shadowing + fading - 20 dB when bad ({sum(int(x[10]) for x in full)} bad)")
 
 
 def test_run_determinism():
@@ -306,37 +402,36 @@ def p_combined(p, n, i, x0i, bi, pnorm, x0=9.0, b=0.9):
 
 
 def test_combination():
-    """Noise and interference near sensitivity, mode 3, the layered curve
-    without fading (--medium-fading=off). The wanted frame 3 dB above the
-    curve's 10 % point of its 45-byte PSDU (so noise alone loses about 0.1 %),
-    an interferer from just after its SHR to its end at a SIR where
-    interference alone loses about 10 %: with the default (sum) the loss rate
-    is the formula's, well above max's; with --medium-combine=max, the
-    formula of the larger error rate."""
+    """Noise and interference near sensitivity, mode 3, without fading
+    (--medium-fading=off). The wanted frame 3 dB above the noise curve's
+    10 % point for its 45-byte PSDU, an interferer from just after its SHR to
+    its end at SIR 3.8 dB (the kits' 10 % point): the loss rate equals the
+    formula of §12.4 (within 3.5 sigma, 2000 frames) for the layered curve
+    with sum (default) and max, and for the empirical curve with
+    --medium-combine=sum; sum loses clearly more than max."""
     M3, M3_SHR, M3_PSDU, M3_AIR = tc.M3, tc.M3_SHR, tc.M3_PSDU, tc.M3_AIR
     bits = 8 * (2 + len(M3_PSDU) + 4)
-    # 10 % point of the noise curve for these bits, then 3 dB above
     ber10 = -math.expm1(math.log(0.9) / bits)
-    snr10 = 9.0 - 0.9 * math.log(ber10 / 0.5)
-    p_a = NOISE_DBM + snr10 + 3
     sir = 3.8
     m3_int = dict(M3, payload=b"i" * 120, at=M3_SHR + 153)
     share = (M3_AIR - M3_SHR - 153) / (M3_AIR - M3_SHR)
-    n = 600
-    for pnorm, opts in ((1, []), (0, ["--medium-combine=max"])):
-        rx, xv = tc.received_share(p_a, p_a - sir, n, dict(M3, payload=M3_PSDU), dict(m3_int), 30000,
-                                   ["--medium-rx-model=layered", "--medium-fading=off", *opts])
-        ber_n = p_combined(p_a, NOISE_DBM, -300, -2.85, 0.9, pnorm)
-        ber_i = p_combined(p_a, NOISE_DBM, p_a - sir, -2.85, 0.9, pnorm)
+    n = 2000
+    got_rx = {}
+    for name, x0, b, pnorm, opts in (
+            ("layered sum", 9.0, 0.9, 1, ["--medium-rx-model=layered", "--medium-fading=off"]),
+            ("layered max", 9.0, 0.9, 0, ["--medium-rx-model=layered", "--medium-fading=off", "--medium-combine=max"]),
+            ("empirical sum", 0.0, 2.0, 1, ["--medium-combine=sum"])):
+        snr10 = x0 - b * math.log(ber10 / 0.5)
+        p_a = NOISE_DBM + snr10 + 3
+        rx, xv = tc.received_share(p_a, p_a - sir, n, dict(M3, payload=M3_PSDU), dict(m3_int), 30000, opts)
+        ber_n = p_combined(p_a, NOISE_DBM, -300, -2.85, 0.9, pnorm, x0, b)
+        ber_i = p_combined(p_a, NOISE_DBM, p_a - sir, -2.85, 0.9, pnorm, x0, b)
         want = (1 - ber_n) ** (bits * (1 - share)) * (1 - ber_i) ** (bits * share)
         sigma = math.sqrt(n * want * (1 - want))
-        name = "sum" if pnorm else "max"
+        got_rx[name] = rx
         print(f"     {name}: wanted {p_a:.1f} dBm, SIR {sir} dB: {rx * 100:.1f} % received (formula {want * 100:.1f} %)")
-        check(abs(rx * n - want * n) < 4.5 * sigma + 1, f"{name}: {rx}, formula {want}")
-        if pnorm:
-            sum_rx = rx
-        else:
-            check(rx > sum_rx + 0.05, f"max {rx} not above sum {sum_rx}")
+        check(abs(rx * n - want * n) < 3.5 * sigma + 1, f"{name}: {rx}, formula {want}")
+    check(got_rx["layered max"] > got_rx["layered sum"] + 0.2, f"max not above sum: {got_rx}")
 
 
 def test_options():
@@ -347,7 +442,13 @@ def test_options():
                       (["--vtime=1", "--medium-rx-model=x"], "empirical or layered"),
                       (["--vtime=1", "--medium-burst=1,2,3,all"], "link, rx or node"),
                       (["--vtime=1", "--medium-node-share=2"], "expected a number"),
-                      (["--vtime=1", "--medium-combine=0.1"], "expected a number")):
+                      (["--vtime=1", "--medium-combine=0.1"], "expected a number"),
+                      (["--vtime=1", "--medium-rx-curve=9,1"], "needs --medium-rx-model=layered"),
+                      (["--vtime=1", "--medium-node-share=0.5"], "needs --medium-shadowing"),
+                      (["--vtime=1", "--medium-fading-bc=3"], "needs fading"),
+                      (["--vtime=1", "--medium-rx-model=layered", "--medium-fading-bc=inf", "--medium-chan-spacing=200"],
+                       "needs frequency-selective"),
+                      (["--vtime=1", "--medium-reciprocal=off"], "needs --medium-fading")):
         srv = Server(args)
         check(srv.wait() != 0 and msg in srv.output(), f"{args} accepted, or no \"{msg}\"")
     r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2)}
@@ -355,6 +456,10 @@ def test_options():
     with open(os.path.join(ARGS.logdir, "medium.log")) as f:
         check(all(len(ln.split()) == 7 for ln in f), "default: not 7 columns")
     check("link variation" not in out and "receiver curve" not in out, "default: channel lines printed")
+    # --medium-combine where interference counts as noise: a warning
+    r = {1: Radio(1, {1000: [("tx", {})]}), 2: Radio(2)}
+    d, out, rows = medium_run(r, [(1, 2, -80)], opts=["--medium-combine=sum", "--medium-model=em4"])
+    check("--medium-combine does not apply to it" in out, "em4 with --medium-combine: no warning")
 
 
 def main():
@@ -380,7 +485,10 @@ def main():
         ("reciprocity", test_reciprocity),
         ("node_share", test_node_share),
         ("bursts", test_bursts),
+        ("short_lags", test_short_lags),
+        ("frequency", test_frequency),
         ("layered_average", test_layered_average),
+        ("variation_everywhere", test_variation_everywhere),
         ("log_matches_dump", test_log_matches_dump),
         ("run_determinism", test_run_determinism),
         ("combination", test_combination),

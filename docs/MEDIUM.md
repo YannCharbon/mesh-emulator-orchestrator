@@ -397,7 +397,7 @@ Root repo `documents/pre-study/investigation/Investigation_Nanostack_Emulator.md
 | --- | --- | --- |
 | 1. Mean link level | `link(rx, tx)` and `--medium-tx-ref` (§2) | unchanged |
 | 2. Slow shadowing | Gauss-Markov process per link, optional share per node | §12.1 |
-| 3. Fast fading | Rician envelope with a coherence time | §12.1 |
+| 3. Fast fading | Rician envelope with a coherence time and a coherence bandwidth across channels | §12.1 |
 | Loss bursts | Gilbert-Elliott process per link, receiver or node | §12.2 |
 | 5. Receiver decision | empirical curve, or a steep curve meant to be used with fading; noise and interference combined | §12.3, §12.4 |
 
@@ -407,11 +407,12 @@ Layer 4 (interference) is §2 and §3. Layer 6 (the reported RSSI with its own m
 
 The received power of a frame at a receiver is `P = link(rx, tx) + S + F + B`, in dB, evaluated once per frame and receiver at the frame's start (`t_start`, including an `"xl"` preamble) and kept for the whole frame. Every use of that power takes this value: the lock decision and capture (§3), the frame as an interferer of other frames (§2), CCA energy (§6), preamble sniffing (§10), the verdict's `rx_dbm` and the medium log. An edge without a value (0 dBm, a perfect link) does not vary.
 
-- **Slow shadowing `S`** (`--medium-shadowing=SIGMA_DB,TAU_S`): a stationary Gauss-Markov process with standard deviation `SIGMA_DB` and autocorrelation `exp(−Δt / TAU_S)`. With `--medium-node-share=F`, `S = SIGMA_DB · (√(1 − F) · s_link + √(F / 2) · (s_rx + s_tx))`, with `s_link`, `s_rx`, `s_tx` independent unit processes, the last two shared by every link of their node. The variance stays `SIGMA_DB²`, and two links with one node in common correlate by `F / 2`: for example the two links from a child to its two parents.
-- **Fast fading `F`** (`--medium-fading=K,TC_S`): the power gain of a Rician envelope with factor `K` (linear, the power of the direct component over the scattered power; `K = 0` is Rayleigh) and mean power 1: `F = 10·log10(|√(K/(K+1)) + √(1/(2(K+1))) · (x + j·y)|²)`, with `x` and `y` independent unit Gauss-Markov processes with time constant `TC_S`. The power gain's autocorrelation at lag Δt is `(ρ² + 2Kρ) / (1 + 2K)`, `ρ = exp(−Δt / TC_S)`.
-- **Reciprocity** (`--medium-reciprocal=on`, the default): a link's processes are the same in both directions, as the channel between two antennas is at one frequency and time. Asymmetric mean levels (different TX powers, noise or antennas) stay in `link(rx, tx)` (§2). `off`: each direction has its own processes.
+- **Slow shadowing `S`** (`--medium-shadowing=SIGMA_DB,TAU_S`): a stationary Gauss-Markov (Ornstein-Uhlenbeck) process with standard deviation `SIGMA_DB` and autocorrelation `exp(−Δt / TAU_S)`. With `--medium-node-share=F`, `S = SIGMA_DB · (√(1 − F) · s_link + √(F / 2) · (s_rx + s_tx))`, with `s_link`, `s_rx`, `s_tx` independent unit processes, the last two shared by every link of their node. The variance stays `SIGMA_DB²`, and two links with one node in common correlate by `F / 2`: for example the two links from a child to its two parents.
+- **Fast fading `F`** (`--medium-fading=K,TC_S`): the power gain of a Rician envelope with factor `K` (linear, the power of the direct component over the scattered power; `K = 0` is Rayleigh) and mean power 1: `F = 10·log10(|√(K/(K+1)) + √(1/(K+1)) · s|²)`, with `s` the scattered part, a circular complex Gaussian of unit power. In time, the scattered field's correlation is `ρ = exp(−Δt / TC_S)`: **`TC_S` is the lag at which the field correlation falls to e⁻¹** (Gauss-Markov), and the power gain's correlation is `(ρ² + 2Kρ) / (1 + 2K)`.
+- **Across channels** (`--medium-fading-bc=MHZ`, 5.5 MHz; `inf`: the same fading on every channel). `s` is the sum of 8 taps of equal power, each an independent complex Gauss-Markov process in time, with delays `τ_l` drawn once per link from an exponential distribution of mean `σ_τ`; on channel `c` tap `l` turns by `exp(−j 2π f_c τ_l)`, `f_c = c · spacing`. Each channel's marginal stays Rician with factor `K`. On average over links, the scattered field's correlation between two channels `Δf` apart has magnitude `1 / √(1 + (2π σ_τ Δf)²)` (an exponential power delay profile), and `σ_τ = √3 / (2π B_c)`, so that it is 0.5 at the coherence bandwidth `B_c`. A single link, with its 8 delays, has its own correlation around that mean; the power correlation of two distant channels does not fall below about 1/8 (Rayleigh). The direct component has delay 0 and is the same on every channel. The spacing (`--medium-chan-spacing=KHZ`) comes from the frame's data rate by default: 100 kHz at 50 kbit/s (Wi-SUN FAN EU mode 1a), 200 kHz at any other rate (EU mode 3 at 150 kbit/s). The medium knows only the channel number and the rate of a frame, not the band: NA mode 1b (50 kbit/s, 200 kHz) or mode 3 (400 kHz) need the option. Channel 0's frequency is irrelevant (only differences count).
+- **Reciprocity** (`--medium-reciprocal=on`, the default): a link's processes (shadowing, fading taps and delays, link bursts) are the same in both directions, as the channel between two antennas is at one frequency and time. Asymmetric mean levels (different TX powers, noise or antennas) stay in `link(rx, tx)` (§2). `off`: each direction has its own link processes. The node terms are a node's own and stay common to both directions: with `--medium-node-share` or node-scope bursts, the two directions of a link remain correlated (by the node share, or through the common node state) even with `off`.
 
-**Determinism.** Each Gaussian process is defined on a grid of step `τ / 8`. Its value at grid point `k` is the stationary AR(1) sum `x_k = c · Σ_{m=0..M} a^m g_{k−m}` with `a = exp(−1/8)`, normalised to unit variance, truncated at `a^M < 10⁻³` (57 terms), and `g_j` unit Gaussians drawn by a counter-based generator from (run seed, process, link, `j`). Between grid points the value is interpolated linearly and rescaled to unit variance. A value therefore depends only on the seed, the link and the time, not on which queries came before or in what order. The cache only holds computed values. The streams are separate from the verdict and detection streams (§7, §10.2), so switching variation on does not change the draws of the other parts of the medium. Cost: 200 000 samples of fading and shadowing of one link, 50 ms apart, take 0.28 s (`--medium-var-dump`); a grid point costs 57 Gaussian draws and is computed when a link's time enters a new grid cell.
+**Determinism.** Every Gaussian process is an exact Ornstein-Uhlenbeck process built from the top down, so that its value at `t` depends only on (run seed, process, link, `t`). Anchors every `8τ` form an AR(1) of coefficient `e⁻⁸`; between two anchors, the interval holding `t` is halved repeatedly, each midpoint drawn from the exact bridge distribution given its interval's ends (mean `r (x_lo + x_hi) / (1 + r²)`, variance `(1 − r²) / (1 + r²)`, `r = e^(−half interval / τ)`), down to `max(1 µs, τ / 16384)` (18 µs at 0.3 s), then interpolated linearly. Each draw comes from a counter-based generator keyed by the anchor, the level and the interval. The values at any set of times have the exact joint distribution of the process at every lag down to that resolution, whatever the order or number of the queries. Each process caches its two anchors and the first 12 midpoints of its last path: values, never state, so a cached value is the one a fresh computation gives. The streams are separate from the verdict and detection streams (§7, §10.2). Cost: about 3 µs per sample with 8-tap fading and shadowing (`--medium-var-dump`, 200 000 samples 50 ms apart in 0.69 s); about 340 bytes per cached process (8 per link with frequency-selective fading, about 40 MB for 15 000 links). The hidden star of §12.7 with the layered model runs within 5 % of the empirical wall time.
 
 ### 12.2 Loss bursts
 
@@ -421,11 +422,11 @@ The received power of a frame at a receiver is `P = link(rx, tx) + S + F + B`, i
 - `rx`: one process per receiver, shared by all the links it hears (a receiver blocked or detuned);
 - `node`: one process per node, and a link is in the bad state when either end is: a body or an obstacle at a node attenuates all its links, both ways. A link is then bad a share `1 − (1 − p)²` of the time, `p` the share of one node.
 
-The attenuation applies to the frames as wanted signals and as interferers, like `S` and `F`. External noise rising at a receiver (other users of the band) is interference, not attenuation, and is not this process.
+Each process caches its current sojourn: a query walks forward from it, so the cost is proportional to the number of sojourns between two queries of the process (one or none for queries closer than the mean sojourn), and a query earlier than the cached sojourn starts again from time 0 (the conductor's time only moves forward; only `--medium-var-dump`'s `shuffle` does that). The attenuation applies to the frames as wanted signals and as interferers, like `S` and `F`. External noise rising at a receiver (other users of the band) is interference, not attenuation, and is not this process.
 
 ### 12.3 Receiver curve and its calibration
 
-`--medium-rx-model=layered` replaces the noise curve of §2 by a steep receiver curve of the same form, `BER = min(0.5, 0.5 · exp(−(SNR − X0) / B))` with `--medium-rx-curve=X0,B` (9.0 dB, 0.9 dB). It also switches Rician fading on with `K = 10` and `TC_S = 0.4 s`, unless `--medium-fading` is given, and makes `sum` the default combination (§12.4). The preamble sniff's `ber:N` curve (§10.2) uses the same noise curve.
+`--medium-rx-model=layered` replaces the noise curve of §2 by a steep receiver curve of the same form, `BER = min(0.5, 0.5 · exp(−(SNR − X0) / B))` with `--medium-rx-curve=X0,B` (9.0 dB, 0.9 dB). It also switches Rician fading on with `K = 10`, `TC_S = 0.3 s` and `B_c = 5.5 MHz`, unless `--medium-fading` is given, and makes `sum` the default combination (§12.4). The preamble sniff's `ber:N` curve (§10.2) uses the same noise curve.
 
 The empirical curve (§2) is the average behaviour of real links: it already contains fading. The steep curve is chosen so that, averaged over the default fading, the loss rate against the mean level reproduces it:
 
@@ -457,7 +458,7 @@ Changing K, the coherence time, shadowing or bursts changes the average loss: th
 
 ### 12.4 Noise and interference together
 
-§2 takes the larger of the noise and interference error rates, which is optimistic near sensitivity (§9.1). With `--medium-combine=P`, the interference is first converted into the noise power that gives the same error rate on the noise curve, `I_eq = P_s / 10^(SNR_eq / 10)` with `SNR_eq = X0 + (SIR − x0_int) · B / b_int` (`x0_int`, `b_int` the measured curve of the frame's profile, §2.1), and the two disturbances are combined as `D = (N^p + I_eq^p)^(1/p)`. The bit error rate is the noise curve of `P_s / D`. Without interference this is the noise curve, without noise the measured interference curve. `p = 1` (`sum`) adds the powers, `p → ∞` is the larger one (`max`).
+§2 takes the larger of the noise and interference error rates, which is optimistic near sensitivity (§9.1). With `--medium-combine=P`, the interference is first converted into the noise power that gives the same error rate on the noise curve, `I_eq = P_s / 10^(SNR_eq / 10)` with `SNR_eq = X0 + (SIR − x0_int) · B / b_int` (`x0_int`, `b_int` the measured curve of the frame's profile, §2.1), and the two disturbances are combined as `D = (N^p + I_eq^p)^(1/p)`. The bit error rate is the noise curve of `P_s / D`. Without interference this is the noise curve, without noise the measured interference curve. `p = 1` (`sum`) adds the powers, `p → ∞` is the larger one (`max`). For a profile where interference counts as noise (`--medium-model=em4`, or `--medium-int-curve=[MODE:]noise`), the noise curve of the SINR applies and `--medium-combine` has no effect on it: the server warns at the start for each such profile.
 
 The datasheet's co-channel rejection is measured with the wanted signal 3 dB above sensitivity (§9.1): the noise alone then uses half of the margin, and the interferer must be weaker than its own 10 % point. With equal slopes (`B = b_int`, the default) the SIR for 10 % loss is the interference-only point plus 0 dB (`max`), 0.62 dB (`p = 2`) or 3.0 dB (`sum`). With the kits' 10 % SIR (§9.1: 3.8 dB in mode 3, 50-byte frame; 4.25 dB in mode 1a from its curve):
 
@@ -475,16 +476,20 @@ All are user settings, refused with `--medium=legacy` (central medium only, virt
 | Option | Default | Source or reason |
 | --- | --- | --- |
 | `--medium-rx-model=empirical\|layered` | `empirical` | the radio's field-fitted curve stays the reference (Investigation §5) |
-| `--medium-rx-curve=X0,B` | 9.0, 0.9 dB | §12.3: B the kits' measured slope, X0 the fit |
+| `--medium-rx-curve=X0,B` | 9.0, 0.9 dB | §12.3: B the kits' measured slope, X0 the fit. Refused without `--medium-rx-model=layered` |
 | `--medium-combine=max\|sum\|P` | `max` (empirical), `sum` (layered) | §12.4 |
-| `--medium-fading=K,TC_S\|off` | off (empirical); 10, 0.4 s (layered) | K: §12.3. Coherence time: nodes are static and the channel changes with people moving. IEEE 802.11 TGn channel models (Erceg et al., IEEE 802.11-03/940r4) use an environment speed of 1.2 km/h, which gives a Doppler spread `f_d = v / λ` of 1.0 Hz at 915 MHz (0.97 Hz at 868 MHz), and `T_c ≈ 0.423 / f_d` ≈ 0.42 s (Rappaport, *Wireless Communications*, §5.4.3) |
+| `--medium-fading=K,TC_S\|off` | off (empirical); 10, 0.3 s (layered) | K: §12.3. `TC_S` is the lag of field correlation e⁻¹ (§12.1). Nodes are static and the channel changes with people moving: IEEE 802.11 TGn channel models (Erceg et al., IEEE 802.11-03/940r4) use an environment speed of 1.2 km/h, a Doppler `f_d = v / λ` of 1.0 Hz at 915 MHz (0.96 Hz at 868 MHz). For Clarke's spectrum the field correlation `J0(2π f_d Δt)` is e⁻¹ at `Δt = 0.279 / f_d`: 0.27 s at 915 MHz, 0.29 s at 868 MHz, hence 0.3 s. Rappaport's rule of thumb `T_c ≈ 0.423 / f_d` (*Wireless Communications*, §5.4.3) is a different definition (a geometric mean of two criteria) and would give 0.42 s |
+| `--medium-fading-bc=MHZ\|inf` | 5.5 MHz | §12.1. Indoor RMS delay spreads of a few tens of ns up to about 100 ns are reported for office and residential buildings (Hashemi, "The indoor radio propagation channel", Proc. IEEE 81(7), 1993). 5.5 MHz is `σ_τ` = 50 ns in this model; Rappaport's rule `B_c ≈ 1 / (5 σ_τ)` (§5.4.2, 0.5 correlation) gives 4 MHz for the same delay spread. Refused without fading |
+| `--medium-chan-spacing=KHZ` | from the data rate (§12.1) | Wi-SUN FAN EU channel plans; refused without frequency-selective fading |
 | `--medium-shadowing=SIGMA_DB,TAU_S\|off` | off | The mean link value already holds the location's shadowing. How much a static link's level wanders over minutes to hours depends on the building and its activity, and no measured value is available. Illustration in §12.7: 4 dB, 60 s |
-| `--medium-node-share=F` | 0 | no source; with F, links sharing a node correlate by F / 2 |
-| `--medium-reciprocal=on\|off` | `on` | channel reciprocity (§12.1) |
+| `--medium-node-share=F` | 0 | no source; with F, links sharing a node correlate by F / 2. Refused without shadowing |
+| `--medium-reciprocal=on\|off` | `on` | channel reciprocity (§12.1). Refused when nothing varies |
 | `--medium-burst=GOOD_S,BAD_S,DB[,link\|rx\|node]\|off` | off | Burst lengths should come from field data, for example sequence-number gaps in real logs (Investigation §5) |
-| `--medium-var-dump=RX,TX,FROM_S,STEP_S,COUNT[,shuffle]` | none | prints `rx tx t_us shadow_db fading_db bad` for COUNT times from FROM_S every STEP_S (the seed from `WSSIM_SEED`), in a shuffled query order with `shuffle`, and exits: for tests and plots |
+| `--medium-var-dump=RX,TX,FROM_S,STEP_S,COUNT[,shuffle][,ch=N\|hop=N][,rate=BPS]` | none | prints `rx tx t_us shadow_db fading_db bad` for COUNT times from FROM_S every STEP_S (the seed from `WSSIM_SEED`), on channel N (0), or sample `i` on channel `7i mod N`, at rate BPS (150000, for the spacing), in a shuffled query order with `shuffle`, and exits: for tests and plots |
 
-The server prints the settings at the start (`medium: receiver curve ...`, `medium: fading ...`) and, at the end, the number of samples, those in a bad state, the processes and the grid points computed.
+The server prints the settings at the start (`medium: receiver curve ...`, `medium: fading ...`) and, at the end, the number of samples, those in a bad state, the Gaussian pairs drawn and the processes cached.
+
+Options are matched by `getopt_long`, which also accepts unambiguous abbreviations; the new names make some earlier abbreviations ambiguous (`--medium-b` was `--medium-break-db`, now also `--medium-burst`). No script of the emulator uses an abbreviated `--medium-*` option.
 
 ### 12.6 Medium log
 
@@ -492,38 +497,49 @@ When a link varies (fading, shadowing or bursts on), each `--medium-log` line ha
 
 ### 12.7 Demonstrations
 
-**Loss runs and two parents** (`sim_utils/vtime/demo_link_variation.py`, fake nodes; 24 runs, 15 s of wall time in all): a child sends a 100-byte frame every second for 3600 s; two parents hear it at the same mean level. Totals over seeds 1–3 and both parents (21 600 frames per model). A run is a series of consecutive frames lost at one parent; "both/indep" is the number of frames lost at both parents divided by the number expected if the two losses were independent.
+**Loss runs and two parents** (`sim_utils/vtime/demo_link_variation.py --hop`, fake nodes; 36 runs, about 2.5 min of wall time in all, most of it the hopping table): a child sends a 100-byte frame every second for 3600 s; two parents hear it at the same mean level. Totals over seeds 1–3 and both parents (21 600 frames per model). A run is a series of consecutive frames lost at one parent; "both/indep" is the number of frames lost at both parents divided by the number expected if the two losses were independent.
 
 | Model | Mean level | Loss | Runs | Mean run | Longest | Losses in runs ≥ 2 | Lost at both | Both / indep |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | empirical | −98 dBm | 0.82 % | 177 | 1.01 | 2 | 1.1 % | 1 | 1.3 |
-| layered (K 10, 0.4 s) | −98 dBm | 0.82 % | 174 | 1.02 | 3 | 3.9 % | 1 | 1.4 |
-| layered, shadowing 4 dB, 60 s, node share 0.5 | −98 dBm | 8.58 % | 1016 | 1.82 | 38 | 61.4 % | 114 | 1.5 |
-| layered, bursts 300 s / 10 s / 15 dB per node | −98 dBm | 7.75 % | 317 | 5.28 | 40 | 89.7 % | 442 | 6.6 |
-| layered, shadowing as above | −93 dBm | 0.73 % | 128 | 1.23 | 4 | 32.3 % | 0 | 0 |
-| layered, bursts 3600 s / 8 s / 15 dB per node | −98 dBm | 1.60 % | 188 | 1.84 | 18 | 51.2 % | 33 | 12.7 |
+| layered (K 10, 0.3 s, 5.5 MHz) | −98 dBm | 0.90 % | 194 | 1.01 | 2 | 1.0 % | 1 | 1.2 |
+| layered, shadowing 4 dB, 60 s, node share 0.5 | −98 dBm | 8.34 % | 977 | 1.84 | 88 | 62.0 % | 73 | 1.1 |
+| layered, bursts 300 s / 10 s / 15 dB per node | −98 dBm | 7.72 % | 315 | 5.29 | 40 | 89.6 % | 442 | 6.6 |
+| layered, shadowing as above | −93 dBm | 0.88 % | 136 | 1.40 | 11 | 37.9 % | 0 | 0 |
+| layered, bursts 3600 s / 8 s / 15 dB per node | −98 dBm | 1.69 % | 208 | 1.75 | 18 | 47.8 % | 33 | 10.8 |
 
-Frames one second apart are 2.5 coherence times apart, so the default fading alone leaves losses nearly independent from frame to frame and between parents, as the empirical curve does. Clustering in time and across parents comes from the slow layers (shadowing, bursts). Their values here are illustrations: without field data, the burst and shadowing figures are not predictions.
+Frames one second apart are 3.3 coherence times apart, so the default fading alone leaves losses nearly independent from frame to frame and between parents, as the empirical curve does. Clustering in time and across parents comes from the slow layers (shadowing, bursts). Their values here are illustrations: without field data, the burst and shadowing figures are not predictions.
 
-**Networks still form** (`medium_gate_dag.sh` and `medium_gate_star.sh` with `MODES=central`, seeds 1–3, `SIM_OPTS=--medium-rx-model=layered` against the default; 5 s and 28 s of wall time for the 6 runs of each):
+**Frequency hopping** (same script, `--hop`): the child sends 10 frames a second (0.1 s apart, a third of the coherence time) in mode 3 (150 kbit/s, 200 kHz), 900 s per run, seeds 1–3 (54 000 frames per model at the two parents), the layered model at −98 dBm; on one channel, or hopping over 35 channels in a pseudo-random order that the parents follow.
+
+| Channels | Fading across channels | Loss | Runs | Mean run | Longest | Losses in runs ≥ 2 |
+| --- | --- | --- | --- | --- | --- | --- |
+| one | — | 0.92 % | 415 | 1.20 | 5 | 28.2 % |
+| 35, hopping | flat (`--medium-fading-bc=inf`) | 0.91 % | 411 | 1.19 | 6 | 27.3 % |
+| 35, hopping | `B_c` 5.5 MHz (default) | 0.95 % | 458 | 1.12 | 5 | 19.8 % |
+| 35, hopping | `B_c` 1 MHz | 0.98 % | 514 | 1.03 | 2 | 6.0 % |
+
+With flat fading, hopping changes nothing: successive frames see the same fade. With frequency-selective fading, hopping spreads successive frames over channels up to 6.8 MHz apart, and the share of losses in runs falls from 27 % to 20 % (5.5 MHz) and 6 % (1 MHz, a delay spread of about 275 ns). The average loss stays the same, as it should: each channel keeps the same Rician distribution.
+
+**Networks still form** (`medium_gate_dag.sh` and `medium_gate_star.sh` with `MODES=central`, seeds 1–3, `SIM_OPTS=--medium-rx-model=layered` against the default; 5 s and 24 s of wall time for the 6 runs of each):
 
 | Scenario | Default (empirical) | Layered |
 | --- | --- | --- |
-| `dag_simple`, 600 s | 14/14 routers ready in every run, median ready 148, 140, 131 s; frames heard received 98.6 %, collisions 1.34 % | 14/14 in every run, 150, 142, 131 s; 98.3 %, 1.68 % |
-| Star, 40 routers in 4 hidden groups, 900 s, requests every 30 s from 300 s | 40/40 ready, median 116, 115, 99 s; frames heard received 92.0 %, collisions 7.5 %; requests received 2272 of 2280, echoed back 2271 | 40/40, 119, 117, 119 s; 91.5 %, 7.9 %; 2280 of 2280, echoed back 2260 (20 echoes lost, 19 of them in one run) |
+| `dag_simple`, 600 s | 14/14 routers ready in every run, median ready 148, 140, 131 s; frames heard received 98.6 %, collisions 1.34 % | 14/14 in every run, 155, 144, 125 s; 98.5 %, 1.52 % |
+| Star, 40 routers in 4 hidden groups, 900 s, requests every 30 s from 300 s | 40/40 ready, median 116, 115, 99 s; frames heard received 92.0 %, collisions 7.5 %; requests received 2272 of 2280, echoed back 2271 | 40/40, 114, 117, 109 s; 91.6 %, 7.8 %; 2280 of 2280, echoed back 2280 |
 
-Wall time per simulated second is unchanged within 5 % (star seed 1: 0.0203 against 0.0212 s).
+Wall time of the star runs: 11.6–12.1 s per run (empirical) and 12.1–12.3 s (layered, about 545 000 samples per run).
 
 ### 12.8 Checks
 
 - **Off by default:** with none of the options, `nonreg_dag_simple.sh` against `dag_simple_8c5677e` (10 of 10 seeds identical), `medium_gate_star.sh` hidden seed 1 (node logs identical with pointers masked, medium log byte-identical, server log identical apart from the connection order and the wall time, against a build of the commit before this module), `test_conductor.py` (38 tests), `test_sniff.py` (18), `radio_if/test_ref_client.py` (21) and the LFN quick suite (53 runs, before `channel` was added to it) pass.
-- `sim_utils/vtime/test_channel.py` (in the LFN suite as `channel`, about 7 s): shadowing (σ within 5 %, autocorrelation 0.37 at τ and 0.05 at 3τ within 0.04, also between grid points); fading (mean power, K from the moments, shares 3 dB and 6 dB below the mean against the Rician distribution, autocorrelation at the coherence time against the formula, Rayleigh with K = 0); determinism by seed, independence from the query order and from other links' queries; reciprocity on and off; the node share's correlation; bursts (share of time bad, mean sojourns, coefficient of variation about 1, link, receiver and node scopes); through the medium, the layered loss rate at −90, −95 and −100 dBm against its average formula (within 4.5 σ) and within a factor 2.1 of the empirical curve; the medium log's variation against the dump; a run's determinism; the combination near sensitivity (`sum` and `max` against their formulas); the options.
+- `sim_utils/vtime/test_channel.py` (in the LFN suite as `channel`, about 11 s, 15 tests): shadowing (σ within 3 %, autocorrelation 0.37 at τ and 0.05 at 3τ within 0.02, also at other times); short lags at times that are no anchor point (1 − ρ within 5 % of `1 − exp(−Δt/τ)` at 0.002 τ, 0.05 τ and τ/16; the fading power at 0.01 `TC_S`); fading (mean power, K from the moments, shares 3 dB and 6 dB below the mean against the Rician distribution, autocorrelation at the coherence time against the formula, Rayleigh with K = 0); across channels (Rayleigh power correlation of 100 links at 1, 5.4 and 20 MHz against `1/8 + (7/8) / (1 + (2π σ_τ Δf)²)` within 0.07; `inf` identical on every channel); determinism by seed, independence from the query order and from other links' queries; reciprocity on and off; the node share's correlation; bursts (share of time bad, mean sojourns, coefficient of variation about 1, link, receiver and node scopes); through the medium, the measured layered loss rate at −90, −95 and −100 dBm against its average formula (within 4 σ), and at −100 dBm within a factor 2.5 of the empirical curve; the variation in an interferer's power and in CCA energy (30 cases: sensed energy and lowest SINR from the varied powers of the log); the medium log's variation against the dump, and `rx_dbm` with bursts; a run's determinism; the combination near sensitivity (layered `sum` and `max`, empirical `sum`, each against its formula within 3.5 σ over 2000 frames); the options, the refusals of options without effect and the warning of §12.4.
 
 ### 12.9 Limits
 
-- The variation is frozen over a frame: correct for frames much shorter than the coherence time (a 250-byte frame at 50 kbit/s lasts 42 ms against 0.4 s), not for long `"xl"` preambles of a large share of `TC_S`.
-- Fading is the same on every channel: frequency hopping does not decorrelate it, whereas real fading changes from one channel to another beyond the coherence bandwidth. For hopping networks this overstates the correlation of successive frames on a slow link.
-- The time correlation is exponential (Gauss-Markov), not Clarke's Bessel shape; deep fades of a Rician channel with K = 10 are rare (1.2 % of the time more than 6 dB below the mean).
+- The variation is frozen over a frame: correct for frames much shorter than the coherence time (a 250-byte frame at 50 kbit/s lasts 42 ms against 0.3 s), not for long `"xl"` preambles of a large share of `TC_S`.
+- Frequency selectivity uses 8 taps per link: a link's correlation between distant channels does not fall below about 1/8 in power (Rayleigh), and each link's correlation varies around the mean of §12.1. The medium does not know the band: the channel spacing comes from the data rate unless set (§12.1). Shadowing and bursts are the same on every channel.
+- The time correlation is exponential (Gauss-Markov), not Clarke's Bessel shape, and linear below `max(1 µs, τ / 16384)`; deep fades of a Rician channel with K = 10 are rare (1.2 % of the time more than 6 dB below the mean).
 - No measurement error on the reported RSSI (layer 6).
 - Burst and shadowing defaults are off for lack of field data, and the receiver curve's calibration holds for the default fading only (§12.3).
 - The combination exponent is not measured near sensitivity (§12.4).

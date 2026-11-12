@@ -4,21 +4,34 @@
  * docs/MEDIUM.md §12.
  *
  * Random access in time. Each Gaussian process (shadowing, the I and Q parts
- * of the fading's scattered component) is defined on a grid of step
- * tau / CHAN_GRID: its value at grid point k is the stationary AR(1) sum
- *     x_k = sqrt(1 - a^2) / norm * sum_{m=0..M} a^m g_{k-m},  a = exp(-1 / CHAN_GRID)
- * of unit Gaussians g_j drawn by a counter-based generator from (seed,
- * process, link, j), truncated where a^M < 1e-3 and renormalised to unit
- * variance. The correlation of two grid points j apart is a^j, so exp(-dt /
- * tau). Between grid points the value is interpolated linearly and
- * rescaled to unit variance. Every value is computed from the generator
- * alone (the cache holds values, never state that depends on the query
- * history), so a link's value at t is the same whatever was asked before.
+ * of each fading tap) is a stationary Ornstein-Uhlenbeck process with time
+ * constant tau: correlation exp(-|dt| / tau) at every lag. Its value at t is
+ * built top down, so that it depends only on (seed, process, link, t):
+ * - anchors every H = 8 tau: the stationary AR(1) of coefficient
+ *   A = exp(-8), x_K = sqrt(1 - A^2) (g_K + A g_{K-1} + A^2 g_{K-2}),
+ *   renormalised (the terms left out weigh A^6 ~ 1e-21);
+ * - between two anchors, the exact Ornstein-Uhlenbeck bridge: the midpoint
+ *   of an interval [lo, hi] with values xl, xh is Gaussian with mean
+ *   r (xl + xh) / (1 + r^2) and variance (1 - r^2) / (1 + r^2),
+ *   r = exp(-(hi - lo) / (2 tau)), its draw keyed by (anchor, level, index
+ *   of the interval); the interval holding t is halved down to 1 µs, and
+ *   the last microsecond is interpolated linearly.
+ * Values at any set of times then have the exact joint distribution of the
+ * process (Markov property), up to the final microsecond, whatever the
+ * order or number of the queries. No state is kept.
+ *
+ * Frequency selectivity: the scattered part of the fading is a sum of
+ * CHAN_TAPS taps of equal power with delays drawn per link from an
+ * exponential distribution of mean sigma_tau, each tap an independent
+ * complex process; on channel c the tap turns by exp(-j 2 pi f_c tau_l),
+ * f_c = c * spacing. The correlation of the scattered gain between two
+ * frequencies Df apart is, on average over links, 1 / (1 + j 2 pi sigma_tau Df).
  *
  * The burst process is a renewal process: alternating good and bad
  * sojourns with exponential lengths, the n-th drawn from (seed, link, n),
  * the first state drawn from the stationary probabilities. A query walks
- * the sojourns from the cached one (or from 0 for an earlier time).
+ * the sojourns from the cached one (or from 0 for an earlier time): the cost
+ * is proportional to the number of sojourns between two queries.
  */
 #define _GNU_SOURCE
 #include <math.h>
@@ -31,22 +44,41 @@
 
 // Separates the channel's streams from the medium's and the port's
 #define CHAN_RNG_K 0x6368616e6e656c01ULL
-#define CHAN_GRID 8             // grid points per time constant
-#define CHAN_TRUNC 1e-3         // the AR(1) sum stops where a^M falls below this
-#define CHAN_MAX_TERMS 128
+#define CHAN_ANCHOR 8           // anchors every 8 time constants
+#define CHAN_BRIDGE_TAG (1ULL << 60)
+#define CHAN_RES_US 1.0         // the bridge stops at this interval, or at
+#define CHAN_RES_TAU (1.0 / 16384) // this share of tau if larger
+#define CHAN_CACHE_LV 12        // bridge levels kept per process
+#define CHAN_TAPS 8             // fading taps of a frequency-selective link
 
-enum { CP_SHADOW_LINK = 1, CP_SHADOW_NODE, CP_FADING, CP_BURST_LINK, CP_BURST_NODE };
+enum { CP_SHADOW_LINK = 1, CP_SHADOW_NODE, CP_FADING, CP_BURST_LINK, CP_BURST_NODE, CP_TAP_DELAY, CP_TAP = 16 };
 enum { BURST_LINK, BURST_RX, BURST_NODE };
 static const char *const burst_scopes[] = { "link", "receiver", "node" };
 
+// Cache of one process: values only, all computed from the generator, so
+// a cached value is the value a fresh computation gives
 struct chan_ent {
     uint64_t key;               // 0: empty
-    // Gaussian processes: the values at grid points k and k + 1 (I, Q)
+    // Gaussian process: the anchors k, k + 1 and the bridge's first levels
+    // along the last path (the midpoint value of node idx[l] at level l)
     int64_t k;
-    double x0[2], x1[2];
+    double a0[2], a1[2];
+    int levels;
+    uint64_t idx[CHAN_CACHE_LV];
+    double xm[CHAN_CACHE_LV][2];
     // Burst process: sojourn n, [start, end), its state
     uint64_t n, start, end;
     bool bad;
+};
+
+struct chan_dump {
+    int rx, tx;
+    double t0, dt;
+    long n;
+    bool shuffle;
+    int chan;                   // the channel of every sample, unless hop
+    int hop;                    // > 0: sample i on channel (i * 7) % hop
+    uint32_t rate;
 };
 
 static struct {
@@ -65,28 +97,33 @@ static struct {
     bool burst;
     int burst_scope;            // BURST_*: one process per link, per receiver, or per node
     double good_s, bad_s, burst_db;
+    double bc_hz;               // coherence bandwidth, 0: flat fading
+    bool bc_given;
+    double spacing_hz;          // channel spacing, 0: from the data rate
+    bool node_share_given, reciprocal_given;
     // --medium-var-dump
     int n_dumps;
-    struct { int rx, tx; double t0, dt; long n; bool shuffle; } dumps[16];
+    struct chan_dump *dumps;
     // run
     bool started;
     uint64_t seed_k;
-    double a, w[CHAN_MAX_TERMS];
-    int terms;
+    double sigma_tau;           // s, from bc_hz
     struct chan_ent *tab;
     size_t cap, used;
-    uint64_t samples, bad_samples, grid_points;
+    uint64_t samples, bad_samples, draws;
 } ch = {
     .x0 = 9.0,
     .b = 0.9,
     .k_factor = 10,
-    .tc_s = 0.4,
+    .tc_s = 0.3,
     .reciprocal = true,
+    .bc_hz = 5.5e6,
 };
 
 const char *const chan_option_names[] = {
     "medium-rx-model", "medium-rx-curve", "medium-combine", "medium-fading", "medium-shadowing",
-    "medium-node-share", "medium-reciprocal", "medium-burst", "medium-var-dump", NULL
+    "medium-node-share", "medium-reciprocal", "medium-burst", "medium-var-dump", "medium-fading-bc",
+    "medium-chan-spacing", NULL
 };
 
 /* ---- options */
@@ -165,7 +202,14 @@ bool chan_set_option(const char *name, const char *arg)
         }
     } else if (!strcmp(name, "medium-node-share")) {
         ch.node_share = chan_number(name, arg, 0, 1);
+        ch.node_share_given = true;
+    } else if (!strcmp(name, "medium-fading-bc")) {
+        ch.bc_given = true;
+        ch.bc_hz = !strcmp(arg, "inf") ? 0 : chan_number(name, arg, 0.001, 1e6) * 1e6;
+    } else if (!strcmp(name, "medium-chan-spacing")) {
+        ch.spacing_hz = chan_number(name, arg, 1, 1e6) * 1e3;
     } else if (!strcmp(name, "medium-reciprocal")) {
+        ch.reciprocal_given = true;
         if (!strcmp(arg, "on"))
             ch.reciprocal = true;
         else if (!strcmp(arg, "off"))
@@ -193,17 +237,33 @@ bool chan_set_option(const char *name, const char *arg)
             ch.burst = true;
         }
     } else if (!strcmp(name, "medium-var-dump")) {
-        FATAL_ON(ch.n_dumps == 16, 1, "--medium-var-dump: at most 16");
-        n = chan_list(name, arg, w, 6);
-        FATAL_ON(n != 5 && n != 6, 1, "--medium-var-dump: expected RX,TX,FROM_S,STEP_S,COUNT[,shuffle]: %s", arg);
-        ch.dumps[ch.n_dumps].rx = chan_number(name, w[0], 0, 4095);
-        ch.dumps[ch.n_dumps].tx = chan_number(name, w[1], 0, 4095);
-        ch.dumps[ch.n_dumps].t0 = chan_number(name, w[2], 0, 1e9);
-        ch.dumps[ch.n_dumps].dt = chan_number(name, w[3], 1e-6, 1e9);
-        ch.dumps[ch.n_dumps].n = chan_number(name, w[4], 1, 1e8);
-        ch.dumps[ch.n_dumps].shuffle = n == 6;
-        FATAL_ON(n == 6 && strcmp(w[5], "shuffle"), 1, "--medium-var-dump: the 6th value is shuffle: %s", arg);
-        ch.n_dumps++;
+        struct chan_dump *d;
+        int i;
+
+        ch.dumps = realloc(ch.dumps, (ch.n_dumps + 1) * sizeof(*ch.dumps));
+        FATAL_ON(!ch.dumps, 1, "realloc: %m");
+        d = &ch.dumps[ch.n_dumps++];
+        memset(d, 0, sizeof(*d));
+        d->rate = 150000;
+        n = chan_list(name, arg, w, 8);
+        FATAL_ON(n < 5, 1, "--medium-var-dump: expected RX,TX,FROM_S,STEP_S,COUNT[,shuffle][,ch=N|hop=N][,rate=BPS]: %s", arg);
+        d->rx = chan_number(name, w[0], 0, 4095);
+        d->tx = chan_number(name, w[1], 0, 4095);
+        d->t0 = chan_number(name, w[2], 0, 1e9);
+        d->dt = chan_number(name, w[3], 1e-6, 1e9);
+        d->n = chan_number(name, w[4], 1, 1e8);
+        for (i = 5; i < n; i++) {
+            if (!strcmp(w[i], "shuffle"))
+                d->shuffle = true;
+            else if (!strncmp(w[i], "ch=", 3))
+                d->chan = chan_number(name, w[i] + 3, 0, 65535);
+            else if (!strncmp(w[i], "hop=", 4))
+                d->hop = chan_number(name, w[i] + 4, 1, 65535);
+            else if (!strncmp(w[i], "rate=", 5))
+                d->rate = chan_number(name, w[i] + 5, 1, 1e8);
+            else
+                FATAL(1, "--medium-var-dump: unknown %s: %s", w[i], arg);
+        }
     } else {
         return false;
     }
@@ -220,18 +280,24 @@ void chan_help(FILE *stream)
 {
     fprintf(stream, "  Link variation and the receiver curve (central medium, docs/MEDIUM.md §12; off by default):\n");
     fprintf(stream, "  --medium-rx-model=empirical|layered  noise curve: today's empirical one (the default) or\n");
-    fprintf(stream, "                            a steep receiver curve meant for fading (layered: fading 10,0.4)\n");
+    fprintf(stream, "                            a steep receiver curve meant for fading\n");
     fprintf(stream, "  --medium-rx-curve=X0,B    layered curve: BER 0.5 exp(-(SNR-X0)/B) (9.0,0.9)\n");
     fprintf(stream, "  --medium-combine=max|sum|P  noise and interference: the larger error rate (max, the\n");
     fprintf(stream, "                            empirical default) or the P-norm of their equivalent powers (sum = 1,\n");
     fprintf(stream, "                            the layered default)\n");
     fprintf(stream, "  --medium-fading=K,TC_S|off  Rician fading, K factor (linear), coherence time in s\n");
+    fprintf(stream, "                            (correlation e^-1 of the gain) (layered: 10,0.3)\n");
+    fprintf(stream, "  --medium-fading-bc=MHZ|inf  coherence bandwidth across channels, inf: the same fading\n");
+    fprintf(stream, "                            on every channel (5.5)\n");
+    fprintf(stream, "  --medium-chan-spacing=KHZ channel spacing for the fading (default from the data rate:\n");
+    fprintf(stream, "                            50 kbit/s 100, others 200)\n");
     fprintf(stream, "  --medium-shadowing=SIGMA_DB,TAU_S|off  slow shadowing (Gauss-Markov) (off)\n");
     fprintf(stream, "  --medium-node-share=F     share of the shadowing variance common to a node's links (0)\n");
     fprintf(stream, "  --medium-reciprocal=on|off  the same variation in both directions of a link (on)\n");
     fprintf(stream, "  --medium-burst=GOOD_S,BAD_S,DB[,link|rx|node]|off  loss bursts: mean good and bad\n");
     fprintf(stream, "                            durations, attenuation in the bad state, per link, receiver or node (off)\n");
-    fprintf(stream, "  --medium-var-dump=RX,TX,FROM_S,STEP_S,COUNT[,shuffle]  print a link's variation and exit\n");
+    fprintf(stream, "  --medium-var-dump=RX,TX,FROM_S,STEP_S,COUNT[,shuffle][,ch=N|hop=N][,rate=BPS]  print a\n");
+    fprintf(stream, "                            link's variation and exit\n");
 }
 
 /* ---- generator */
@@ -298,41 +364,82 @@ static struct chan_ent *chan_find(uint64_t key)
     return &ch.tab[i];
 }
 
-// x_k of the process (I and Q)
-static void chan_grid_value(uint64_t key, int64_t k, double x[2])
+// Two unit Gaussians of the anchor K of process key
+static void chan_anchor(uint64_t key, int64_t k, double x[2])
 {
-    double g[2];
+    static const double A = 3.3546262790251185e-04;     // exp(-CHAN_ANCHOR)
+    double g[2], w = 1, norm = 0;
     int m;
 
     x[0] = x[1] = 0;
-    for (m = 0; m < ch.terms; m++) {
+    for (m = 0; m < 3; m++) {
         chan_gauss2(key, k - m, g);
-        x[0] += ch.w[m] * g[0];
-        x[1] += ch.w[m] * g[1];
+        x[0] += w * g[0];
+        x[1] += w * g[1];
+        norm += w * w;
+        w *= A;
     }
-    ch.grid_points++;
+    x[0] /= sqrt(norm);
+    x[1] /= sqrt(norm);
+    ch.draws += 3;
 }
 
-// The process of key, time constant tau_us, at t: two unit Gaussians
+// The process of key (two independent unit Ornstein-Uhlenbeck processes,
+// time constant tau_us) at t
 static void chan_process(uint64_t key, double tau_us, uint64_t t, double v[2])
 {
     struct chan_ent *e = chan_find(key);
-    double s = t / (tau_us / CHAN_GRID);
-    int64_t k = (int64_t)floor(s);
-    double f = s - k, w0 = 1 - f, w1 = f, norm;
+    double h = tau_us * CHAN_ANCHOR, lo, hi, mid, xl[2], xh[2], xm[2], g[2], r, mean, sd, f;
+    double res = tau_us * CHAN_RES_TAU > CHAN_RES_US ? tau_us * CHAN_RES_TAU : CHAN_RES_US;
+    int64_t k = (int64_t)floor(t / h);
+    uint64_t idx = 0, bkey = key ^ CHAN_BRIDGE_TAG;
+    int level = 0, i;
 
     if (e->k != k) {
-        if (e->k != INT64_MIN && e->k + 1 == k) {
-            memcpy(e->x0, e->x1, sizeof(e->x0));
-        } else {
-            chan_grid_value(key, k, e->x0);
-        }
-        chan_grid_value(key, k + 1, e->x1);
+        if (e->k != INT64_MIN && e->k + 1 == k)
+            memcpy(e->a0, e->a1, sizeof(e->a0));
+        else
+            chan_anchor(key, k, e->a0);
+        chan_anchor(key, k + 1, e->a1);
         e->k = k;
+        e->levels = 0;
     }
-    norm = sqrt(w0 * w0 + w1 * w1 + 2 * w0 * w1 * ch.a);
-    v[0] = (w0 * e->x0[0] + w1 * e->x1[0]) / norm;
-    v[1] = (w0 * e->x0[1] + w1 * e->x1[1]) / norm;
+    lo = k * h;
+    hi = (k + 1) * h;
+    memcpy(xl, e->a0, sizeof(xl));
+    memcpy(xh, e->a1, sizeof(xh));
+    while (hi - lo > res && t != lo) {
+        mid = (lo + hi) / 2;
+        if (level < e->levels && e->idx[level] == idx) {
+            memcpy(xm, e->xm[level], sizeof(xm));
+        } else {
+            r = exp(-(mid - lo) / tau_us);
+            mean = r / (1 + r * r);
+            sd = sqrt((1 - r * r) / (1 + r * r));
+            chan_gauss2(bkey, (int64_t)mix64((uint64_t)k * 0x9e3779b97f4a7c15ULL + mix64(((uint64_t)level << 56) ^ idx)), g);
+            ch.draws++;
+            for (i = 0; i < 2; i++)
+                xm[i] = mean * (xl[i] + xh[i]) + sd * g[i];
+            if (level < CHAN_CACHE_LV) {
+                e->idx[level] = idx;
+                memcpy(e->xm[level], xm, sizeof(xm));
+                e->levels = level + 1;
+            }
+        }
+        idx *= 2;
+        if (t < mid) {
+            hi = mid;
+            memcpy(xh, xm, sizeof(xh));
+        } else {
+            lo = mid;
+            memcpy(xl, xm, sizeof(xl));
+            idx++;
+        }
+        level++;
+    }
+    f = hi > lo ? (t - lo) / (hi - lo) : 0;
+    for (i = 0; i < 2; i++)
+        v[i] = (1 - f) * xl[i] + f * xh[i];
 }
 
 // The burst state of key at t
@@ -367,6 +474,8 @@ static bool chan_burst_bad(uint64_t key, uint64_t t)
 
 /* ---- the run */
 
+static void chan_dump(void);
+
 bool chan_varies(void)
 {
     return ch.fading || ch.shadow || ch.burst;
@@ -385,31 +494,44 @@ bool chan_ber_custom(void)
 static void chan_resolve(void)
 {
     // The layered curve is calibrated against the empirical one with Rician
-    // fading K = 10 (docs/MEDIUM.md §12.4): on by default with it
+    // fading K = 10 (docs/MEDIUM.md §12.3): on by default with it
     if (ch.layered && !ch.fading_given)
         ch.fading = true;
     if (!ch.combine_given)
         ch.combine_p = ch.layered ? 1 : 0;
+    // Mean delay sigma_tau of an exponential delay profile whose average
+    // correlation magnitude 1 / sqrt(1 + (2 pi sigma_tau Df)^2) is 0.5 at Bc
+    ch.sigma_tau = ch.bc_hz > 0 ? sqrt(3) / (2 * M_PI * ch.bc_hz) : 0;
+}
+
+bool chan_combine_given(void)
+{
+    return ch.combine_given;
+}
+
+// After the command line: refuse options that would have no effect, then
+// print the --medium-var-dump samples and exit if asked
+void chan_options_done(void)
+{
+    chan_resolve();
+    FATAL_ON(ch.curve_given && !ch.layered, 1, "--medium-rx-curve needs --medium-rx-model=layered");
+    FATAL_ON(ch.node_share_given && !ch.shadow, 1, "--medium-node-share needs --medium-shadowing");
+    FATAL_ON(ch.bc_given && ch.bc_hz > 0 && !ch.fading, 1,
+             "--medium-fading-bc needs fading (--medium-fading, or --medium-rx-model=layered)");
+    FATAL_ON(ch.spacing_hz > 0 && !(ch.fading && ch.bc_hz > 0), 1,
+             "--medium-chan-spacing needs frequency-selective fading (--medium-fading-bc not inf)");
+    FATAL_ON(ch.reciprocal_given && !chan_varies(), 1,
+             "--medium-reciprocal needs --medium-fading, --medium-shadowing or --medium-burst");
+    if (ch.n_dumps)
+        chan_dump();
 }
 
 void chan_start(uint64_t seed)
 {
     char comb[32];
-    double c, sum = 0;
-    int m;
 
     chan_resolve();
     ch.seed_k = mix64(seed + CHAN_RNG_K);
-    ch.a = exp(-1.0 / CHAN_GRID);
-    ch.terms = (int)ceil(log(CHAN_TRUNC) / log(ch.a)) + 1;
-    BUG_ON(ch.terms > CHAN_MAX_TERMS);
-    c = sqrt(1 - ch.a * ch.a);
-    for (m = 0; m < ch.terms; m++) {
-        ch.w[m] = c * pow(ch.a, m);
-        sum += ch.w[m] * ch.w[m];
-    }
-    for (m = 0; m < ch.terms; m++)
-        ch.w[m] /= sqrt(sum);
     ch.started = true;
     if (!ch.given)
         return;
@@ -422,8 +544,12 @@ void chan_start(uint64_t seed)
              ch.x0, ch.b, comb);
     else
         INFO("medium: receiver curve empirical, noise and interference: %s", comb);
-    if (ch.fading)
-        INFO("medium: fading Rician K %g, coherence time %g s", ch.k_factor, ch.tc_s);
+    if (ch.fading && ch.bc_hz > 0)
+        INFO("medium: fading Rician K %g, coherence time %g s, coherence bandwidth %g MHz (%d taps, mean delay "
+             "%.1f ns), channel spacing %s", ch.k_factor, ch.tc_s, ch.bc_hz / 1e6, CHAN_TAPS, ch.sigma_tau * 1e9,
+             ch.spacing_hz > 0 ? "set" : "from the data rate");
+    else if (ch.fading)
+        INFO("medium: fading Rician K %g, coherence time %g s, the same on every channel", ch.k_factor, ch.tc_s);
     if (ch.shadow)
         INFO("medium: shadowing sigma %g dB, decorrelation time %g s, node share %g", ch.sigma_db, ch.tau_s,
              ch.node_share);
@@ -438,15 +564,55 @@ void chan_finish(void)
 {
     if (!chan_varies())
         return;
-    INFO("medium: link variation: %llu samples, %llu in a bad state, %zu processes, %llu grid points",
-         (unsigned long long)ch.samples, (unsigned long long)ch.bad_samples, ch.used,
-         (unsigned long long)ch.grid_points);
+    INFO("medium: link variation: %llu samples, %llu in a bad state, %llu Gaussian pairs drawn, %zu processes cached",
+         (unsigned long long)ch.samples, (unsigned long long)ch.bad_samples, (unsigned long long)ch.draws, ch.used);
     free(ch.tab);
     ch.tab = NULL;
     ch.cap = ch.used = 0;
 }
 
-void chan_apply(int rx, int tx, uint64_t t, bool perfect, float *dbm, struct chan_sample *s)
+// The channel spacing of a frame at rate_bps: Wi-SUN FAN EU mode 1a
+// (50 kbit/s) 100 kHz, mode 3 (150 kbit/s) 200 kHz; others 200 kHz
+static double chan_spacing(uint32_t rate_bps)
+{
+    if (ch.spacing_hz > 0)
+        return ch.spacing_hz;
+    return rate_bps == 50000 ? 100e3 : 200e3;
+}
+
+// The scattered part of the fading of link (a, b) on chan, unit power:
+// one complex process (flat), or CHAN_TAPS taps with their delays
+static void chan_scattered(int a, int b, uint64_t t, uint16_t chan, uint32_t rate_bps, double s[2])
+{
+    double v[2], u1, u2, tau, ph, c, sn, f;
+    int l;
+
+    if (ch.bc_hz <= 0) {
+        chan_process(chan_key(CP_FADING, a, b), ch.tc_s * 1e6, t, s);
+        s[0] /= sqrt(2);
+        s[1] /= sqrt(2);
+        return;
+    }
+    f = chan * chan_spacing(rate_bps);
+    s[0] = s[1] = 0;
+    for (l = 0; l < CHAN_TAPS; l++) {
+        chan_uniforms(chan_key(CP_TAP_DELAY, a, b), l, &u1, &u2);
+        tau = -ch.sigma_tau * log(u1);
+        // The phase in turns, reduced first: f * tau can be large
+        ph = f * tau;
+        ph -= floor(ph);
+        c = cos(2 * M_PI * ph);
+        sn = -sin(2 * M_PI * ph);
+        chan_process(chan_key(CP_TAP + l, a, b), ch.tc_s * 1e6, t, v);
+        s[0] += (v[0] * c - v[1] * sn);
+        s[1] += (v[0] * sn + v[1] * c);
+    }
+    s[0] /= sqrt(2.0 * CHAN_TAPS);
+    s[1] /= sqrt(2.0 * CHAN_TAPS);
+}
+
+void chan_apply(int rx, int tx, uint64_t t, uint16_t chan, uint32_t rate_bps, bool perfect, float *dbm,
+                struct chan_sample *s)
 {
     int a = rx, b = tx;
     double v[2], u[2], los, sc, re, im, gain, sh;
@@ -471,9 +637,9 @@ void chan_apply(int rx, int tx, uint64_t t, bool perfect, float *dbm, struct cha
         s->shadow_db = ch.sigma_db * sh;
     }
     if (ch.fading) {
-        chan_process(chan_key(CP_FADING, a, b), ch.tc_s * 1e6, t, v);
+        chan_scattered(a, b, t, chan, rate_bps, v);
         los = sqrt(ch.k_factor / (ch.k_factor + 1));
-        sc = sqrt(1 / (2 * (ch.k_factor + 1)));
+        sc = sqrt(1 / (ch.k_factor + 1));
         re = los + sc * v[0];
         im = sc * v[1];
         gain = re * re + im * im;
@@ -547,7 +713,7 @@ double chan_ber(double p_mw, double n_mw, double i_mw, bool int_noise, double x0
 
 /* ---- --medium-var-dump */
 
-void chan_dump_if_asked(void)
+static void chan_dump(void)
 {
     const char *seed_env = getenv("WSSIM_SEED");
     uint64_t seed = seed_env && *seed_env ? strtoull(seed_env, NULL, 0) : 1;
@@ -556,37 +722,34 @@ void chan_dump_if_asked(void)
     float dbm;
     int d;
 
-    if (!ch.n_dumps)
-        return;
     chan_start(seed);
     for (d = 0; d < ch.n_dumps; d++) {
-        long n = ch.dumps[d].n;
+        const struct chan_dump *x = &ch.dumps[d];
 
-        out = calloc(n, sizeof(*out));
-        order = calloc(n, sizeof(*order));
+        out = calloc(x->n, sizeof(*out));
+        order = calloc(x->n, sizeof(*order));
         FATAL_ON(!out || !order, 1, "calloc: %m");
-        for (j = 0; j < (uint64_t)n; j++)
+        for (j = 0; j < (uint64_t)x->n; j++)
             order[j] = j;
-        if (ch.dumps[d].shuffle) {
+        if (x->shuffle) {
             // Fisher-Yates from a stream of its own: queries in another order
-            for (j = n - 1; j > 0; j--) {
+            for (j = x->n - 1; j > 0; j--) {
                 r = mix64(seed + 0x7368756666ULL + j) % (j + 1);
                 tmp = order[j];
                 order[j] = order[r];
                 order[r] = tmp;
             }
         }
-        for (j = 0; j < (uint64_t)n; j++) {
+        for (j = 0; j < (uint64_t)x->n; j++) {
             uint64_t i = order[j];
 
             dbm = 0;
-            chan_apply(ch.dumps[d].rx, ch.dumps[d].tx, (uint64_t)llround((ch.dumps[d].t0 + i * ch.dumps[d].dt) * 1e6),
-                       false, &dbm, &out[i]);
+            chan_apply(x->rx, x->tx, (uint64_t)llround((x->t0 + i * x->dt) * 1e6),
+                       x->hop ? (uint16_t)(i * 7 % x->hop) : x->chan, x->rate, false, &dbm, &out[i]);
         }
-        for (j = 0; j < (uint64_t)n; j++)
-            printf("%d %d %llu %.6f %.6f %d\n", ch.dumps[d].rx, ch.dumps[d].tx,
-                   (unsigned long long)llround((ch.dumps[d].t0 + j * ch.dumps[d].dt) * 1e6), out[j].shadow_db,
-                   out[j].fading_db, out[j].bad);
+        for (j = 0; j < (uint64_t)x->n; j++)
+            printf("%d %d %llu %.6f %.6f %d\n", x->rx, x->tx, (unsigned long long)llround((x->t0 + j * x->dt) * 1e6),
+                   out[j].shadow_db, out[j].fading_db, out[j].bad);
         free(out);
         free(order);
     }
