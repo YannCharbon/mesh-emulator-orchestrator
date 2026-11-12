@@ -53,6 +53,7 @@ static const char *const outcome_names[MED_OUTCOMES] = {
 
 struct med_rx {
     int node;
+    bool pending;               // the link's variation not applied yet (med_rx_resolve())
     float dbm;
     double mw;
     struct chan_sample cs;      // the link's variation at the frame's start (§12)
@@ -204,7 +205,7 @@ struct med_phy_opt {
 static struct {
     bool given, tuning, central, mode_given;
     bool has_tx_ref;
-    int tx_max_mode;            // --medium-tx-max: 0 profile (default), 1 a value, 2 off
+    int tx_max_mode;            // --medium-tx-max: 0 profile, 1 a value, 2 off (the default; presets set it)
     float tx_max;
     bool em4;                   // --medium-model=em4
     float tx_ref, lock_snr;
@@ -212,6 +213,7 @@ static struct {
     struct med_phy_opt opts[MED_PHY_OPTS_MAX];
     int n_opts;
     uint64_t broken;            // sync searches broken (§3)
+    uint64_t smooth_below_lock; // smooth captures refused by the lock threshold
     struct med_lock *last_broken; // broken by the last med_decide()
     const char *log_path;
     FILE *log;
@@ -231,6 +233,7 @@ static struct {
     uint64_t rng_c[SIM_MAX_NODES];
     bool rng_c_set[SIM_MAX_NODES];
 } med = {
+    .tx_max_mode = 2,
     .lock_snr = 0,
 };
 
@@ -243,6 +246,7 @@ static struct {
 enum { SN_ADJ_OFF, SN_ADJ_ON, SN_ADJ_DETECT };
 // Separates the false-detection streams from the others
 #define SN_RNG_FALSE_K 0x736e66616c730001ULL
+#define SN_RNG_EXTRA_K 0x736e65787472610aULL  // external and adjacent candidates (§13.4)
 // The source of a detection that is no emulated frame (frame_id 0)
 #define SN_SRC_NONE 0xFFFF
 
@@ -290,6 +294,7 @@ static struct {
     bool has_threshold;
     float threshold;
     int curve_ber_bits;         // > 0: P = (1 - BER(SINR))^bits; 0: the table
+    bool energy_us_given;       // --sniff-energy-us
     bool curve_given;           // --sniff-curve given (else the layered model takes ber:16)
     int curve_n;
     float curve_x[SN_CURVE_MAX], curve_p[SN_CURVE_MAX];
@@ -620,6 +625,7 @@ void med_set_sniff_energy_us(const char *arg)
 
     FATAL_ON(v != (uint32_t)v, 1, "--sniff-energy-us: expected a whole number: %s", arg);
     sn.energy_us = v;
+    sn.energy_us_given = true;
 }
 
 // --sniff-false=P (per window) or RATE/s (per second of listening)
@@ -719,6 +725,28 @@ static void med_phy_setup(void)
                 break;
             }
         }
+    }
+    // Options that would have no effect are refused, as in sim_channel.c
+    // (the presets' options never are: they set no such option)
+    for (i = 0; i < med.n_opts; i++) {
+        const struct med_phy_opt *o = &med.opts[i];
+        bool any = false;
+
+        if (o->field != PO_SMOOTH)
+            continue;
+        for (p = 0; p < MED_PHYS; p++)
+            any |= (o->mask & (1u << p)) && med.phy[p].smooth;
+        FATAL_ON(!any, 1, "--medium-capture-smooth needs --medium-capture-model=smooth for its PHY");
+    }
+    FATAL_ON(sn.energy_us_given && !sn.has_energy, 1, "--sniff-energy-us needs --sniff-energy");
+    if (sn.adjacent != SN_ADJ_OFF) {
+        bool any = false;
+
+        for (p = 0; p < MED_PHYS; p++)
+            for (i = 0; i < med.phy[p].n_adj; i++)
+                any |= med.phy[p].adj_on[i];
+        FATAL_ON(!any, 1, "--sniff-adjacent needs an adjacent-channel coupling (--medium-adjacent-db or "
+                 "--medium-adjacent-table not all off)");
     }
 }
 
@@ -836,6 +864,13 @@ void med_set_preset_note(const char *name, const char *how, const char *opts)
     med_preset.opts = opts;
 }
 
+// --medium-tx-max: 1 and *dbm with a value, 0 for profile, -1 for off
+int med_tx_max(float *dbm)
+{
+    *dbm = med.tx_max;
+    return med.tx_max_mode == 1 ? 1 : med.tx_max_mode == 0 ? 0 : -1;
+}
+
 bool med_options_given(void)
 {
     return med.given;
@@ -905,10 +940,12 @@ static uint16_t med_chan(int node)
 // Received power: the link's value, the power at the sender's TX power, or at
 // --medium-tx-ref. An edge without a value (0) stays a perfect link.
 // The sender's radiated power: the TX power in the frame's header (what its
-// MAC asked for), at most the PA's maximum (--medium-tx-max; by default the
-// top of the sender's power profile's TX table, as the ledger clamps it;
-// no limit without a profile). Only links that depend on the TX power use
-// it: --medium-tx-ref and positions (§2, §11).
+// MAC asked for), at most the PA's maximum (--medium-tx-max: a value, 16.9
+// dBm in the calibrated and realistic presets; profile: the top of the
+// sender's power profile's TX table, as the ledger clamps it, which needs
+// --power; off, the basic preset's: no limit). It does not depend on
+// whether power is recorded. Only links that depend on the TX power use it:
+// --medium-tx-ref and positions (§2, §11).
 static float med_tx_eff(int src, int8_t tx_dbm)
 {
     double max = med.tx_max_mode == 1 ? med.tx_max : med.tx_max_mode == 0 ? pwr_tx_max_dbm(src) : NAN;
@@ -928,6 +965,23 @@ static float med_rx_dbm(int rx, int src, int8_t tx_dbm)
     return link + (med_tx_eff(src, tx_dbm) - med.tx_ref);
 }
 
+// The link's variation (§12) at the frame's start, applied when the power is
+// first needed: a receiver that neither listens on the frame's channel nor
+// asks for the energy there (CCA, sniffing, a frame it receives), without a
+// medium log, never needs it. The variation is a function of (seed, link,
+// time, channel) only, so the value does not depend on when it is computed.
+static struct med_rx *med_rx_resolve(const struct med_frame *f, const struct med_rx *crx)
+{
+    struct med_rx *rx = (struct med_rx *)crx;
+
+    if (rx->pending) {
+        rx->pending = false;
+        chan_apply(rx->node, f->src, f->t_start, f->chan, f->rate_bps, false, &rx->dbm, &rx->cs);
+        rx->mw = dbm_to_mw(rx->dbm);
+    }
+    return rx;
+}
+
 static const struct med_rx *med_find_rx(const struct med_frame *f, int node)
 {
     int lo = 0, hi = f->n_rx - 1, mid;
@@ -937,7 +991,7 @@ static const struct med_rx *med_find_rx(const struct med_frame *f, int node)
     while (lo <= hi) {
         mid = (lo + hi) / 2;
         if (f->rx[mid].node == node)
-            return &f->rx[mid];
+            return med_rx_resolve(f, &f->rx[mid]);
         if (f->rx[mid].node < node)
             lo = mid + 1;
         else
@@ -1262,8 +1316,9 @@ void med_start(uint64_t seed, const uint8_t *cca_shm, struct node_infos *links)
     if (med.tx_max_mode == 1)
         INFO("medium: radiated power at most %.1f dBm (--medium-tx-max)", med.tx_max);
     else if (med.tx_max_mode == 0)
-        INFO("medium: radiated power at most the top of each sender's power profile TX table%s",
-             pwr_enabled() ? "" : " (no profile: no limit)");
+        INFO("medium: radiated power at most the top of each sender's power profile TX table");
+    else
+        INFO("medium: radiated power not limited (--medium-tx-max=off)");
 }
 
 struct med_frame *med_frame_start(int src, const struct sim_frame_hdr *hdr, uint64_t now)
@@ -1343,9 +1398,11 @@ void med_add_rx(struct med_frame *f, int node)
     rx->node = node;
     rx->dbm = med_rx_dbm(node, f->src, f->tx_dbm);
     // Link variation (§12), over the mean from -g or the positions; an edge
-    // without a value (a perfect link) does not vary
-    chan_apply(node, f->src, f->t_start, f->chan, f->rate_bps,
-               !prop_modelled(node, f->src) && sim_link(med.links, node, f->src)->rssi == 0, &rx->dbm, &rx->cs);
+    // without a value (a perfect link) does not vary. Applied when needed
+    // (med_rx_resolve())
+    rx->pending = chan_varies() && (prop_modelled(node, f->src) || sim_link(med.links, node, f->src)->rssi != 0);
+    if (!rx->pending)
+        chan_apply(node, f->src, f->t_start, f->chan, f->rate_bps, true, &rx->dbm, &rx->cs);
     rx->mw = dbm_to_mw(rx->dbm);
 }
 
@@ -1503,7 +1560,6 @@ struct med_lock *med_decide(struct med_frame *f, int i, uint64_t now, float *rx_
     uint8_t state = med_state(rx->node);
     double snr;
 
-    *rx_dbm = rx->dbm;
     if (l && l->t_end <= now) {
         // Its frame ended: the verdict is queued, the receiver listens again
         med.locks[rx->node] = NULL;
@@ -1512,6 +1568,16 @@ struct med_lock *med_decide(struct med_frame *f, int i, uint64_t now, float *rx_
         med_end_lock(l, MED_LEFT, now);
         l = NULL;
     }
+    // Nothing to decide at a receiver that does not listen on the frame's
+    // channel and receives nothing it disturbs: its power is needed only for
+    // the medium log (or later, as energy, med_rx_resolve())
+    if (!med.log && rx->pending && !(l && (l->chan == f->chan || (l->active && med_coupled_mw(f, l->chan, 1)))) &&
+        (l || (state != SIM_RADIO_LISTEN && state != SIM_RADIO_RECEIVE) || med_chan(rx->node) != f->chan)) {
+        *rx_dbm = rx->dbm;      // the mean: the caller only logs it in this case
+        return NULL;
+    }
+    rx = med_rx_resolve(f, rx);
+    *rx_dbm = rx->dbm;
     snr = rx->dbm - mw_to_dbm(med.noise_mw + med_energy_mw(rx->node, f->chan, f, NULL) + med_ext_now(rx->node, f->chan, now));
     if (l && l->chan == f->chan) {
         const struct med_phy *x = &med.phy[l->phy];
@@ -1519,6 +1585,14 @@ struct med_lock *med_decide(struct med_frame *f, int i, uint64_t now, float *rx_
 
         if (x->smooth) {
             act = med_smooth_capture(l, x, rx->dbm - l->dbm, now);
+            // A capture is a lock: not below the lock threshold (§3 rule 2).
+            // The step model's margin (3 dB over a frame locked above the
+            // noise) always passes it; the smooth model captures from about
+            // 0 dB of margin
+            if (act == MED_ACT_CAPTURE && snr < med.lock_snr) {
+                med.smooth_below_lock++;
+                act = MED_ACT_NONE;
+            }
         } else {
             switch (med_sync_phase(l, now)) {
             case MED_SYNC_CAPTURE:
@@ -1692,29 +1766,73 @@ static double sn_uniform(int node)
     return (mix64(sn.rng[node] += 0x9e3779b97f4a7c15ULL) >> 11) * 0x1.0p-53;
 }
 
-// Detection probability of one dwell at this SINR (dB)
-static double sn_curve(double sinr)
+// A detection try of an external interferer's preamble or of a frame on
+// another channel (§13.4): a draw of its own, a hash of (seed, node, the
+// candidate, the dwell's end), so that these candidates do not shift the
+// draws of the node's stream for the emulated frames on its channel
+static double sn_uniform_extra(int node, const struct sn_heard *h)
 {
-    double ber;
-    int i, bits = sn.curve_ber_bits;
+    uint64_t z = mix64(med.seed + SN_RNG_EXTRA_K + mix64((uint64_t)node + 1));
 
-    // The kits' table is the default with the empirical receiver curve; the
-    // layered model's default is ber:16 on its own noise curve (§10.5)
-    if (!sn.curve_given && chan_layered())
-        bits = 16;
-    if (bits) {
-        ber = chan_layered() ? chan_noise_ber(sinr) : 0.5 * exp(-0.5 * sinr);
-        if (ber > 0.5)
-            ber = 0.5;
-        return exp(bits * log1p(-ber));
-    }
-    if (sinr <= sn.curve_x[0])
+    z = mix64(z + mix64(h->id ? h->id : 0x8000000000000000ULL + ((uint64_t)h->src << 40) + h->start));
+    return (mix64(z + h->next) >> 11) * 0x1.0p-53;
+}
+
+// The detection table (--sniff-curve=SINR:P,...) at x dB
+static double sn_table(double x)
+{
+    int i;
+
+    if (x <= sn.curve_x[0])
         return sn.curve_p[0];
     for (i = 1; i < sn.curve_n; i++)
-        if (sinr < sn.curve_x[i])
+        if (x < sn.curve_x[i])
             return sn.curve_p[i - 1] + (sn.curve_p[i] - sn.curve_p[i - 1]) *
-                   (sinr - sn.curve_x[i - 1]) / (sn.curve_x[i] - sn.curve_x[i - 1]);
+                   (x - sn.curve_x[i - 1]) / (sn.curve_x[i] - sn.curve_x[i - 1]);
     return sn.curve_p[sn.curve_n - 1];
+}
+
+// N bits without error on the medium's noise curve at snr (dB)
+static double sn_ber_bits(int bits, double snr)
+{
+    double ber = chan_layered() ? chan_noise_ber(snr) : 0.5 * exp(-0.5 * snr);
+
+    if (ber > 0.5)
+        ber = 0.5;
+    return exp(bits * log1p(-ber));
+}
+
+// Detection probability of one dwell of a frame received at p_mw, whose
+// lowest SINR over the dwell is sinr (dB)
+static double sn_curve(double p_mw, double sinr)
+{
+    double i_mw, p_int, ber_eq, i_eq;
+
+    if (sn.curve_ber_bits)
+        return sn_ber_bits(sn.curve_ber_bits, sinr);
+    if (sn.curve_given || !chan_layered())
+        return sn_table(sinr);
+    // The layered model's default (§10.5): 16 bits on its noise curve for
+    // the noise, the kits' table for the interference (measured against an
+    // FSK interferer), combined as reception combines them (§12.4): the
+    // interference counts as the noise power that gives the table's
+    // probability on the noise curve. The interference is the one at the
+    // dwell's lowest SINR.
+    i_mw = p_mw / pow(10, sinr / 10) - med.noise_mw;
+    if (!(i_mw > med.noise_mw * 1e-9))
+        return sn_ber_bits(16, sinr);
+    p_int = sn_table(10 * log10(p_mw / i_mw));
+    if (p_int <= 0)
+        return 0;
+    if (p_int >= 1) {
+        i_eq = 0;
+    } else {
+        ber_eq = -expm1(log(p_int) / 16);
+        if (ber_eq > 0.5)
+            ber_eq = 0.5;
+        i_eq = p_mw / pow(10, chan_noise_snr(ber_eq) / 10);
+    }
+    return sn_ber_bits(16, 10 * log10(p_mw / chan_combine(med.noise_mw, i_eq)));
 }
 
 static void sn_log(const struct sn_sniff *x, int node, int outcome, uint64_t now, const struct sim_sniff_result *res)
@@ -1967,11 +2085,11 @@ uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, ui
     if (!sn.next_serial) {
         bool layered16 = !sn.curve_given && chan_layered();
 
-        INFO("medium: sniffing: %s detection, dwell %u bits, threshold %s%.1f dBm, curve %s%d, SFD %u bits, "
+        INFO("medium: sniffing: %s detection, dwell %u bits, threshold %s%.1f dBm, curve %s%d%s, SFD %u bits, "
              "margin %u bits, settling %u us", sn.frame_mode ? "frame" : "preamble", sn.dwell_bits, sn.has_threshold ? "" : "off ",
-             sn.has_threshold ? sn.threshold : 0.0, layered16 || sn.curve_ber_bits ? "ber:" : "table of ",
-             layered16 ? 16 : sn.curve_ber_bits ? sn.curve_ber_bits : sn.curve_n, sn.sfd_bits, sn.margin_bits,
-             sn.settle_us);
+             sn.has_threshold ? sn.threshold : 0.0, sn.curve_ber_bits ? "ber:" : layered16 ? "ber:16 for the noise, " : "table of ",
+             sn.curve_ber_bits ? sn.curve_ber_bits : sn.curve_n, layered16 ? " points for the interference" : "",
+             sn.sfd_bits, sn.margin_bits, sn.settle_us);
     }
     if (!x) {
         x = sn.s[node] = calloc(1, sizeof(*x));
@@ -2065,9 +2183,9 @@ uint64_t med_sniff_frame(struct med_frame *f, int i, uint32_t *serial)
         // §13.4: a frame on another channel, where its power leaks
         if (!sn.adjacent || !med_coupled_mw(f, x->chan, 1))
             return MED_SNIFF_NONE;
-        sn_add_adj(x, f, rx);
+        sn_add_adj(x, f, med_rx_resolve(f, rx));
     } else {
-        sn_add(x, f, rx);
+        sn_add(x, f, med_rx_resolve(f, rx));
     }
     h = &x->h[x->n - 1];
     *serial = x->serial;
@@ -2281,7 +2399,7 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
         }
         h = best;
         sinr = sn_sinr_min(x, h, h->next - h->dwell, h->next);
-        p = sn.has_threshold && h->dbm < sn.threshold ? 0 : sn_curve(sinr);
+        p = sn.has_threshold && h->dbm < sn.threshold ? 0 : sn_curve(h->mw, sinr);
         // A receiver locked onto another frame (at its start, during the
         // window) is synchronised on it: it detects no other preamble
         l = med.locks[node];
@@ -2290,7 +2408,7 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
         detected = p >= 1;
         if (p > 0 && p < 1) {
             sn.draws++;
-            detected = sn_uniform(node) < p;
+            detected = (!h->id || h->adj ? sn_uniform_extra(node, h) : sn_uniform(node)) < p;
         }
         if (detected) {
             if (!h->id)
@@ -2373,7 +2491,8 @@ void med_finish(void)
     if (intf_any())
         INFO("medium: an external interferer on at %llu of the channel-energy queries", (unsigned long long)med.cca_ext);
     if (med.smooth_draws)
-        INFO("medium: %llu draws of the smooth capture model", (unsigned long long)med.smooth_draws);
+        INFO("medium: %llu draws of the smooth capture model, %llu captures below the lock threshold refused",
+             (unsigned long long)med.smooth_draws, (unsigned long long)med.smooth_below_lock);
     intf_finish();
     if (med.log)
         fclose(med.log);

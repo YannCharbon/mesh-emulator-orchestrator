@@ -66,6 +66,10 @@ bool chan_ber_custom(void);
 double chan_ber(double p_mw, double n_mw, double i_mw, bool int_noise, double x0i, double bi);
 // The noise curve of the model (a function of the SNR or SINR in dB)
 double chan_noise_ber(double snr_db);
+// Its inverse: the SNR (dB) of a bit error rate in (0, 0.5]
+double chan_noise_snr(double ber);
+// Noise and an equivalent interference power combined as chan_ber() does (mW)
+double chan_combine(double n_mw, double i_eq_mw);
 // The steep receiver curve is in use (--medium-rx-model=layered)
 bool chan_layered(void);
 

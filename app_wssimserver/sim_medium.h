@@ -26,6 +26,7 @@ struct med_lock;
 void med_set_mode(const char *arg);             // --medium=legacy|central
 void med_set_tx_ref(const char *arg);           // --medium-tx-ref=DBM
 void med_set_tx_max(const char *arg);           // --medium-tx-max=DBM|profile|off
+int med_tx_max(float *dbm);                     // 1 a value (*dbm), 0 profile, -1 off
 void med_set_lock_snr(const char *arg);         // --medium-lock-snr=DB
 void med_set_model(const char *arg);            // --medium-model=fg25|em4
 void med_set_capture_db(const char *arg);       // --medium-capture-db=[MODE:]DB

@@ -205,6 +205,24 @@ def test_graph_cutoff():
             check(len(at3) == 1 and at3[0][4] == "below_lock" and abs(at3[0][5] - want3) < 0.01, f"at 3: {at3}")
 
 
+def test_pa_limit():
+    """The PA maximum (--medium-tx-max, 16.9 dBm in the calibrated preset)
+    caps the nominal TX power of the graph and the RSSI map, so that the map
+    and a frame sent at 20 dBm agree (16.9 dBm minus the path loss); without
+    it (basic) the map is at --prop-tx-dbm (20)."""
+    pos = write("pa.pos", "1 0 0 0 0\n2 10 0 0 0\n")
+    pl = 20 * math.log10(915) - 28 + 33
+    for opts, want in (([], 20 - pl), (["--medium-tx-max=16.9"], 16.9 - pl),
+                       (["--medium-preset=calibrated"], 16.9 - pl), (["--medium-tx-max=25"], 20 - pl)):
+        out, r = build_only([f"--positions={pos}", "--prop-shadow=0", *opts])
+        check(abs(r[(2, 1)]["dbm"] - want) < 0.01, f"{opts}: map {r[(2, 1)]['dbm']}, want {want:.2f}")
+        check(("nominal TX power 16.9 dBm" in out) == (abs(want - (16.9 - pl)) < 0.01), f"{opts}: start line")
+    rad = {1: Radio(1, {1000: [("tx", {"tx_dbm": 20})]}), 2: Radio(2)}
+    d, out, rows = medium_run(rad, [], opts=[f"--positions={pos}", "--prop-shadow=0", "--medium-tx-max=16.9"])
+    x2 = got(rad[2], "xx")
+    check(len(x2) == 1 and abs(x2[0][1]["rx_dbm"] - (16.9 - pl)) < 0.01, f"frame at 2: {x2}")
+
+
 def test_tx_power_and_override():
     """The frame's TX power shifts the model's level; a -g value overrides the
     model for that pair (both directions), --medium-tx-ref applies to it only;
@@ -389,6 +407,7 @@ def main():
         ("formulas", test_formulas),
         ("shadowing", test_shadowing),
         ("graph_cutoff", test_graph_cutoff),
+        ("pa_limit", test_pa_limit),
         ("tx_power_and_override", test_tx_power_and_override),
         ("gen_building", test_gen_building),
         ("dump_node", test_dump_node),

@@ -82,6 +82,7 @@ const struct option prop_long_options[] = {
 #define K_NODE   0x6e6f64655f736864ULL  // shadowing term of a node
 #define K_ROFF   0x727373695f6f6666ULL  // RSSI offset of a receiver
 #define K_RNOISE 0x727373695f6e6f69ULL  // RSSI noise of a frame at a receiver
+#define K_RNOISE_T 0x727373695f6e6f74ULL // RSSI noise of a report that names no frame, by time
 #define K_INTF   0x696e74665f736864ULL  // shadowing of an external interferer's path to a node
 
 static struct {
@@ -300,6 +301,18 @@ void prop_check_options(bool central)
     FATAL_ON(prop.dump_node >= 0 && !prop.dump_path, 1, "--prop-dump-node needs --prop-dump");
     FATAL_ON((prop.rssi_offset > 0 || prop.rssi_noise > 0) && !central, 1,
              "--rssi-offset and --rssi-noise need the central medium (--vtime, not --medium=legacy)");
+}
+
+// The radiated power is at most max (the medium's PA maximum): the graph
+// and the RSSI map are made at the nominal TX power, at most max, so that
+// they agree with the frames' powers (§11.2, §11.5)
+void prop_limit_tx(double max)
+{
+    if (prop.tx_dbm > max) {
+        INFO("propagation: nominal TX power %.1f dBm: --prop-tx-dbm %.1f dBm is above the PA maximum "
+             "(--medium-tx-max)", max, prop.tx_dbm);
+        prop.tx_dbm = max;
+    }
 }
 
 bool prop_enabled(void)
@@ -644,7 +657,10 @@ bool prop_rssi_error(void)
     return prop.rssi_offset > 0 || prop.rssi_noise > 0;
 }
 
-float prop_reported_dbm(int rx, uint32_t frame_id, float dbm)
+// key: the frame's ID, or for a result that names no frame (a sniff's
+// energy, a false detection, an external interferer's preamble; frame ID 0)
+// its time, so that each such report has its own draw
+float prop_reported_dbm(int rx, uint32_t frame_id, uint64_t t_us, float dbm)
 {
     double e = 0;
 
@@ -658,6 +674,6 @@ float prop_reported_dbm(int rx, uint32_t frame_id, float dbm)
     if (prop.rssi_offset > 0)
         e += prop.rssi_offset * prop_normal(K_ROFF, rx, 0);
     if (prop.rssi_noise > 0)
-        e += prop.rssi_noise * prop_normal(K_RNOISE, rx, frame_id);
+        e += prop.rssi_noise * (frame_id ? prop_normal(K_RNOISE, rx, frame_id) : prop_normal(K_RNOISE_T, rx, t_us));
     return (float)(dbm + e);
 }

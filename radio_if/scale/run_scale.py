@@ -47,6 +47,10 @@ def main():
     p.add_argument("--client-opts", default="", help="more options for every client")
     p.add_argument("--server-opts", default="", help="more options for the server")
     p.add_argument("--topology-only", action="store_true")
+    p.add_argument("--positions", action="store_true",
+                   help="links from the server's propagation model (wssimserver --positions, docs/MEDIUM.md §11, "
+                        "its default indoor model unless --server-opts sets --prop-*) instead of the generator's: "
+                        "writes positions.txt, no topology file; the server's --prop-tx-dbm is --tx-dbm")
     p.add_argument("--group-args", action="store_true",
                    help="topology as -g arguments instead of --group-file (limited to about 2000 nodes by ARG_MAX)")
     a = p.parse_args()
@@ -71,7 +75,13 @@ def main():
     os.makedirs(nodes_dir)
     cmd = ["/usr/bin/time", "-f", "%e %U %S %M", "-o", os.path.join(a.out, "server_time.txt"),
            a.server, f"--vtime={n}", f"--vtime-end={a.duration}"]
-    if a.group_args:
+    if a.positions:
+        with open(os.path.join(a.out, "positions.txt"), "w") as f:
+            f.write("# id x_m y_m z_m floor\n")
+            for i, (x, y, z, fl) in enumerate(pos):
+                f.write(f"{i} {x:g} {y:g} {z:g} {fl}\n")
+        cmd += [f"--positions={os.path.join(a.out, 'positions.txt')}", f"--prop-tx-dbm={a.tx_dbm:g}"]
+    elif a.group_args:
         for (x, y), r in sorted(edges.items()):
             cmd += ["-g", f"{x},{y}:{r}"]
     else:

@@ -355,7 +355,7 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --medium-preset=calibrated|realistic|basic|em4  central: a set of medium options, given\n");
     fprintf(stream, "                            before the command line's own (which override it): calibrated\n");
     fprintf(stream, "                            (the default: layered receiver curve with fading, adjacent-channel\n");
-    fprintf(stream, "                            table 10/40, smooth capture), realistic (calibrated + slow\n");
+    fprintf(stream, "                            table 10/40, smooth capture, PA maximum 16.9 dBm), realistic (calibrated + slow\n");
     fprintf(stream, "                            shadowing 2 dB/60 s and RSSI offset 0.9 dB, illustrative), basic\n");
     fprintf(stream, "                            (the defaults before the presets), em4 (the MVP; also implied\n");
     fprintf(stream, "                            by --medium-model=em4 without a preset); docs/MEDIUM.md §14\n");
@@ -363,8 +363,8 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "                            transmits at DBM (default: whatever its TX power)\n");
     fprintf(stream, "  --medium-tx-max=DBM|profile|off  central: the most a sender radiates, for the links\n");
     fprintf(stream, "                            that depend on its TX power (--medium-tx-ref, positions):\n");
-    fprintf(stream, "                            profile (default) the top of its power profile's TX table\n");
-    fprintf(stream, "                            (no limit without --power)\n");
+    fprintf(stream, "                            a value (calibrated, realistic: 16.9), profile: the top of its\n");
+    fprintf(stream, "                            power profile's TX table (needs --power), off (basic, em4)\n");
     fprintf(stream, "  --medium-lock-snr=DB      central: lowest SINR at which a receiver locks onto a frame (0)\n");
     fprintf(stream, "  --medium-model=fg25|em4   central: reception model: the FG25 kit measurements (fg25, the\n");
     fprintf(stream, "                            default) or the MVP's (em4: interference as noise, capture by\n");
@@ -589,16 +589,17 @@ static int32_t drift_of(int node, uint64_t seed)
 // the command line's own, so that every option given overrides them.
 static const struct med_preset {
     const char *name;
-    const char *opts[6];
+    const char *opts[10];
 } med_presets[] = {
     // The behaviour of the defaults before the presets (emulator e446b87)
     { "basic", { NULL } },
     // Calibrated on the FG25 kits, or fitted to reproduce the empirical curve
     { "calibrated", { "--medium-rx-model=layered", "--medium-adjacent-table=10/40",
-                      "--medium-capture-model=smooth", NULL } },
+                      "--medium-capture-model=smooth", "--medium-tx-max=16.9", NULL } },
     // calibrated + illustrative indoor values (slow shadowing, RSSI offset)
     { "realistic", { "--medium-rx-model=layered", "--medium-adjacent-table=10/40",
-                     "--medium-capture-model=smooth", "--medium-shadowing=2,60", "--rssi-offset=0.9", NULL } },
+                     "--medium-capture-model=smooth", "--medium-tx-max=16.9", "--medium-shadowing=2,60",
+                     "--rssi-offset=0.9", NULL } },
     // The MVP's reception model (MEDIUM.md §2.1)
     { "em4", { "--medium-model=em4", NULL } },
 };
@@ -1006,6 +1007,14 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             vt_ctls[j - 1] = tmp;
         }
     prop_check_options(med_central());
+    if (med_central()) {
+        float tx_max;
+        int mode = med_tx_max(&tx_max);
+
+        FATAL_ON(mode == 0 && !pwr_enabled(), 1, "--medium-tx-max=profile needs --power (the profiles' TX tables)");
+        if (mode == 1 && prop_enabled())
+            prop_limit_tx(tx_max);
+    }
     FATAL_ON(ctxt->dump && !ctxt->num_groups && !prop_enabled(), 1, "No graph to dump");
     if (optind >= argc)
         FATAL(1, "Expected argument: socket path");
@@ -1883,14 +1892,14 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
     for (i = 0; i < num; i++) {
         if (!msgs[i].frame && msgs[i].sniff) {
             if (msgs[i].result.detected)
-                msgs[i].result.rssi_dbm = prop_reported_dbm(node, msgs[i].result.frame_id, msgs[i].result.rssi_dbm);
+                msgs[i].result.rssi_dbm = prop_reported_dbm(node, msgs[i].result.frame_id, msgs[i].result.t_us, msgs[i].result.rssi_dbm);
             if (!ret && vt_send(node, &msgs[i].result, sizeof(msgs[i].result)))
                 ret = -1;
             vt_sniff_results_out++;
             continue;
         }
         if (!msgs[i].frame) {
-            msgs[i].verdict.rx_dbm = prop_reported_dbm(node, msgs[i].verdict.frame_id, msgs[i].verdict.rx_dbm);
+            msgs[i].verdict.rx_dbm = prop_reported_dbm(node, msgs[i].verdict.frame_id, 0, msgs[i].verdict.rx_dbm);
             if (!ret && vt_send(node, &msgs[i].verdict, sizeof(msgs[i].verdict)))
                 ret = -1;
             vt_verdicts_out++;
@@ -1900,7 +1909,7 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
         if (!ret && hdr->flags & SIM_FRAME_MEDIUM) {
             // The power at this receiver, in a copy: the frame is shared
             memcpy(out, msgs[i].frame->data, msgs[i].frame->len);
-            ((struct sim_frame_hdr *)out)->rx_dbm = prop_reported_dbm(node, hdr->frame_id, msgs[i].rx_dbm);
+            ((struct sim_frame_hdr *)out)->rx_dbm = prop_reported_dbm(node, hdr->frame_id, 0, msgs[i].rx_dbm);
             // A version-1 client of the radio interface knows only MEDIUM
             if (vt_radio_if(node) && conns[slot_of_node[node]].radio_if < 2)
                 ((struct sim_frame_hdr *)out)->flags &= ~SIM_FRAME_LONG_PREAMBLE;

@@ -756,20 +756,23 @@ def test_medium_tx_ref():
 
 def test_medium_tx_max():
     """--medium-tx-max: a frame sent at +20 dBm with --medium-tx-ref=0
-    arrives at link + 16.9 dB with --medium-tx-max=16.9 or with the FG25
-    power profile (default: profile), at link + 20 dB with off or without a
-    profile."""
-    for opts, want in ((["--medium-tx-max=16.9"], -43.1), (["--medium-tx-max=off"], -40.0), ([], -40.0)):
+    arrives at link + 16.9 dB with --medium-tx-max=16.9 (the calibrated
+    preset's, also with --power, which does not change it) or with
+    --medium-tx-max=profile and the FG25 power profile, at link + 20 dB with
+    off (the basic preset's default, with or without --power). profile
+    without --power is refused."""
+    prof = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "examples", "power",
+                        "efr32fg25-soc.ini")
+    pw = [f"--power={prof}", f"--power-out={ARGS.logdir}/txmax_power.json"]
+    for opts, want in ((["--medium-tx-max=16.9"], -43.1), (["--medium-tx-max=off"], -40.0), ([], -40.0),
+                       (pw, -40.0), (["--medium-tx-max=profile", *pw], -43.1),
+                       (["--medium-preset=calibrated", "--medium-fading=off"], -43.1),
+                       (["--medium-preset=calibrated", "--medium-fading=off", *pw], -43.1)):
         r = {1: Radio(1, {1000: [("tx", {"tx_dbm": 20})]}), 2: Radio(2)}
         d, out, rows = medium_run(r, [(1, 2, -60)], opts=["--medium-tx-ref=0", *opts])
         check(abs(got(r[2], "xx")[0][1]["rx_dbm"] - want) < 0.01, f"{opts}: {r[2].rx}")
-    # The FG25 profile's TX table ends at 16.9 dBm: the default takes it
-    prof = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "examples", "power",
-                        "efr32fg25-soc.ini")
-    r = {1: Radio(1, {1000: [("tx", {"tx_dbm": 20})]}), 2: Radio(2)}
-    d, out, rows = medium_run(r, [(1, 2, -60)], opts=["--medium-tx-ref=0", f"--power={prof}",
-                                                      f"--power-out={ARGS.logdir}/txmax_power.json"])
-    check(abs(got(r[2], "xx")[0][1]["rx_dbm"] - (-43.1)) < 0.01, f"profile: {r[2].rx}")
+    srv = Server(["--vtime=1", "--medium-tx-max=profile"])
+    check(srv.wait() != 0 and "needs --power" in srv.output(), "profile without --power accepted")
 
 
 def test_medium_left():

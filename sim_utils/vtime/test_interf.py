@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_conductor as tc  # noqa: E402
 from test_conductor import (Server, Radio, check, got, NOISE_DBM, PAYLOAD, AIRTIME, SHR_US, BITS,  # noqa: E402
                             M3, M3_PSDU, M3_AIR, medium_run, sinr_db)
-from test_sniff import Sniffer, sniff_run, results  # noqa: E402
+from test_sniff import Sniffer, sniff_run, results, DWELL  # noqa: E402
 from fake_node import Driver, TestError, RADIO_IDLE, SNIFF_LOCK  # noqa: E402
 
 SRC_NONE = 0xFFFF
@@ -102,7 +102,16 @@ def test_intf_options():
             (["--vtime=1", "--sniff-false=2"], "probability per window"),
             (["--vtime=1", "--sniff-false=-1/s"], "RATE/s"),
             (["--vtime=1", "--sniff-adjacent=x"], "off, on or detect"),
-            (["--vtime=1", "--sniff-energy-us=0"], "--sniff-energy-us")):
+            (["--vtime=1", "--sniff-energy-us=0"], "--sniff-energy-us"),
+            # options without effect (also with the calibrated preset, which sets none of them)
+            (["--vtime=1", "--medium-capture-smooth=m50=1"], "needs --medium-capture-model=smooth"),
+            (["--vtime=1", "--medium-capture-model=1a:smooth", "--medium-capture-smooth=3:m50=1"],
+             "needs --medium-capture-model=smooth"),
+            (["--vtime=1", "--sniff-energy-us=50"], "--sniff-energy-us needs --sniff-energy"),
+            (["--vtime=1", "--interferer-log=/dev/null"], "--interferer-log needs"),
+            (["--vtime=1", "--sniff-adjacent=on", "--medium-adjacent-db=off"], "--sniff-adjacent needs"),
+            (["--vtime=1", "--medium-preset=calibrated", "--medium-capture-model=step", "--medium-capture-smooth=m50=1"],
+             "needs --medium-capture-model=smooth")):
         start_fails(args, msg)
     # A file of specs, comments and blank lines
     spec = os.path.join(tc.ARGS.logdir, "intf.txt")
@@ -465,6 +474,29 @@ def test_intf_sniff_external():
     d, out, rows, sn = sniff_run(r, [], opts=["--interferer=chan=0,level=-95"])
     check(r[2].results[0][1]["detected"] == 0 and abs(r[2].results[0][1]["rssi_dbm"] - energy(-95)) < 0.01,
           f"noise energy: {r[2].results}")
+
+
+def test_intf_sniff_streams():
+    """An external interferer's preamble draws from its own hash, not from the
+    node's detection stream: adding one, detected now and then in windows of
+    its own, leaves the detections of the emulated frames in the other
+    windows unchanged (100 one-dwell windows on a frame at the margin, and
+    between them 100 windows on the interferer's preamble, 5 ms later)."""
+    n = 100
+    p = round(NOISE_DBM + 4.93, 2)
+    acts1 = {10000 * (k + 1): [("tx", {})] for k in range(n)}
+    acts2 = {}
+    for k in range(n):
+        acts2[10000 * (k + 1)] = [("sniff", 0, DWELL)]
+        acts2[10000 * (k + 1) + 5000] = [("sniff", 0, 1500)]
+    seqs, extra = [], 0
+    for opts in ([], [f"--interferer=chan=0,level={p},kind=fsk,rate=50000,pattern=periodic:10ms:1500us:5000us"]):
+        r = {1: Sniffer(1, acts1), 2: Sniffer(2, acts2)}
+        d, out, rows, sn = sniff_run(r, [(1, 2, p)], opts=opts)
+        seqs.append([x["outcome"] == "detected" and x["src"] == 1 for x in sn if x["t_req"] % 10000 == 0])
+        extra = sum(1 for x in sn if x["outcome"] == "detected" and x["frame_id"] == 0)
+    print(f"     frames detected {sum(seqs[0])}/{len(seqs[0])}; interferer detected {extra} times")
+    check(len(seqs[0]) == n and seqs[0] == seqs[1] and 0 < extra < n and 0 < sum(seqs[0]) < n, f"{seqs}, {extra}")
 
 
 def test_intf_sniff_energy():

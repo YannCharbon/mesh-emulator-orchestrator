@@ -507,6 +507,7 @@ void intf_start(uint64_t seed)
     float dbm;
 
     intf.seed = seed;
+    FATAL_ON(intf.log_path && !intf.n, 1, "--interferer-log needs --interferer or --interferer-file");
     if (intf.log_path) {
         intf.log = fopen(intf.log_path, "w");
         FATAL_ON(!intf.log, 1, "%s: %m", intf.log_path);

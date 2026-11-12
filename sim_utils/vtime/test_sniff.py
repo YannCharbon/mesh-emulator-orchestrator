@@ -475,6 +475,61 @@ def test_sniff_kit_curve():
     check(len(r[2].results) == n and abs(det - n * p) < 4 * sigma and 0.6 < p < 0.7, f"{det}/{n}, p {p}")
 
 
+def p_layered_default(p_dbm, i_dbm):
+    """The layered model's default detection (docs/MEDIUM.md §10.5): 16 bits
+    on the layered noise curve (9.0 dB, 0.9 dB), the interference converted
+    into the noise power that gives the kits' table at its SIR, summed with
+    the noise (the default combination with the layered curve)."""
+    n, p, i = 10 ** (NOISE_DBM / 10), 10 ** (p_dbm / 10), 10 ** (i_dbm / 10)
+    p_int = kit_p(10 * math.log10(p / i))
+    if p_int <= 0:
+        return 0.0
+    i_eq = 0.0
+    if p_int < 1:
+        ber_eq = min(0.5, 1 - p_int ** (1 / 16))
+        i_eq = p / 10 ** ((9.0 - 0.9 * math.log(2 * ber_eq)) / 10)
+    snr = 10 * math.log10(p / (n + i_eq))
+    return (1 - min(0.5, 0.5 * math.exp(-(snr - 9.0) / 0.9))) ** 16
+
+
+def test_sniff_layered_default():
+    """With the layered receiver curve and no --sniff-curve (the calibrated
+    preset; fading off here so that the powers are fixed), one-try sniffs of
+    a frame under a co-channel interferer that is on over the whole dwell:
+    far above the noise, the kits' table at the SIR (3.9 dB: 0.65); near
+    the noise, the noise and the interference combined (§10.5). 200 sniffs
+    per case, the detection rate within 4 sigma of the formula."""
+    n = 200
+    for p_dbm, sir in ((-80.0, 3.9), (-104.0, 5.0)):
+        i_dbm = p_dbm - sir
+        acts1 = {10000 * (k + 1): [("tx", {})] for k in range(n)}
+        acts3 = {10000 * (k + 1) - 300: [("tx", {})] for k in range(n)}
+        acts2 = {10000 * (k + 1): [("sniff", 0, 225 + 140)] for k in range(n)}
+        r = {1: Sniffer(1, acts1), 2: Sniffer(2, acts2), 3: Sniffer(3, acts3)}
+        d, out, rows, sn = sniff_run(r, [(1, 2, p_dbm), (3, 2, i_dbm)], model=False,
+                                     opts=["--medium-preset=calibrated", "--medium-fading=off"])
+        p = p_layered_default(p_dbm, i_dbm)
+        det = sum(x["detected"] for t, x in r[2].results)
+        sigma = math.sqrt(n * p * (1 - p))
+        print(f"     {p_dbm} dBm, SIR {sir} dB: {det}/{len(r[2].results)} detected, formula {n * p:.1f} "
+              f"(sigma {sigma:.1f}); kit table alone {n * kit_p(sir):.1f}")
+        check(len(r[2].results) == n and abs(det - n * p) < max(4 * sigma, 1), f"{det}/{n}, p {p}")
+        check("curve ber:16 for the noise, 4 points for the interference" in out, "start line")
+    check(abs(p_layered_default(-80.0, -83.9) - 0.65) < 0.01, "far above the noise: not the table")
+
+
+def test_sniff_rssi_noise_no_frame():
+    """--rssi-noise on detections that name no frame (frame ID 0: here false
+    detections on an empty channel, --sniff-false=1): each has its own draw
+    (keyed by its time), not one value for every such detection of a
+    receiver."""
+    r = {1: Sniffer(1, {1000: [("sniff", 0, 1000)], 5000: [("sniff", 0, 1000)], 9000: [("sniff", 0, 1000)]}),
+         2: Sniffer(2)}
+    d, out, rows, sn = sniff_run(r, [(1, 2, -60)], opts=["--rssi-noise=2", "--sniff-false=1"])
+    v = [x["rssi_dbm"] for t, x in r[1].results if x["detected"] and not x["frame_id"]]
+    check(len(v) == 3 and len(set(v)) == 3 and all(abs(x - NOISE_DBM) > 1e-3 for x in v), f"{v}")
+
+
 def test_sniff_options():
     for args, msg in ((["--vtime=1", "--medium=legacy", "--sniff-dwell-bits=8"], "need the central medium"),
                       (["--vtime=1", "--sniff-detect=x"], "preamble or frame"),

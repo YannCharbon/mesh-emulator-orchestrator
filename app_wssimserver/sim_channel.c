@@ -50,6 +50,8 @@
 #define CHAN_RES_TAU (1.0 / 16384) // this share of tau if larger
 #define CHAN_CACHE_LV 12        // bridge levels kept per process
 #define CHAN_TAPS 8             // fading taps of a frequency-selective link
+#define CHAN_CACHE_SETS 16384   // the cache of processes: 32768 entries (12 MB)
+#define CHAN_CACHE_WAYS 2
 
 enum { CP_SHADOW_LINK = 1, CP_SHADOW_NODE, CP_FADING, CP_BURST_LINK, CP_BURST_NODE, CP_TAP_DELAY, CP_TAP = 16 };
 enum { BURST_LINK, BURST_RX, BURST_NODE };
@@ -108,8 +110,9 @@ static struct {
     bool started;
     uint64_t seed_k;
     double sigma_tau;           // s, from bc_hz
-    struct chan_ent *tab;
-    size_t cap, used;
+    struct chan_ent *tab;       // CHAN_CACHE_SETS * CHAN_CACHE_WAYS
+    size_t used;
+    uint64_t evictions;
     uint64_t samples, bad_samples, draws;
 } ch = {
     .x0 = 9.0,
@@ -336,32 +339,44 @@ static uint64_t chan_key(int proc, int a, int b)
     return (uint64_t)proc << 32 | (uint64_t)a << 16 | (uint64_t)b;
 }
 
+// The cache: CHAN_CACHE_SETS sets of CHAN_CACHE_WAYS entries, the most
+// recently used first; a new process takes the place of the least recently
+// used one. Every cached value is the value a fresh computation gives
+// (values only, no state), so an eviction changes no result, only the time
+// to compute the next sample of the evicted process. Its size is fixed:
+// CHAN_CACHE_SETS * CHAN_CACHE_WAYS * sizeof(struct chan_ent), allocated at
+// the first sample and touched as it fills.
 static struct chan_ent *chan_find(uint64_t key)
 {
-    size_t i, mask;
-    struct chan_ent *old;
-    size_t old_cap;
+    struct chan_ent *set, tmp;
+    int w;
 
-    if (2 * (ch.used + 1) > ch.cap) {
-        old = ch.tab;
-        old_cap = ch.cap;
-        ch.cap = ch.cap ? ch.cap * 2 : 1024;
-        ch.tab = calloc(ch.cap, sizeof(*ch.tab));
+    if (!ch.tab) {
+        ch.tab = calloc((size_t)CHAN_CACHE_SETS * CHAN_CACHE_WAYS, sizeof(*ch.tab));
         FATAL_ON(!ch.tab, 1, "calloc: %m");
-        ch.used = 0;
-        for (i = 0; i < old_cap; i++)
-            if (old[i].key)
-                *chan_find(old[i].key) = old[i];
-        free(old);
     }
-    mask = ch.cap - 1;
-    for (i = mix64(key) & mask; ch.tab[i].key; i = (i + 1) & mask)
-        if (ch.tab[i].key == key)
-            return &ch.tab[i];
-    ch.tab[i].key = key;
-    ch.tab[i].k = INT64_MIN;
-    ch.used++;
-    return &ch.tab[i];
+    set = &ch.tab[(mix64(key) & (CHAN_CACHE_SETS - 1)) * CHAN_CACHE_WAYS];
+    for (w = 0; w < CHAN_CACHE_WAYS && set[w].key; w++) {
+        if (set[w].key == key) {
+            if (w) {
+                tmp = set[w];
+                memmove(&set[1], &set[0], w * sizeof(*set));
+                set[0] = tmp;
+            }
+            return &set[0];
+        }
+    }
+    if (w == CHAN_CACHE_WAYS) {
+        ch.evictions++;
+        w--;
+    } else {
+        ch.used++;
+    }
+    memmove(&set[1], &set[0], w * sizeof(*set));
+    memset(&set[0], 0, sizeof(*set));
+    set[0].key = key;
+    set[0].k = INT64_MIN;
+    return &set[0];
 }
 
 // Two unit Gaussians of the anchor K of process key
@@ -564,11 +579,12 @@ void chan_finish(void)
 {
     if (!chan_varies())
         return;
-    INFO("medium: link variation: %llu samples, %llu in a bad state, %llu Gaussian pairs drawn, %zu processes cached",
-         (unsigned long long)ch.samples, (unsigned long long)ch.bad_samples, (unsigned long long)ch.draws, ch.used);
+    INFO("medium: link variation: %llu samples, %llu in a bad state, %llu Gaussian pairs drawn, %zu processes cached "
+         "(of %d), %llu evicted", (unsigned long long)ch.samples, (unsigned long long)ch.bad_samples,
+         (unsigned long long)ch.draws, ch.used, CHAN_CACHE_SETS * CHAN_CACHE_WAYS, (unsigned long long)ch.evictions);
     free(ch.tab);
     ch.tab = NULL;
-    ch.cap = ch.used = 0;
+    ch.used = ch.evictions = 0;
 }
 
 // The channel spacing of a frame at rate_bps: Wi-SUN FAN EU mode 1a
@@ -687,6 +703,24 @@ static double chan_curve(double x_db)
 double chan_noise_ber(double snr_db)
 {
     return chan_curve(snr_db);
+}
+
+// The SNR (dB) at which the noise curve gives ber (0 < ber <= 0.5)
+double chan_noise_snr(double ber)
+{
+    double x0 = ch.layered ? ch.x0 : 0, b = ch.layered ? ch.b : 2;
+
+    return x0 - b * log(2 * ber);
+}
+
+// Noise and an equivalent interference power combined as chan_ber() does (mW)
+double chan_combine(double n_mw, double i_eq_mw)
+{
+    double m = n_mw > i_eq_mw ? n_mw : i_eq_mw;
+
+    if (ch.combine_p == 0 || m <= 0)
+        return m;
+    return m * pow(pow(n_mw / m, ch.combine_p) + pow(i_eq_mw / m, ch.combine_p), 1 / ch.combine_p);
 }
 
 double chan_ber(double p_mw, double n_mw, double i_mw, bool int_noise, double x0i, double bi)

@@ -30,6 +30,7 @@ void prop_print_help(FILE *stream);
 void prop_check_options(bool central);
 
 bool prop_enabled(void);        // --positions given
+void prop_limit_tx(double max); // the nominal TX power at most the PA maximum
 
 // Once, after the -g options: positions, model, shadowing, hearing graph.
 // given[rx * SIM_MAX_NODES + tx] != 0 for the directed pairs whose value a -g
@@ -55,6 +56,6 @@ void prop_override(int a, int b);
 // Reported RSSI (§11.6): the value delivered to rx for frame frame_id whose
 // true received power is dbm. Returns dbm unchanged without the options.
 bool prop_rssi_error(void);
-float prop_reported_dbm(int rx, uint32_t frame_id, float dbm);
+float prop_reported_dbm(int rx, uint32_t frame_id, uint64_t t_us, float dbm);
 
 #endif
