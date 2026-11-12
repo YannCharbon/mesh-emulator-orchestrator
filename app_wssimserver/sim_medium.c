@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "common/log.h"
+#include "sim_channel.h"
 #include "sim_medium.h"
 #include "sim_propagation.h"
 
@@ -50,6 +51,7 @@ struct med_rx {
     int node;
     float dbm;
     double mw;
+    struct chan_sample cs;      // the link's variation at the frame's start (§12)
 };
 
 struct med_frame {
@@ -94,6 +96,7 @@ struct med_lock {
     unsigned int bits;
     float dbm;
     double mw;
+    struct chan_sample cs;
     bool active;                // false once captured, aborted or left
     bool delivered;             // the receiver ran after its "xx"
     int n_intf, cap_intf;
@@ -677,12 +680,17 @@ static double med_energy_mw(int node, uint16_t chan, const struct med_frame *ski
     return sum;
 }
 
-static void med_log(uint64_t t_end, int src, int dst, uint32_t id, int outcome, float dbm, double sinr)
+static void med_log(uint64_t t_end, int src, int dst, uint32_t id, int outcome, float dbm, double sinr,
+                    const struct chan_sample *cs)
 {
+    char var[64];
+
     med.outcomes[outcome]++;
-    if (med.log)
-        fprintf(med.log, "%llu %d %d %u %s %.2f %.2f\n", (unsigned long long)t_end, src, dst, id,
-                outcome_names[outcome], dbm, sinr);
+    if (med.log) {
+        chan_log_columns(var, sizeof(var), cs);
+        fprintf(med.log, "%llu %d %d %u %s %.2f %.2f%s\n", (unsigned long long)t_end, src, dst, id,
+                outcome_names[outcome], dbm, sinr, var);
+    }
 }
 
 static void med_add_intf(struct med_lock *l, uint64_t start, uint64_t end, double mw)
@@ -713,6 +721,8 @@ static double med_ber(const struct med_phy *x, double mw, double intf)
 {
     double ber, ber_i;
 
+    if (chan_ber_custom())
+        return chan_ber(mw, med.noise_mw, intf, x->int_noise, x->int_x0, x->int_b);
     if (x->int_noise) {
         ber = 0.5 * exp(-0.5 * mw_to_dbm(mw / (med.noise_mw + intf)));
     } else {
@@ -783,7 +793,7 @@ static void med_end_lock(struct med_lock *l, int outcome, uint64_t now)
     double sinr;
 
     med_segments(l, now, &sinr);
-    med_log(l->t_end, l->src, l->node, l->frame_id, outcome, l->dbm, sinr);
+    med_log(l->t_end, l->src, l->node, l->frame_id, outcome, l->dbm, sinr, &l->cs);
     l->active = false;
     if (med.locks[l->node] == l)
         med.locks[l->node] = NULL;
@@ -806,6 +816,7 @@ void med_start(uint64_t seed, const uint8_t *cca_shm, struct node_infos *links)
         FATAL_ON(!sn.log, 1, "%s: %m", sn.log_path);
     }
     med_phy_setup();
+    chan_start(seed);
     INFO("medium: central, model %s, lock threshold %.1f dB%s", med.em4 ? "em4" : "fg25", med.lock_snr,
          med.has_tx_ref ? "" : ", link values are the received power");
     for (int p = 0; p < MED_PHYS; p++) {
@@ -903,6 +914,7 @@ void med_add_rx(struct med_frame *f, int node)
     f->rx_mask[node / 64] |= 1ULL << (node % 64);
     rx->node = node;
     rx->dbm = med_rx_dbm(node, f->src, f->tx_dbm);
+    chan_apply(node, f->src, f->t_start, sim_link(med.links, node, f->src)->rssi == 0, &rx->dbm, &rx->cs);
     rx->mw = dbm_to_mw(rx->dbm);
 }
 
@@ -946,6 +958,7 @@ static struct med_lock *med_lock(struct med_frame *f, const struct med_rx *rx)
     l->bits = f->bits;
     l->dbm = rx->dbm;
     l->mw = rx->mw;
+    l->cs = rx->cs;
     l->active = true;
     for (g = med.air; g; g = g->next) {
         if (g == f || g->src == rx->node || !med_coupled_mw(g, f->chan, 1))
@@ -1019,24 +1032,24 @@ struct med_lock *med_decide(struct med_frame *f, int i, uint64_t now, float *rx_
                 l->refs++;
                 med.broken++;
                 med.last_broken = l;
-                med_log(f->t_end, f->src, rx->node, f->id, MED_BUSY, rx->dbm, snr);
+                med_log(f->t_end, f->src, rx->node, f->id, MED_BUSY, rx->dbm, snr, &rx->cs);
                 return NULL;
             }
             break;
         }
         med_add_intf(l, f->t_start, f->t_end, rx->mw);
-        med_log(f->t_end, f->src, rx->node, f->id, MED_BUSY, rx->dbm, snr);
+        med_log(f->t_end, f->src, rx->node, f->id, MED_BUSY, rx->dbm, snr, &rx->cs);
         return NULL;
     }
     // A frame on an adjacent channel interferes with the one received
     if (l && l->active && med_coupled_mw(f, l->chan, 1))
         med_add_intf(l, f->t_start, f->t_end, med_coupled_mw(f, l->chan, rx->mw));
     if (l || (state != SIM_RADIO_LISTEN && state != SIM_RADIO_RECEIVE) || med_chan(rx->node) != f->chan) {
-        med_log(f->t_end, f->src, rx->node, f->id, MED_NOT_LISTENING, rx->dbm, snr);
+        med_log(f->t_end, f->src, rx->node, f->id, MED_NOT_LISTENING, rx->dbm, snr, &rx->cs);
         return NULL;
     }
     if (snr < med.lock_snr) {
-        med_log(f->t_end, f->src, rx->node, f->id, MED_BELOW_LOCK, rx->dbm, snr);
+        med_log(f->t_end, f->src, rx->node, f->id, MED_BELOW_LOCK, rx->dbm, snr, &rx->cs);
         return NULL;
     }
     return med_lock(f, rx);
@@ -1125,7 +1138,7 @@ bool med_verdict(struct med_lock *l, uint64_t now, struct sim_verdict *v)
     // One draw, only when the outcome is not certain (§2)
     ok = p_ok >= 1 || (p_ok > 0 && !(-expm1(logp) > med_uniform(l->node)));
     outcome = ok ? MED_OK : l->n_intf ? MED_INTERFERENCE : MED_NOISE;
-    med_log(l->t_end, l->src, l->node, l->frame_id, outcome, l->dbm, sinr);
+    med_log(l->t_end, l->src, l->node, l->frame_id, outcome, l->dbm, sinr, &l->cs);
     memset(v, 0, sizeof(*v));
     memcpy(v->magic, "xv", 2);
     v->ok = ok;
@@ -1168,7 +1181,7 @@ static double sn_curve(double sinr)
     int i;
 
     if (sn.curve_ber_bits) {
-        ber = 0.5 * exp(-0.5 * sinr);
+        ber = chan_layered() ? chan_noise_ber(sinr) : 0.5 * exp(-0.5 * sinr);
         if (ber > 0.5)
             ber = 0.5;
         return exp(sn.curve_ber_bits * log1p(-ber));
@@ -1557,6 +1570,7 @@ void med_finish(void)
     if (sn.log)
         fclose(sn.log);
     sn.log = NULL;
+    chan_finish();
     for (i = 0; i < SIM_MAX_NODES; i++) {
         if (sn.s[i])
             free(sn.s[i]->h);

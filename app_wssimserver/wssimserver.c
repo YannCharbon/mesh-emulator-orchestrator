@@ -19,6 +19,7 @@
 #include "sim_proto.h"
 #include "ns_port_sim.h"
 #include "sim_power.h"
+#include "sim_channel.h"
 #include "sim_medium.h"
 #include "sim_propagation.h"
 
@@ -382,6 +383,7 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --sniff-log=FILE          one line per sniff (t_req node id chan t0 t1 outcome t frame_id\n");
     fprintf(stream, "                            src rssi_dbm sinr_db locked)\n");
     prop_print_help(stream);
+    chan_help(stream);
     exit(exit_code);
 }
 
@@ -422,6 +424,7 @@ enum {
     OPT_SNIFF_SFD,
     OPT_SNIFF_SETTLE,
     OPT_SNIFF_LOG,
+    OPT_CHAN,                   // the options of sim_channel.c, by name
 };
 
 // --vtime-drop=SRC:DST:SEQ:FROM:TO: frames from SRC with this MAC sequence
@@ -609,20 +612,26 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "sniff-log", required_argument, 0, OPT_SNIFF_LOG },
         { 0,       0,                 0,   0  }
     };
-    // The propagation options (sim_propagation.c) follow the server's own
-    static struct option all_opts[ARRAY_SIZE(opts_long) + 32];
+    // The propagation (sim_propagation.c) and channel (sim_channel.c)
+    // options follow the server's own
+    static struct option all_opts[ARRAY_SIZE(opts_long) + 48];
     uint64_t mask[MAX_NODES / 64];
     char *end;
     double d;
-    int opt, n;
+    int opt, n, longindex = 0;
 
     for (n = 0; opts_long[n].name; n++)
         all_opts[n] = opts_long[n];
     for (int k = 0; prop_long_options[k].name; k++)
         all_opts[n++] = prop_long_options[k];
+    for (int k = 0; chan_option_names[k]; k++)
+        all_opts[n++] = (struct option){ chan_option_names[k], required_argument, 0, OPT_CHAN };
     BUG_ON(n >= (int)ARRAY_SIZE(all_opts));
-    while ((opt = getopt_long(argc, argv, opts_short, all_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, opts_short, all_opts, &longindex)) != -1) {
         switch (opt) {
+            case OPT_CHAN:
+                chan_set_option(all_opts[longindex].name, optarg);
+                break;
             case 'g':
                 FATAL_ON(bitmap_parse(optarg, mask, MAX_NODES / 64), 1,
                          "-g %s: bad node list (IDs 0 to %d, e.g. 2,5:-67.5 or 0-3)", optarg, MAX_NODES - 1);
@@ -844,6 +853,11 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
              "--medium-tx-ref, --medium-lock-snr, --medium-model, --medium-int-curve, --medium-capture-*, "
              "--medium-break-db, --medium-adjacent-db, --medium-log and --sniff-* need the central medium "
              "(not --medium=legacy)");
+    chan_dump_if_asked();
+    FATAL_ON(chan_options_given() && !med_central(), 1,
+             "--medium-rx-model, --medium-rx-curve, --medium-combine, --medium-fading, --medium-shadowing, "
+             "--medium-node-share, --medium-reciprocal and --medium-burst need the central medium (--vtime, not "
+             "--medium=legacy)");
     // The ledger follows each node's radio and MCU without gaps (a node
     // powered up late: its ledger starts at its first wake)
     for (int i = 0; i < vt_ctls_n; i++)
