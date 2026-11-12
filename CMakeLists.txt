@@ -62,6 +62,7 @@ function(wssim_add_server)
     add_executable(wssimserver
         ${NANOSTACK_ROOT}/port/posix/common/log.c
         app_wssimserver/sim_channel.c
+        app_wssimserver/sim_interf.c
         app_wssimserver/sim_medium.c
         app_wssimserver/sim_power.c
         app_wssimserver/sim_propagation.c

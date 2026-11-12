@@ -20,6 +20,7 @@
 #include "ns_port_sim.h"
 #include "sim_power.h"
 #include "sim_channel.h"
+#include "sim_interf.h"
 #include "sim_medium.h"
 #include "sim_propagation.h"
 
@@ -384,6 +385,7 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "                            src rssi_dbm sinr_db locked)\n");
     prop_print_help(stream);
     chan_help(stream);
+    intf_usage(stream);
     exit(exit_code);
 }
 
@@ -425,6 +427,7 @@ enum {
     OPT_SNIFF_SETTLE,
     OPT_SNIFF_LOG,
     OPT_CHAN,                   // the options of sim_channel.c, by name
+    OPT_INTF,                   // the options of sim_interf.c (intf_option_names)
 };
 
 // --vtime-drop=SRC:DST:SEQ:FROM:TO: frames from SRC with this MAC sequence
@@ -610,6 +613,18 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "sniff-sfd-bits", required_argument, 0, OPT_SNIFF_SFD },
         { "sniff-settle-us", required_argument, 0, OPT_SNIFF_SETTLE },
         { "sniff-log", required_argument, 0, OPT_SNIFF_LOG },
+        // Interference and spectrum (docs/MEDIUM.md §13): sim_interf.c
+        { "interferer", required_argument, 0, OPT_INTF },
+        { "interferer-file", required_argument, 0, OPT_INTF },
+        { "interferer-log", required_argument, 0, OPT_INTF },
+        { "medium-adjacent-table", required_argument, 0, OPT_INTF },
+        { "medium-capture-model", required_argument, 0, OPT_INTF },
+        { "medium-capture-smooth", required_argument, 0, OPT_INTF },
+        { "medium-int-curve-presync", required_argument, 0, OPT_INTF },
+        { "sniff-adjacent", required_argument, 0, OPT_INTF },
+        { "sniff-energy", required_argument, 0, OPT_INTF },
+        { "sniff-energy-us", required_argument, 0, OPT_INTF },
+        { "sniff-false", required_argument, 0, OPT_INTF },
         { 0,       0,                 0,   0  }
     };
     // The propagation (sim_propagation.c) and channel (sim_channel.c)
@@ -824,6 +839,9 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             case OPT_SNIFF_SETTLE:
                 med_set_sniff_settle(optarg);
                 break;
+            case OPT_INTF:
+                intf_option(all_opts[longindex].name, optarg);
+                break;
             case OPT_SNIFF_LOG:
                 med_set_sniff_log(optarg);
                 break;
@@ -851,8 +869,8 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         med_default_central();
     FATAL_ON(med_tuning_given() && !med_central(), 1,
              "--medium-tx-ref, --medium-lock-snr, --medium-model, --medium-int-curve, --medium-capture-*, "
-             "--medium-break-db, --medium-adjacent-db, --medium-log and --sniff-* need the central medium "
-             "(not --medium=legacy)");
+             "--medium-break-db, --medium-adjacent-*, --medium-log, --sniff-* and --interferer* need the central "
+             "medium (not --medium=legacy)");
     chan_options_done();
     FATAL_ON(chan_options_given() && !med_central(), 1,
              "--medium-rx-model, --medium-rx-curve, --medium-combine, --medium-fading, --medium-shadowing, "

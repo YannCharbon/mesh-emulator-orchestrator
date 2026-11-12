@@ -34,6 +34,19 @@ void med_set_capture_sfd(const char *arg);      // --medium-capture-sfd=[MODE:]o
 void med_set_break_db(const char *arg);         // --medium-break-db=[MODE:]DB|off
 void med_set_adjacent_db(const char *arg);      // --medium-adjacent-db=[MODE:]DB|off
 void med_set_log(const char *path);             // --medium-log=FILE
+// docs/MEDIUM.md §13, through sim_interf.c's intf_option()
+void med_note_option(void);                     // an option that needs the central medium
+void med_set_adjacent_table(const char *arg);   // --medium-adjacent-table=[MODE:]DB/DB/...
+void med_set_capture_model(const char *arg);    // --medium-capture-model=[MODE:]step|smooth
+void med_set_capture_smooth(const char *arg);   // --medium-capture-smooth=[MODE:]KEY=V,...
+void med_set_int_curve_presync(const char *arg); // --medium-int-curve-presync=[MODE:]X0,B|same
+void med_set_sniff_adjacent(const char *arg);   // --sniff-adjacent=off|on|detect
+void med_set_sniff_energy(const char *arg);     // --sniff-energy=DBM|off
+void med_set_sniff_energy_us(const char *arg);  // --sniff-energy-us=N
+void med_set_sniff_false(const char *arg);      // --sniff-false=P|RATE/s
+// The share of the power of a frame at this rate that falls d channels away
+// (1 for d = 0), from the profile's adjacent-channel table; valid from med_start()
+double med_adjacent_factor(uint32_t rate_bps, int d);
 bool med_options_given(void);                   // any of the above
 bool med_tuning_given(void);                    // any of them but --medium
 void med_default_central(void);                 // --vtime: central unless --medium=legacy

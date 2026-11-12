@@ -21,6 +21,7 @@
 
 #include "common/log.h"
 #include "sim_channel.h"
+#include "sim_interf.h"
 #include "sim_medium.h"
 #include "sim_propagation.h"
 
@@ -29,6 +30,8 @@
 #define MED_NOISE_DBM (-153.930645 + 30 + 4)
 // Separates the verdict streams from the port's random source and the drift
 #define MED_RNG_K 0x6d656469756d0001ULL
+// The smooth capture model's streams (§13.3)
+#define MED_RNG_CAPTURE_K 0x6361707475720001ULL
 
 enum med_outcome {
     MED_OK,
@@ -79,6 +82,8 @@ struct med_frame {
 struct med_intf {
     uint64_t start, end;
     double mw;
+    bool noise;                 // a noise-like external interferer (§13)
+    bool pre;                   // on air before the received frame's SHR ended (§13.3)
 };
 
 struct med_lock {
@@ -101,6 +106,7 @@ struct med_lock {
     bool delivered;             // the receiver ran after its "xx"
     int n_intf, cap_intf;
     struct med_intf *intf;
+    double ext_mw;              // highest external interference over the frame (§13)
 };
 
 /* Reception profiles per PHY (§2.1): interference error rate, capture,
@@ -111,6 +117,7 @@ struct med_lock {
 enum { MED_PHY_1A, MED_PHY_3, MED_PHY_OTHER, MED_PHYS };
 static const char *const phy_names[MED_PHYS] = { "1a", "3", "other" };
 #define MED_EARLY_SHR (-1)      // early capture window: the whole SHR (EM4)
+#define MED_ADJ_MAX 16
 
 struct med_phy {
     bool int_noise;             // interference as noise in the noise curve (EM4)
@@ -120,36 +127,74 @@ struct med_phy {
     bool sfd_capture;           // capture also while the received frame's SFD is on air
     bool has_break;             // a stronger frame between the windows breaks the sync search
     float break_db;
-    bool has_adj;               // the next channel interferes, adj_db weaker
-    float adj_db;
+    int n_adj;                  // the channels 1 .. n_adj away interfere, adj[k - 1] weaker (§13.2)
+    float adj[MED_ADJ_MAX];
+    bool adj_on[MED_ADJ_MAX];
+    bool presync;               // interferers on air at the end of the SHR: their own curve (§13.3)
+    bool presync_given;
+    float pre_x0, pre_b;
+    bool smooth;                // capture and break by probability (§13.3)
+    float cap_m50, cap_s;       // capture probability against the margin: logistic, dB
+    float brk_s;                // break probability: logistic around break_db, dB
+    float early_c, early_slope; // early window: centre in bits at 5 dB of margin, bits per dB
+    float edge_w;               // width of the windows' edges, bits
+    float sfd_rise, sfd_fall;   // SFD window: from the preamble's end + rise to the SHR's end + fall, bits
 };
 
 static const struct med_phy med_phy_fg25[MED_PHYS] = {
     // EU mode 1a: §5 (x0 -2.40 dB, b 0.90 dB; early window about 400 µs,
     // no capture around the SFD); capture margin, break margin, adjacent
     // channel: the mode-3 values (§6; not measured in mode 1a)
-    [MED_PHY_1A] = { false, -2.40, 0.90, 3, 20, false, true, 2.5, true, 10 },
+    [MED_PHY_1A] = { .int_x0 = -2.40, .int_b = 0.90, .capture_db = 3, .early_bits = 20, .has_break = true,
+                     .break_db = 2.5, .n_adj = 1, .adj = { 10 }, .adj_on = { true } },
     // EU mode 3: §4.1 (x0 -2.85 dB, b 0.90 dB), §4.2 (capture margin about
     // 3 dB; early window to the 50 % transition at 250 µs = 37 bits;
     // capture during the SFD, 650-700 µs; both lost in between from about
     // 2.5 dB, §6 item 3), §4.4 (adjacent channel 10 dB weaker)
-    [MED_PHY_3]  = { false, -2.85, 0.90, 3, 37, true, true, 2.5, true, 10 },
+    [MED_PHY_3]  = { .int_x0 = -2.85, .int_b = 0.90, .capture_db = 3, .early_bits = 37, .sfd_capture = true,
+                     .has_break = true, .break_db = 2.5, .n_adj = 1, .adj = { 10 }, .adj_on = { true } },
     // Other rates: not measured; the mode-3 values (§6 item 1: one curve for
     // every FSK mode)
-    [MED_PHY_OTHER] = { false, -2.85, 0.90, 3, 37, true, true, 2.5, true, 10 },
+    [MED_PHY_OTHER] = { .int_x0 = -2.85, .int_b = 0.90, .capture_db = 3, .early_bits = 37, .sfd_capture = true,
+                        .has_break = true, .break_db = 2.5, .n_adj = 1, .adj = { 10 }, .adj_on = { true } },
 };
 
 // --medium-model=em4: the MVP before the calibration (interference in the
 // noise curve, capture by 6 dB over the whole SHR, no adjacent channel)
-static const struct med_phy med_phy_em4 = { true, 0, 2, 6, MED_EARLY_SHR, false, false, 0, false, 0 };
+static const struct med_phy med_phy_em4 = { .int_noise = true, .int_x0 = 0, .int_b = 2, .capture_db = 6,
+                                            .early_bits = MED_EARLY_SHR };
+
+/* --medium-capture-model=smooth (§13.3): probabilities fitted to the FG25
+ * kit measurements (firmware repo docs/COCHANNEL_RESULTS.md §4.2, §5; the
+ * fit is in docs/MEDIUM.md §13.3). Capture: logistic in the margin, centre
+ * cap_m50, scale cap_s, times a weight in time (early window, SFD window)
+ * with edges of width edge_w bits. Break: logistic around the break margin.
+ * Interferers already on air at the end of the received frame's SHR: their
+ * own curve (pre_x0, pre_b), fitted together with the capture margin. */
+struct med_smooth {
+    float cap_m50, cap_s, brk_s, early_c, early_slope, edge_w, sfd_rise, sfd_fall, pre_x0, pre_b;
+};
+static const struct med_smooth med_smooth_fit[MED_PHYS] = {
+    // Mode 1a: §5 (+5.5 dB: 65 % at 100-200 us, 21 % at 400 us, 7 % at
+    // 600 us; +11 dB: 100 % to 400 us, 94 % at 600 us): the early window
+    // grows with the margin
+    [MED_PHY_1A] = { 0, 1.0, 0.5, 12, 3.9, 6, -4, 1, -11.2, 1.5 },
+    // Mode 3: §4.2 (early window 50 % at 250 us = 38 bits whatever the
+    // margin; SFD window 50 % at about 613 us and 752 us)
+    [MED_PHY_3] = { 0, 1.0, 0.5, 38, 0, 2, -4, 1, -11.2, 1.5 },
+    [MED_PHY_OTHER] = { 0, 1.0, 0.5, 38, 0, 2, -4, 1, -11.2, 1.5 },
+};
 
 // A per-PHY option, applied over the model's values at med_start()
-enum { PO_INT, PO_CAPTURE, PO_EARLY, PO_SFD, PO_BREAK, PO_ADJ };
+enum { PO_INT, PO_CAPTURE, PO_EARLY, PO_SFD, PO_BREAK, PO_ADJ, PO_ADJ_TABLE, PO_MODEL, PO_SMOOTH, PO_PRESYNC };
 struct med_phy_opt {
     unsigned int mask;          // the profiles it sets
     int field;
     bool on;
     float a, b;
+    int n;                      // PO_ADJ_TABLE: entries; PO_SMOOTH: the key
+    float t[MED_ADJ_MAX];
+    bool t_on[MED_ADJ_MAX];
 };
 #define MED_PHY_OPTS_MAX 64
 
@@ -176,6 +221,10 @@ static struct {
     bool rng_set[SIM_MAX_NODES];
     uint64_t outcomes[MED_OUTCOMES];
     uint64_t frames, cca_queries, cca_energy;
+    uint64_t cca_ext;           // CCA queries with an external interferer on (§13)
+    uint64_t smooth_draws;      // draws of the smooth capture model (§13.3)
+    uint64_t rng_c[SIM_MAX_NODES];
+    bool rng_c_set[SIM_MAX_NODES];
 } med = {
     .lock_snr = 0,
 };
@@ -185,6 +234,12 @@ static struct {
 #define SN_CURVE_MAX 64
 // Separates the detection streams from the verdict streams
 #define SN_RNG_K 0x736e696666000001ULL
+
+enum { SN_ADJ_OFF, SN_ADJ_ON, SN_ADJ_DETECT };
+// Separates the false-detection streams from the others
+#define SN_RNG_FALSE_K 0x736e66616c730001ULL
+// The source of a detection that is no emulated frame (frame_id 0)
+#define SN_SRC_NONE 0xFFFF
 
 enum sn_outcome { SN_DETECTED, SN_NONE, SN_TX_ABORT, SN_REPLACED, SN_STOPPED, SN_LEFT, SN_OUTCOMES };
 static const char *const sn_outcome_names[SN_OUTCOMES] = {
@@ -203,6 +258,8 @@ struct sn_heard {
     uint64_t next;              // end of its next dwell to evaluate, 0: none
     float dbm;
     double mw;
+    bool cand;                  // a candidate for detection (else only interference and energy, §13.4)
+    bool adj;                   // a frame on another channel (--sniff-adjacent)
 };
 
 struct sn_sniff {
@@ -217,6 +274,8 @@ struct sn_sniff {
     uint64_t queued;            // earliest check event queued for this sniff (MED_SNIFF_NONE: none)
     int n, cap;
     struct sn_heard *h;
+    uint64_t e_done;            // energy detection: the checks up to this time are done (§13.4)
+    uint64_t f_time;            // a false detection at this time (MED_SNIFF_NONE: none)
 };
 
 static struct {
@@ -236,7 +295,18 @@ static struct {
     uint64_t rng[SIM_MAX_NODES];
     bool rng_set[SIM_MAX_NODES];
     uint64_t outcomes[SN_OUTCOMES], locks, draws;
+    // §13.4
+    int adjacent;               // SN_ADJ_*: frames on the next channels in sniffing
+    bool has_energy;            // --sniff-energy: detection on the summed energy
+    float energy;
+    uint32_t energy_us;
+    bool false_rate;            // --sniff-false: a rate per second (else a probability per window)
+    double false_p;
+    uint64_t rng_f[SIM_MAX_NODES];
+    bool rng_f_set[SIM_MAX_NODES];
+    uint64_t det_energy, det_false, det_ext, det_adj;
 } sn = {
+    .energy_us = 107,
     .dwell_bits = 16,
     .curve_ber_bits = 16,
     .sfd_bits = 16,
@@ -399,13 +469,166 @@ void med_set_adjacent_db(const char *arg)
     med_set_db_or_off("--medium-adjacent-db", arg, PO_ADJ);
 }
 
+/* ---- options of §13 (through sim_interf.c's intf_option()) */
+
+void med_note_option(void)
+{
+    med.given = med.tuning = true;
+}
+
+// --medium-adjacent-table=[MODE:]DB/DB/...: 1, 2, ... channels away; off
+// for no coupling at that distance; nothing beyond the last entry
+void med_set_adjacent_table(const char *arg)
+{
+    const char *v;
+    struct med_phy_opt *o = med_phy_opt("--medium-adjacent-table", arg, PO_ADJ_TABLE, &v);
+    char *copy = strdup(v), *tok, *save;
+
+    FATAL_ON(!copy, 1, "strdup: %m");
+    for (tok = strtok_r(copy, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
+        FATAL_ON(o->n >= MED_ADJ_MAX, 1, "--medium-adjacent-table: at most %d values: %s", MED_ADJ_MAX, arg);
+        o->t_on[o->n] = strcmp(tok, "off");
+        o->t[o->n] = o->t_on[o->n] ? med_number("--medium-adjacent-table", tok, -100, 200) : 0;
+        o->n++;
+    }
+    free(copy);
+    FATAL_ON(!o->n, 1, "--medium-adjacent-table: expected [MODE:]DB/DB/...: %s", arg);
+}
+
+// --medium-capture-model=[MODE:]step|smooth
+void med_set_capture_model(const char *arg)
+{
+    const char *v;
+    struct med_phy_opt *o = med_phy_opt("--medium-capture-model", arg, PO_MODEL, &v);
+
+    if (!strcmp(v, "smooth"))
+        o->on = true;
+    else if (!strcmp(v, "step"))
+        o->on = false;
+    else
+        FATAL(1, "--medium-capture-model: expected [MODE:]step|smooth: %s", arg);
+}
+
+static const char *const smooth_keys[] = { "m50", "s", "brk_s", "early", "slope", "w", "rise", "fall" };
+#define SMOOTH_KEYS ((int)(sizeof(smooth_keys) / sizeof(*smooth_keys)))
+
+// --medium-capture-smooth=[MODE:]KEY=V,...
+void med_set_capture_smooth(const char *arg)
+{
+    unsigned int mask;
+    const char *v = med_phy_prefix("--medium-capture-smooth", arg, &mask);
+    char *copy = strdup(v), *tok, *save, *eq;
+    struct med_phy_opt *o;
+    int k;
+
+    FATAL_ON(!copy, 1, "strdup: %m");
+    for (tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+        eq = strchr(tok, '=');
+        FATAL_ON(!eq, 1, "--medium-capture-smooth: expected [MODE:]KEY=V,...: %s", arg);
+        *eq = '\0';
+        for (k = 0; k < SMOOTH_KEYS && strcmp(tok, smooth_keys[k]); k++)
+            ;
+        FATAL_ON(k == SMOOTH_KEYS, 1, "--medium-capture-smooth: unknown key %s (m50, s, brk_s, early, slope, w, "
+                 "rise, fall): %s", tok, arg);
+        FATAL_ON(med.n_opts >= MED_PHY_OPTS_MAX, 1, "at most %d per-PHY medium options", MED_PHY_OPTS_MAX);
+        o = &med.opts[med.n_opts++];
+        o->mask = mask;
+        o->field = PO_SMOOTH;
+        o->n = k;
+        o->a = med_number("--medium-capture-smooth", eq + 1, -1000, 1000);
+        FATAL_ON((k == 1 || k == 2 || k == 5) && !(o->a > 0), 1, "--medium-capture-smooth: %s must be above 0: %s",
+                 tok, arg);
+    }
+    free(copy);
+}
+
+// --medium-int-curve-presync=[MODE:]X0,B|same
+void med_set_int_curve_presync(const char *arg)
+{
+    const char *v;
+    struct med_phy_opt *o = med_phy_opt("--medium-int-curve-presync", arg, PO_PRESYNC, &v);
+    char *end;
+
+    if (!strcmp(v, "same")) {
+        o->on = false;
+        return;
+    }
+    o->a = strtof(v, &end);
+    FATAL_ON(end == v || *end != ',' || !isfinite(o->a) || o->a < -50 || o->a > 50, 1,
+             "--medium-int-curve-presync: expected [MODE:]X0,B (dB) or [MODE:]same: %s", arg);
+    v = end + 1;
+    o->b = strtof(v, &end);
+    FATAL_ON(end == v || *end || !(o->b > 0 && o->b <= 50), 1,
+             "--medium-int-curve-presync: expected [MODE:]X0,B with B above 0 dB: %s", arg);
+}
+
+void med_set_sniff_adjacent(const char *arg)
+{
+    if (!strcmp(arg, "off"))
+        sn.adjacent = SN_ADJ_OFF;
+    else if (!strcmp(arg, "on"))
+        sn.adjacent = SN_ADJ_ON;
+    else if (!strcmp(arg, "detect"))
+        sn.adjacent = SN_ADJ_DETECT;
+    else
+        FATAL(1, "--sniff-adjacent: expected off, on or detect: %s", arg);
+}
+
+void med_set_sniff_energy(const char *arg)
+{
+    if (!strcmp(arg, "off")) {
+        sn.has_energy = false;
+        return;
+    }
+    sn.energy = med_number("--sniff-energy", arg, -200, 100);
+    sn.has_energy = true;
+}
+
+void med_set_sniff_energy_us(const char *arg)
+{
+    float v = med_number("--sniff-energy-us", arg, 1, 1000000);
+
+    FATAL_ON(v != (uint32_t)v, 1, "--sniff-energy-us: expected a whole number: %s", arg);
+    sn.energy_us = v;
+}
+
+// --sniff-false=P (per window) or RATE/s (per second of listening)
+void med_set_sniff_false(const char *arg)
+{
+    char *end;
+    double v = strtod(arg, &end);
+
+    if (!strcmp(end, "/s")) {
+        FATAL_ON(end == arg || !(v >= 0 && v <= 1e6), 1, "--sniff-false: expected RATE/s from 0 to 1e6: %s", arg);
+        sn.false_rate = true;
+    } else {
+        FATAL_ON(end == arg || *end || !(v >= 0 && v <= 1), 1,
+                 "--sniff-false: expected a probability per window (0 to 1) or RATE/s: %s", arg);
+        sn.false_rate = false;
+    }
+    sn.false_p = v;
+}
+
 // The profiles: the model's values, then the per-PHY options in their order
 static void med_phy_setup(void)
 {
     int p, i;
 
-    for (p = 0; p < MED_PHYS; p++)
-        med.phy[p] = med.em4 ? med_phy_em4 : med_phy_fg25[p];
+    for (p = 0; p < MED_PHYS; p++) {
+        const struct med_smooth *sm = &med_smooth_fit[p];
+        struct med_phy *x = &med.phy[p];
+
+        *x = med.em4 ? med_phy_em4 : med_phy_fg25[p];
+        // The smooth model's parameters, used once --medium-capture-model=smooth
+        x->cap_m50 = sm->cap_m50;
+        x->cap_s = sm->cap_s;
+        x->brk_s = sm->brk_s;
+        x->early_c = sm->early_c;
+        x->early_slope = sm->early_slope;
+        x->edge_w = sm->edge_w;
+        x->sfd_rise = sm->sfd_rise;
+        x->sfd_fall = sm->sfd_fall;
+    }
     for (i = 0; i < med.n_opts; i++) {
         const struct med_phy_opt *o = &med.opts[i];
 
@@ -426,7 +649,44 @@ static void med_phy_setup(void)
             case PO_EARLY:   x->early_bits = o->on ? (int)o->a : MED_EARLY_SHR; break;
             case PO_SFD:     x->sfd_capture = o->on; break;
             case PO_BREAK:   x->has_break = o->on; if (o->on) x->break_db = o->a; break;
-            case PO_ADJ:     x->has_adj = o->on; if (o->on) x->adj_db = o->a; break;
+            case PO_ADJ:
+                // The next channel only (the table's first entry)
+                if (!x->n_adj)
+                    x->n_adj = 1;
+                x->adj_on[0] = o->on;
+                if (o->on)
+                    x->adj[0] = o->a;
+                break;
+            case PO_ADJ_TABLE:
+                x->n_adj = o->n;
+                memcpy(x->adj, o->t, sizeof(o->t));
+                memcpy(x->adj_on, o->t_on, sizeof(o->t_on));
+                break;
+            case PO_MODEL:
+                x->smooth = o->on;
+                if (o->on && !x->presync_given) {
+                    x->presync = true;
+                    x->pre_x0 = med_smooth_fit[p].pre_x0;
+                    x->pre_b = med_smooth_fit[p].pre_b;
+                }
+                if (!o->on && !x->presync_given)
+                    x->presync = false;
+                break;
+            case PO_SMOOTH: {
+                float *f[] = { &x->cap_m50, &x->cap_s, &x->brk_s, &x->early_c, &x->early_slope, &x->edge_w,
+                               &x->sfd_rise, &x->sfd_fall };
+
+                *f[o->n] = o->a;
+                break;
+            }
+            case PO_PRESYNC:
+                x->presync = o->on;
+                x->presync_given = true;
+                if (o->on) {
+                    x->pre_x0 = o->a;
+                    x->pre_b = o->b;
+                }
+                break;
             }
         }
     }
@@ -630,6 +890,8 @@ static void med_prune(uint64_t now)
 {
     struct med_frame **p = &med.air, *f;
 
+    if (intf_any())
+        intf_advance(now);
     while ((f = *p)) {
         if (f->t_end <= now) {
             *p = f->next;
@@ -642,18 +904,30 @@ static void med_prune(uint64_t now)
     }
 }
 
+// The share of a frame's power of this profile that falls d >= 1 channels
+// away (§2.1, §13.2): the table's entry, none beyond the table
+static double med_adj_factor(const struct med_phy *x, int d)
+{
+    if (d <= x->n_adj && x->adj_on[d - 1])
+        return pow(10, -x->adj[d - 1] / 10);
+    return 0;
+}
+
+double med_adjacent_factor(uint32_t rate_bps, int d)
+{
+    return d ? med_adj_factor(&med.phy[med_phy_of(rate_bps)], d) : 1;
+}
+
 // The part of g's power mw that falls on chan (§2.1): all of it on its own
-// channel, adj_db less on the next one (the profile of g's rate), none
-// further away
+// channel, the adjacent-channel table of g's profile further away
 static double med_coupled_mw(const struct med_frame *g, uint16_t chan, double mw)
 {
-    const struct med_phy *x = &med.phy[g->phy];
+    double f;
 
     if (g->chan == chan)
         return mw;
-    if (x->has_adj && (g->chan == chan + 1 || chan == g->chan + 1))
-        return mw * pow(10, -x->adj_db / 10);
-    return 0;
+    f = med_adj_factor(&med.phy[g->phy], g->chan > chan ? g->chan - chan : chan - g->chan);
+    return f ? mw * f : 0;
 }
 
 // Sum of the powers at node of the frames on air on chan (and on the
@@ -680,20 +954,46 @@ static double med_energy_mw(int node, uint16_t chan, const struct med_frame *ski
     return sum;
 }
 
+// The external interferers' power at node on chan now, mW (§13)
+static double med_ext_now(int node, uint16_t chan, uint64_t now)
+{
+    double fsk, noise;
+
+    if (!intf_any())
+        return 0;
+    intf_power(node, chan, now, &fsk, &noise);
+    return fsk + noise;
+}
+
 static void med_log(uint64_t t_end, int src, int dst, uint32_t id, int outcome, float dbm, double sinr,
-                    const struct chan_sample *cs)
+                    const struct chan_sample *cs, double ext_mw)
 {
     char var[64];
 
     med.outcomes[outcome]++;
-    if (med.log) {
-        chan_log_columns(var, sizeof(var), cs);
+    if (!med.log)
+        return;
+    chan_log_columns(var, sizeof(var), cs);
+    // Columns: the 7 of §7, then the link variation's (§12), then, with
+    // external interferers, the highest external power (§13.1)
+    if (!intf_any())
         fprintf(med.log, "%llu %d %d %u %s %.2f %.2f%s\n", (unsigned long long)t_end, src, dst, id,
                 outcome_names[outcome], dbm, sinr, var);
-    }
+    else if (ext_mw > 0)
+        fprintf(med.log, "%llu %d %d %u %s %.2f %.2f%s %.2f\n", (unsigned long long)t_end, src, dst, id,
+                outcome_names[outcome], dbm, sinr, var, mw_to_dbm(ext_mw));
+    else
+        fprintf(med.log, "%llu %d %d %u %s %.2f %.2f%s -\n", (unsigned long long)t_end, src, dst, id,
+                outcome_names[outcome], dbm, sinr, var);
 }
 
-static void med_add_intf(struct med_lock *l, uint64_t start, uint64_t end, double mw)
+// The highest external interference over f at node, for the log (§13)
+static double med_frame_ext(const struct med_frame *f, int node)
+{
+    return intf_any() && med.log ? intf_max_mw(node, f->chan, f->t_start, f->t_end) : 0;
+}
+
+static void med_add_intf_x(struct med_lock *l, uint64_t start, uint64_t end, double mw, bool noise)
 {
     if (l->n_intf == l->cap_intf) {
         l->cap_intf = l->cap_intf ? l->cap_intf * 2 : 4;
@@ -703,7 +1003,24 @@ static void med_add_intf(struct med_lock *l, uint64_t start, uint64_t end, doubl
     l->intf[l->n_intf].start = start;
     l->intf[l->n_intf].end = end;
     l->intf[l->n_intf].mw = mw;
+    l->intf[l->n_intf].noise = noise;
+    // On air before the received frame's SHR ends: its receiver's estimates
+    // were made with it (§13.3)
+    l->intf[l->n_intf].pre = start < l->t_shr + l->own_shr_us;
     l->n_intf++;
+}
+
+static void med_add_intf(struct med_lock *l, uint64_t start, uint64_t end, double mw)
+{
+    med_add_intf_x(l, start, end, mw, false);
+}
+
+// An external interferer's piece over a lock (§13)
+static void med_add_ext(void *ctx, const struct intf_piece *p)
+{
+    struct med_lock *l = ctx;
+
+    med_add_intf_x(l, p->start, p->end, p->mw, p->noise);
 }
 
 static int cmp_u64(const void *a, const void *b)
@@ -716,19 +1033,31 @@ static int cmp_u64(const void *a, const void *b)
 // Bit error rate of a frame received at mw with intf of interference (§2):
 // the noise curve of the SNR and the interference curve of the SIR, the
 // larger of the two; or, with the interference curve "noise" (EM4), the
-// noise curve of the SINR
-static double med_ber(const struct med_phy *x, double mw, double intf)
+// noise curve of the SINR. Of intf, i_noise is noise-like (external,
+// §13.1): it adds to the noise, not to the SIR; i_main is the part that
+// started after the SHR's end: without it, the frames already on air use
+// the profile's presync curve if it has one (§13.3).
+static double med_ber(const struct med_phy *x, double mw, double intf, double i_noise, double i_main)
 {
-    double ber, ber_i;
+    double ber, ber_i, fsk;
+    bool pre;
 
-    if (chan_ber_custom())
-        return chan_ber(mw, med.noise_mw, intf, x->int_noise, x->int_x0, x->int_b);
+    if (chan_ber_custom()) {
+        // The layered receiver curve (§12): noise-like external power with
+        // the noise, the rest as interference (§13.1)
+        fsk = i_noise > 0 ? intf - i_noise : intf;
+        pre = x->presync && fsk > 0 && !(i_main > 0);
+        return chan_ber(mw, i_noise > 0 ? med.noise_mw + i_noise : med.noise_mw, fsk, x->int_noise,
+                        pre ? x->pre_x0 : x->int_x0, pre ? x->pre_b : x->int_b);
+    }
     if (x->int_noise) {
         ber = 0.5 * exp(-0.5 * mw_to_dbm(mw / (med.noise_mw + intf)));
     } else {
-        ber = 0.5 * exp(-0.5 * mw_to_dbm(mw / med.noise_mw));
-        if (intf > 0) {
-            ber_i = 0.5 * exp(-(mw_to_dbm(mw / intf) - x->int_x0) / x->int_b);
+        ber = 0.5 * exp(-0.5 * mw_to_dbm(mw / (med.noise_mw + i_noise)));
+        fsk = i_noise > 0 ? intf - i_noise : intf;
+        if (fsk > 0) {
+            pre = x->presync && !(i_main > 0);
+            ber_i = 0.5 * exp(-(mw_to_dbm(mw / fsk) - (pre ? x->pre_x0 : x->int_x0)) / (pre ? x->pre_b : x->int_b));
             if (ber_i > ber)
                 ber = ber_i;
         }
@@ -748,7 +1077,7 @@ static double med_segments(const struct med_lock *l, uint64_t upto, double *sinr
     uint64_t airtime = l->t_end - l->t_bits;
     uint64_t stack_b[16], *b = stack_b;
     const struct med_phy *x = &med.phy[l->phy];
-    double logp = 0, intf, sinr, ber, bits;
+    double logp = 0, intf, i_noise, i_main, sinr, ber, bits;
     int nb = 0, i, k;
 
     *sinr_min = INFINITY;
@@ -772,14 +1101,19 @@ static double med_segments(const struct med_lock *l, uint64_t upto, double *sinr
             continue;
         if (k + 1 == nb && end > l->t_bits)
             break;              // the end of the last segment
-        intf = 0;
+        intf = i_noise = i_main = 0;
         for (i = 0; i < l->n_intf; i++)
-            if (l->intf[i].start <= b[k] && l->intf[i].end > b[k])
+            if (l->intf[i].start <= b[k] && l->intf[i].end > b[k]) {
                 intf += l->intf[i].mw;
+                if (l->intf[i].noise)
+                    i_noise += l->intf[i].mw;
+                else if (!l->intf[i].pre)
+                    i_main += l->intf[i].mw;
+            }
         sinr = mw_to_dbm(l->mw / (med.noise_mw + intf));
         if (sinr < *sinr_min)
             *sinr_min = sinr;
-        ber = med_ber(x, l->mw, intf);
+        ber = med_ber(x, l->mw, intf, i_noise, i_main);
         bits = end > l->t_bits ? (double)l->bits * (b[k + 1] - b[k]) / airtime : l->bits;
         logp += bits * log1p(-ber);
     }
@@ -793,7 +1127,7 @@ static void med_end_lock(struct med_lock *l, int outcome, uint64_t now)
     double sinr;
 
     med_segments(l, now, &sinr);
-    med_log(l->t_end, l->src, l->node, l->frame_id, outcome, l->dbm, sinr, &l->cs);
+    med_log(l->t_end, l->src, l->node, l->frame_id, outcome, l->dbm, sinr, &l->cs, l->ext_mw);
     l->active = false;
     if (med.locks[l->node] == l)
         med.locks[l->node] = NULL;
@@ -836,10 +1170,29 @@ void med_start(uint64_t seed, const uint8_t *cca_shm, struct node_infos *links)
         else
             snprintf(intf, sizeof(intf), "x0 %.2f dB, b %.2f dB", x->int_x0, x->int_b);
         snprintf(brk, sizeof(brk), x->has_break ? "%.1f dB" : "off", x->break_db);
-        snprintf(adj, sizeof(adj), x->has_adj ? "%.1f dB" : "off", x->adj_db);
+        snprintf(adj, sizeof(adj), x->n_adj && x->adj_on[0] ? "%.1f dB" : "off", x->adj[0]);
         INFO("medium: PHY %s: interference %s, capture %.1f dB in the first %s%s, break %s, adjacent channel %s",
              phy_names[p], intf, x->capture_db, early, x->sfd_capture ? " and the SFD" : "", brk, adj);
+        // §13: only when set
+        if (x->n_adj > 1) {
+            char tab[16 * MED_ADJ_MAX] = "", one[16];
+
+            for (int k = 0; k < x->n_adj; k++) {
+                snprintf(one, sizeof(one), x->adj_on[k] ? "%s%.1f" : "%soff", k ? "/" : "", x->adj[k]);
+                strcat(tab, one);
+            }
+            INFO("medium: PHY %s: adjacent-channel table (dB, 1 to %d channels away): %s", phy_names[p], x->n_adj, tab);
+        }
+        if (x->smooth)
+            INFO("medium: PHY %s: smooth capture: margin 50 %% at %.1f dB, scale %.2f dB; break scale %.2f dB; "
+                 "early window %.1f bits at 5 dB, %+.1f bits/dB; SFD window %+.1f/%+.1f bits; edges %.1f bits",
+                 phy_names[p], x->cap_m50, x->cap_s, x->brk_s, x->early_c, x->early_slope, x->sfd_rise, x->sfd_fall,
+                 x->edge_w);
+        if (x->presync)
+            INFO("medium: PHY %s: interference already on air at the SHR's end: x0 %.2f dB, b %.2f dB", phy_names[p],
+                 x->pre_x0, x->pre_b);
     }
+    intf_start(seed);
     if (med.has_tx_ref)
         INFO("medium: link values are the received power at %.1f dBm TX power", med.tx_ref);
 }
@@ -974,6 +1327,11 @@ static struct med_lock *med_lock(struct med_frame *f, const struct med_rx *rx)
         if (irx)
             med_add_intf(l, g->t_start, g->t_end, med_coupled_mw(g, f->chan, irx->mw));
     }
+    // External interferers over the frame (§13)
+    if (intf_any()) {
+        intf_each(rx->node, f->chan, f->t_start, f->t_end, med_add_ext, l);
+        l->ext_mw = intf_max_mw(rx->node, f->chan, f->t_start, f->t_end);
+    }
     med.locks[rx->node] = l;
     return l;
 }
@@ -983,6 +1341,7 @@ static struct med_lock *med_lock(struct med_frame *f, const struct med_rx *rx)
 // preamble, the SFD where the profile says so), searching (a stronger frame
 // breaks the search), or synchronised (no capture)
 enum { MED_SYNC_CAPTURE, MED_SYNC_SEARCH, MED_SYNC_LOCKED };
+enum { MED_ACT_NONE, MED_ACT_CAPTURE, MED_ACT_BREAK };
 static int med_sync_phase(const struct med_lock *l, uint64_t now)
 {
     const struct med_phy *x = &med.phy[l->phy];
@@ -1002,6 +1361,69 @@ static int med_sync_phase(const struct med_lock *l, uint64_t now)
     return MED_SYNC_SEARCH;
 }
 
+// The receiver's stream of the smooth capture model (§13.3)
+static double med_uniform_c(int node)
+{
+    if (!med.rng_c_set[node]) {
+        med.rng_c[node] = mix64(med.seed + mix64((uint64_t)node + 1) + MED_RNG_CAPTURE_K);
+        med.rng_c_set[node] = true;
+    }
+    return (mix64(med.rng_c[node] += 0x9e3779b97f4a7c15ULL) >> 11) * 0x1.0p-53;
+}
+
+static double med_logistic(double x)
+{
+    return 1 / (1 + exp(-x));
+}
+
+// --medium-capture-model=smooth (§13.3): a frame margin dB stronger than
+// the frame l holds starts now. With d the time into l's own SHR in bits,
+// Tp and Tshr its preamble and SHR in bits:
+//   weight w(d) = max(early, sfd): early = 1 - logistic((d - E) / w),
+//     E = early + slope (margin - 5) within [0, Tp]; sfd (where the profile
+//     captures during the SFD) = logistic((d - Tp - rise) / w)
+//     (1 - logistic((d - Tshr - fall) / w)); during an "xl" preamble, 1;
+//   P(capture) = w(d) logistic((margin - m50) / s);
+//   P(break) = (1 - w(d)) logistic((margin - break) / brk_s) while d < Tshr.
+// One draw from the receiver's capture stream when the outcome is not
+// certain.
+static int med_smooth_capture(const struct med_lock *l, const struct med_phy *x, double margin, uint64_t now)
+{
+    double d, tp, tshr, e, w, early, sfd, p_c, p_b = 0, u;
+
+    if (now < l->t_shr) {
+        w = 1;
+        d = 0;
+        tshr = 1;
+    } else {
+        d = (double)(now - l->t_shr) * l->rate_bps / 1e6;
+        tp = (double)l->own_pre_us * l->rate_bps / 1e6;
+        tshr = (double)l->own_shr_us * l->rate_bps / 1e6;
+        // Past the windows' last edge: synchronised, no capture, no break
+        if (d >= tshr + (x->sfd_capture ? x->sfd_fall : 0) + 8 * x->edge_w)
+            return MED_ACT_NONE;
+        e = x->early_c + x->early_slope * (margin - 5);
+        if (e < 0)
+            e = 0;
+        if (e > tp)
+            e = tp;
+        early = x->early_bits == MED_EARLY_SHR ? (d < tshr ? 1 : 0) : 1 - med_logistic((d - e) / x->edge_w);
+        sfd = x->sfd_capture ? med_logistic((d - tp - x->sfd_rise) / x->edge_w) *
+                               (1 - med_logistic((d - tshr - x->sfd_fall) / x->edge_w)) : 0;
+        w = early > sfd ? early : sfd;
+    }
+    p_c = w * med_logistic((margin - x->cap_m50) / x->cap_s);
+    if (x->has_break && d < tshr && now >= l->t_shr)
+        p_b = (1 - w) * med_logistic((margin - x->break_db) / x->brk_s);
+    if (p_c < 1e-9 && p_b < 1e-9)
+        return MED_ACT_NONE;
+    if (p_c >= 1)
+        return MED_ACT_CAPTURE;
+    med.smooth_draws++;
+    u = med_uniform_c(l->node);
+    return u < p_c ? MED_ACT_CAPTURE : u < p_c + p_b ? MED_ACT_BREAK : MED_ACT_NONE;
+}
+
 struct med_lock *med_decide(struct med_frame *f, int i, uint64_t now, float *rx_dbm)
 {
     const struct med_rx *rx = &f->rx[i];
@@ -1018,45 +1440,54 @@ struct med_lock *med_decide(struct med_frame *f, int i, uint64_t now, float *rx_
         med_end_lock(l, MED_LEFT, now);
         l = NULL;
     }
-    snr = rx->dbm - mw_to_dbm(med.noise_mw + med_energy_mw(rx->node, f->chan, f, NULL));
+    snr = rx->dbm - mw_to_dbm(med.noise_mw + med_energy_mw(rx->node, f->chan, f, NULL) + med_ext_now(rx->node, f->chan, now));
     if (l && l->chan == f->chan) {
         const struct med_phy *x = &med.phy[l->phy];
+        int act = MED_ACT_NONE;
 
-        switch (med_sync_phase(l, now)) {
-        case MED_SYNC_CAPTURE:
-            if (rx->dbm >= l->dbm + x->capture_db) {
-                med_end_lock(l, MED_CAPTURED, now);
-                return med_lock(f, rx);
+        if (x->smooth) {
+            act = med_smooth_capture(l, x, rx->dbm - l->dbm, now);
+        } else {
+            switch (med_sync_phase(l, now)) {
+            case MED_SYNC_CAPTURE:
+                if (rx->dbm >= l->dbm + x->capture_db)
+                    act = MED_ACT_CAPTURE;
+                break;
+            case MED_SYNC_SEARCH:
+                if (x->has_break && rx->dbm >= l->dbm + x->break_db)
+                    act = MED_ACT_BREAK;
+                break;
             }
-            break;
-        case MED_SYNC_SEARCH:
-            if (x->has_break && rx->dbm >= l->dbm + x->break_db) {
-                // Neither frame is received: the receiver lost the first
-                // sync word and finds no second one (§3)
-                med_add_intf(l, f->t_start, f->t_end, rx->mw);
-                med_end_lock(l, MED_INTERFERENCE, now);
-                l->broken = true;
-                l->refs++;
-                med.broken++;
-                med.last_broken = l;
-                med_log(f->t_end, f->src, rx->node, f->id, MED_BUSY, rx->dbm, snr, &rx->cs);
-                return NULL;
-            }
-            break;
+        }
+        switch (act) {
+        case MED_ACT_CAPTURE:
+            med_end_lock(l, MED_CAPTURED, now);
+            return med_lock(f, rx);
+        case MED_ACT_BREAK:
+            // Neither frame is received: the receiver lost the first sync
+            // word and finds no second one (§3)
+            med_add_intf(l, f->t_start, f->t_end, rx->mw);
+            med_end_lock(l, MED_INTERFERENCE, now);
+            l->broken = true;
+            l->refs++;
+            med.broken++;
+            med.last_broken = l;
+            med_log(f->t_end, f->src, rx->node, f->id, MED_BUSY, rx->dbm, snr, &rx->cs, med_frame_ext(f, rx->node));
+            return NULL;
         }
         med_add_intf(l, f->t_start, f->t_end, rx->mw);
-        med_log(f->t_end, f->src, rx->node, f->id, MED_BUSY, rx->dbm, snr, &rx->cs);
+        med_log(f->t_end, f->src, rx->node, f->id, MED_BUSY, rx->dbm, snr, &rx->cs, med_frame_ext(f, rx->node));
         return NULL;
     }
     // A frame on an adjacent channel interferes with the one received
     if (l && l->active && med_coupled_mw(f, l->chan, 1))
         med_add_intf(l, f->t_start, f->t_end, med_coupled_mw(f, l->chan, rx->mw));
     if (l || (state != SIM_RADIO_LISTEN && state != SIM_RADIO_RECEIVE) || med_chan(rx->node) != f->chan) {
-        med_log(f->t_end, f->src, rx->node, f->id, MED_NOT_LISTENING, rx->dbm, snr, &rx->cs);
+        med_log(f->t_end, f->src, rx->node, f->id, MED_NOT_LISTENING, rx->dbm, snr, &rx->cs, med_frame_ext(f, rx->node));
         return NULL;
     }
     if (snr < med.lock_snr) {
-        med_log(f->t_end, f->src, rx->node, f->id, MED_BELOW_LOCK, rx->dbm, snr, &rx->cs);
+        med_log(f->t_end, f->src, rx->node, f->id, MED_BELOW_LOCK, rx->dbm, snr, &rx->cs, med_frame_ext(f, rx->node));
         return NULL;
     }
     return med_lock(f, rx);
@@ -1145,7 +1576,7 @@ bool med_verdict(struct med_lock *l, uint64_t now, struct sim_verdict *v)
     // One draw, only when the outcome is not certain (§2)
     ok = p_ok >= 1 || (p_ok > 0 && !(-expm1(logp) > med_uniform(l->node)));
     outcome = ok ? MED_OK : l->n_intf ? MED_INTERFERENCE : MED_NOISE;
-    med_log(l->t_end, l->src, l->node, l->frame_id, outcome, l->dbm, sinr, &l->cs);
+    med_log(l->t_end, l->src, l->node, l->frame_id, outcome, l->dbm, sinr, &l->cs, l->ext_mw);
     memset(v, 0, sizeof(*v));
     memcpy(v->magic, "xv", 2);
     v->ok = ok;
@@ -1167,6 +1598,14 @@ float med_sense(int node, uint16_t chan, uint64_t now)
     med.cca_queries++;
     if (count)
         med.cca_energy++;
+    if (intf_any()) {
+        double ext = med_ext_now(node, chan, now);
+
+        if (ext > 0) {
+            mw += ext;
+            med.cca_ext++;
+        }
+    }
     return mw_to_dbm(med.noise_mw + mw);
 }
 
@@ -1231,16 +1670,22 @@ static void sn_first_dwell(const struct sn_sniff *x, struct sn_heard *h)
     h->next = from + h->dwell <= limit ? from + h->dwell : 0;
 }
 
-static void sn_add(struct sn_sniff *x, const struct med_frame *f, const struct med_rx *rx)
+static struct sn_heard *sn_push(struct sn_sniff *x)
 {
-    struct sn_heard *h;
-
     if (x->n == x->cap) {
         x->cap = x->cap ? x->cap * 2 : 8;
         x->h = realloc(x->h, x->cap * sizeof(*x->h));
         FATAL_ON(!x->h, 1, "realloc: %m");
     }
-    h = &x->h[x->n++];
+    return &x->h[x->n++];
+}
+
+static void sn_add(struct sn_sniff *x, const struct med_frame *f, const struct med_rx *rx)
+{
+    struct sn_heard *h = sn_push(x);
+
+    h->cand = true;
+    h->adj = false;
     h->id = f->id;
     h->src = f->src;
     h->start = f->t_start;
@@ -1255,9 +1700,115 @@ static void sn_add(struct sn_sniff *x, const struct med_frame *f, const struct m
     sn_first_dwell(x, h);
 }
 
+// A frame on another channel whose power leaks onto the sniff's channel
+// (--sniff-adjacent, §13.4): interference and energy, and with "detect" a
+// candidate at the power that leaks
+static void sn_add_adj(struct sn_sniff *x, const struct med_frame *f, const struct med_rx *rx)
+{
+    struct sn_heard *h;
+    double mw = med_coupled_mw(f, x->chan, rx->mw);
+
+    if (!(mw > 0))
+        return;
+    sn_add(x, f, rx);
+    h = &x->h[x->n - 1];
+    h->adj = true;
+    h->mw = mw;
+    h->dbm = mw_to_dbm(mw);
+    h->cand = sn.adjacent == SN_ADJ_DETECT;
+    if (!h->cand)
+        h->next = 0;
+}
+
+// An external interferer's on-interval during a sniff (§13.4):
+// interference and energy, and, for an FSK interferer, a candidate during
+// the preamble it sends at the start of each burst (frame_id 0)
+static void sn_add_ext(void *ctx, const struct intf_piece *p)
+{
+    struct sn_sniff *x = ctx;
+    struct sn_heard *h = sn_push(x);
+
+    h->id = 0;
+    h->src = SN_SRC_NONE;
+    h->start = p->start;
+    h->end = p->end;
+    h->pre_end = p->pre_end;
+    h->cand = !p->noise && (sn.frame_mode || p->pre_end > p->start);
+    h->adj = false;
+    h->det_end = sn.frame_mode ? p->end : p->pre_end;
+    h->dwell = ((uint64_t)sn.dwell_bits * 1000000 + p->rate_bps - 1) / p->rate_bps;
+    if (!h->dwell)
+        h->dwell = 1;
+    h->mw = p->mw;
+    h->dbm = mw_to_dbm(p->mw);
+    if (h->cand)
+        sn_first_dwell(x, h);
+    else
+        h->next = 0;
+}
+
+// The false-detection stream of a node (§13.4)
+static double sn_uniform_f(int node)
+{
+    if (!sn.rng_f_set[node]) {
+        sn.rng_f[node] = mix64(med.seed + mix64((uint64_t)node + 1) + SN_RNG_FALSE_K);
+        sn.rng_f_set[node] = true;
+    }
+    return (mix64(sn.rng_f[node] += 0x9e3779b97f4a7c15ULL) >> 11) * 0x1.0p-53;
+}
+
+// The next energy check of x not done yet (§13.4): an averaging time after
+// the window's start or after the start of something heard in it
+static uint64_t sn_energy_next(const struct sn_sniff *x)
+{
+    uint64_t best = MED_SNIFF_NONE, c;
+    int i;
+
+    if (!sn.has_energy)
+        return MED_SNIFF_NONE;
+    c = x->t0 + sn.energy_us;
+    if (c > x->e_done && c <= x->t1)
+        best = c;
+    for (i = 0; i < x->n; i++) {
+        if (x->h[i].start < x->t0)
+            continue;
+        c = x->h[i].start + sn.energy_us;
+        if (c > x->e_done && c <= x->t1 && c < best)
+            best = c;
+    }
+    return best;
+}
+
+// Energy at the sniffing node at t: the noise and everything heard, mW
+static double sn_energy_at(const struct sn_sniff *x, uint64_t t)
+{
+    double mw = med.noise_mw;
+    int i;
+
+    for (i = 0; i < x->n; i++)
+        if (x->h[i].start <= t && x->h[i].end > t)
+            mw += x->h[i].mw;
+    return mw;
+}
+
+// Lowest energy over [from, to): at from, or just after something ends
+static double sn_energy_min(const struct sn_sniff *x, uint64_t from, uint64_t to)
+{
+    double min = sn_energy_at(x, from), e;
+    int i;
+
+    for (i = 0; i < x->n; i++)
+        if (x->h[i].end > from && x->h[i].end < to) {
+            e = sn_energy_at(x, x->h[i].end);
+            if (e < min)
+                min = e;
+        }
+    return min;
+}
+
 static uint64_t sn_next(const struct sn_sniff *x)
 {
-    uint64_t next = x->t1;
+    uint64_t next = x->t1, e;
     int i;
 
     if (x->on_pending && x->t_on < next)
@@ -1265,6 +1816,11 @@ static uint64_t sn_next(const struct sn_sniff *x)
     for (i = 0; i < x->n; i++)
         if (x->h[i].next && x->h[i].next < next)
             next = x->h[i].next;
+    e = sn_energy_next(x);
+    if (e < next)
+        next = e;
+    if (x->f_time < next)
+        next = x->f_time;
     return next;
 }
 
@@ -1310,12 +1866,36 @@ uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, ui
     x->t0 = x->t_on + sn.settle_us;
     if (x->t0 > x->t1)
         x->t0 = x->t1;
+    x->e_done = 0;
+    x->f_time = MED_SNIFF_NONE;
     for (f = med.air; f; f = f->next) {
-        if (f->chan != x->chan || f->src == node)
+        if (f->chan != x->chan || f->src == node) {
+            // §13.4: a frame on another channel, where its power leaks
+            if (sn.adjacent && f->src != node && f->chan != x->chan && med_coupled_mw(f, x->chan, 1) &&
+                (rx = med_find_rx(f, node)))
+                sn_add_adj(x, f, rx);
             continue;
+        }
         rx = med_find_rx(f, node);
         if (rx)
             sn_add(x, f, rx);
+    }
+    // External interferers in the window (§13.4)
+    if (intf_any())
+        intf_each(node, x->chan, now, x->t1, sn_add_ext, x);
+    // A false detection on noise (§13.4): its time, drawn now
+    if (sn.false_p > 0 && x->t1 > x->t0) {
+        double u = sn_uniform_f(node), t;
+
+        if (sn.false_rate) {
+            t = -log1p(-u) / sn.false_p * 1e6;
+            if (t < (double)(x->t1 - x->t0))
+                x->f_time = x->t0 + (t < 1 ? 1 : llround(t));
+        } else if (u < sn.false_p) {
+            x->f_time = x->t0 + 1 + (uint64_t)(sn_uniform_f(node) * (x->t1 - x->t0));
+        }
+        if (x->f_time != MED_SNIFF_NONE && x->f_time > x->t1)
+            x->f_time = x->t1;
     }
     *next = x->queued = sn_next(x);
     return x->serial;
@@ -1338,17 +1918,31 @@ uint64_t med_sniff_frame(struct med_frame *f, int i, uint32_t *serial)
     struct sn_sniff *x = sn.s[rx->node];
     struct sn_heard *h;
 
-    if (!x || !x->active || f->chan != x->chan || f->t_start >= x->t1)
+    uint64_t nx;
+
+    if (!x || !x->active || f->t_start >= x->t1)
         return MED_SNIFF_NONE;
-    sn_add(x, f, rx);
+    if (f->chan != x->chan) {
+        // §13.4: a frame on another channel, where its power leaks
+        if (!sn.adjacent || !med_coupled_mw(f, x->chan, 1))
+            return MED_SNIFF_NONE;
+        sn_add_adj(x, f, rx);
+    } else {
+        sn_add(x, f, rx);
+    }
     h = &x->h[x->n - 1];
     *serial = x->serial;
+    nx = h->next;
+    // An energy check an averaging time after its start (§13.4)
+    if (sn.has_energy && h->start >= x->t0 && h->start + sn.energy_us <= x->t1 &&
+        h->start + sn.energy_us > x->e_done && (!nx || h->start + sn.energy_us < nx))
+        nx = h->start + sn.energy_us;
     // One chain of check events per sniff: a new event only if it comes
     // before the earliest one queued (a later one finds this dwell itself)
-    if (!h->next || h->next >= x->queued)
+    if (!nx || nx >= x->queued)
         return MED_SNIFF_NONE;
-    x->queued = h->next;
-    return h->next;
+    x->queued = nx;
+    return nx;
 }
 
 // Lowest SINR of h over [from, to), the other heard frames as interferers
@@ -1425,7 +2019,7 @@ static struct med_lock *sn_lock(int node, const struct sn_heard *h, uint64_t now
     rx = med_find_rx(f, node);
     if (!rx)
         return NULL;
-    snr = rx->dbm - mw_to_dbm(med.noise_mw + med_energy_mw(node, f->chan, f, NULL));
+    snr = rx->dbm - mw_to_dbm(med.noise_mw + med_energy_mw(node, f->chan, f, NULL) + med_ext_now(node, f->chan, now));
     if (snr < med.lock_snr)
         return NULL;
     l = med_lock(f, rx);
@@ -1435,15 +2029,49 @@ static struct med_lock *sn_lock(int node, const struct sn_heard *h, uint64_t now
     return l;
 }
 
+// A detection at t of h (NULL: of no emulated frame, §13.4): the result,
+// and the lock onto h's frame if the request asks for it and the frame can
+// still be received (§10.3). Only a frame on the sniff's own channel locks.
+static void sn_detected(int node, struct sn_sniff *x, struct sn_heard *h, uint64_t t, uint64_t now, float rssi,
+                        double sinr, struct sim_sniff_result *res, struct med_lock **lock, const void **msg, int *len,
+                        float *rx_dbm)
+{
+    const struct med_lock *l = med.locks[node];
+    const struct med_frame *f;
+    bool already;
+
+    res->detected = 1;
+    res->frame_id = h ? h->id : 0;
+    res->src = h ? h->src : SN_SRC_NONE;
+    res->t_us = t;
+    res->rssi_dbm = rssi;
+    res->sinr_db = sinr;
+    if (h && h->id && !h->adj && (x->flags & SIM_SNIFF_LOCK)) {
+        *lock = sn_lock(node, h, now, &already);
+        res->locked = *lock ? SIM_SNIFF_LOCKED : already ? SIM_SNIFF_RECEIVING : 0;
+        if (*lock) {
+            for (f = med.air; f->id != h->id; f = f->next)
+                ;
+            *msg = f->msg;
+            *len = f->len;
+            *rx_dbm = h->dbm;
+        }
+    } else if (h && h->id && l && l->active && l->frame_id == h->id && l->t_end > now) {
+        // Without the flag too: the receiver already receives it
+        res->locked = SIM_SNIFF_RECEIVING;
+    }
+    sn_end(node, SN_DETECTED, now, res);
+}
+
 bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_result *res,
                      struct med_lock **lock, const void **msg, int *len, float *rx_dbm, uint64_t *next)
 {
     struct sn_sniff *x = sn.s[node];
     struct sn_heard *h, *best;
-    const struct med_frame *f;
     const struct med_lock *l;
     double sinr, p;
-    bool detected, already;
+    bool detected;
+    uint64_t t_e, t_f;
     int i;
 
     *lock = NULL;
@@ -1466,8 +2094,46 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
                 (h->start < best->start || (h->start == best->start && h->id < best->id))))
                 best = h;
         }
-        if (!best)
+        // §13.4: the energy detector's next check and a false detection,
+        // after the dwells that end at the same time
+        t_e = sn_energy_next(x);
+        t_f = x->f_time;
+        if (t_e > now)
+            t_e = MED_SNIFF_NONE;
+        if (t_f > now)
+            t_f = MED_SNIFF_NONE;
+        if (!best && t_e == MED_SNIFF_NONE && t_f == MED_SNIFF_NONE)
             break;
+        if (!best || t_e < best->next || t_f < best->next) {
+            if (t_e <= t_f) {
+                if (mw_to_dbm(sn_energy_min(x, t_e - sn.energy_us, t_e)) < sn.energy) {
+                    x->e_done = t_e;
+                    continue;
+                }
+                // The energy stayed above the threshold: detected, on
+                // behalf of the strongest frame on air on the channel
+                best = NULL;
+                for (i = 0; i < x->n; i++) {
+                    h = &x->h[i];
+                    if (h->id && !h->adj && h->start <= t_e && h->end > t_e && (!best || h->mw > best->mw))
+                        best = h;
+                }
+                sn.det_energy++;
+                sn_detected(node, x, best, t_e, now, best ? best->dbm : mw_to_dbm(sn_energy_at(x, t_e)),
+                            best ? sn_sinr_min(x, best, t_e - sn.energy_us, t_e) : 0, res, lock, msg, len, rx_dbm);
+            } else {
+                // A receiver synchronised on a frame does not trigger on noise
+                l = med.locks[node];
+                if (l && l->active && l->t_start <= t_f && l->t_end > t_f) {
+                    x->f_time = MED_SNIFF_NONE;
+                    continue;
+                }
+                sn.det_false++;
+                sn_detected(node, x, NULL, t_f, now, mw_to_dbm(sn_energy_at(x, t_f)), 0, res, lock, msg, len,
+                            rx_dbm);
+            }
+            return true;
+        }
         h = best;
         sinr = sn_sinr_min(x, h, h->next - h->dwell, h->next);
         p = sn.has_threshold && h->dbm < sn.threshold ? 0 : sn_curve(sinr);
@@ -1482,27 +2148,11 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
             detected = sn_uniform(node) < p;
         }
         if (detected) {
-            res->detected = 1;
-            res->frame_id = h->id;
-            res->src = h->src;
-            res->t_us = h->next;
-            res->rssi_dbm = h->dbm;
-            res->sinr_db = sinr;
-            if (x->flags & SIM_SNIFF_LOCK) {
-                *lock = sn_lock(node, h, now, &already);
-                res->locked = *lock ? SIM_SNIFF_LOCKED : already ? SIM_SNIFF_RECEIVING : 0;
-                if (*lock) {
-                    for (f = med.air; f->id != h->id; f = f->next)
-                        ;
-                    *msg = f->msg;
-                    *len = f->len;
-                    *rx_dbm = h->dbm;
-                }
-            } else if (l && l->active && l->frame_id == h->id && l->t_end > now) {
-                // Without the flag too: the receiver already receives it
-                res->locked = SIM_SNIFF_RECEIVING;
-            }
-            sn_end(node, SN_DETECTED, now, res);
+            if (!h->id)
+                sn.det_ext++;
+            else if (h->adj)
+                sn.det_adj++;
+            sn_detected(node, x, h, h->next, now, h->dbm, sinr, res, lock, msg, len, rx_dbm);
             return true;
         }
         h->next += h->dwell;
@@ -1570,7 +2220,16 @@ void med_finish(void)
             INFO("medium:   sniff %-8s %llu", sn_outcome_names[i], (unsigned long long)sn.outcomes[i]);
         INFO("medium: %llu locks made by a sniff, %llu detection draws", (unsigned long long)sn.locks,
              (unsigned long long)sn.draws);
+        if (sn.has_energy || sn.false_p > 0 || sn.adjacent || intf_any())
+            INFO("medium: detections: %llu by energy, %llu false (noise), %llu of an external interferer, "
+                 "%llu of a frame on another channel", (unsigned long long)sn.det_energy,
+                 (unsigned long long)sn.det_false, (unsigned long long)sn.det_ext, (unsigned long long)sn.det_adj);
     }
+    if (intf_any())
+        INFO("medium: %llu CCA queries with an external interferer on", (unsigned long long)med.cca_ext);
+    if (med.smooth_draws)
+        INFO("medium: %llu draws of the smooth capture model", (unsigned long long)med.smooth_draws);
+    intf_finish();
     if (med.log)
         fclose(med.log);
     med.log = NULL;
