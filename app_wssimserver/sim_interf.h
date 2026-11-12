@@ -54,12 +54,14 @@ void intf_advance(uint64_t now);
 void intf_power(int node, uint16_t chan, uint64_t t, double *fsk, double *noise);
 
 // Each on-interval of an external interferer at node on chan that overlaps
-// [from, to), clipped to it, with the power that falls on chan (mW), whether
-// it is noise-like, and for an FSK interferer the end of the preamble it
-// sends at the start of each burst (0: none, or the burst started before
-// from) and its data rate.
+// [from, to): start, end clipped to [from, to), ostart, oend the whole
+// interval (a constant interferer: 0 to UINT64_MAX), the power that falls on
+// chan (mW), whether it is noise-like, and for an FSK interferer the absolute
+// end of the preamble it sends at the start of each burst (ostart + pre=,
+// whatever from is; 0: no preamble) and its data rate.
 struct intf_piece {
     uint64_t start, end;
+    uint64_t ostart, oend;
     double mw;
     bool noise;
     uint64_t pre_end;

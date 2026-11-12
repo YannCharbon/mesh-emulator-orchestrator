@@ -933,6 +933,9 @@ static void apply_groups(struct ctxt *ctxt)
     if (!ctxt->num_groups && !prop_enabled())
         memset(ctxt->node_graph, 0xFF, sizeof(ctxt->node_graph));
     prop_build(ctxt->node_graph, nodes_infos_flat_map, lp.origin);
+    // External interferers placed with pos= get their levels from the positions (MEDIUM.md §13.1)
+    if (prop_enabled())
+        intf_set_position_model(prop_point_dbm);
     free(lp.origin);
     for (i = 0; i < MAX_NODES; i++)
         bitmap_clr(i, ctxt->node_graph[i], MAX_NODES / 64);
@@ -2101,6 +2104,7 @@ out:
         if (vt_sniffs_in)
             INFO("medium: %llu sniffs requested, %llu sniff results delivered", (unsigned long long)vt_sniffs_in,
                  (unsigned long long)vt_sniff_results_out);
+        intf_advance(vt_now);   // the run's end, for the interferers' statistics
         med_finish();
     }
     for (node = 0; node < MAX_NODES; node++)

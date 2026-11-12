@@ -37,6 +37,11 @@ bool prop_enabled(void);        // --positions given
 // nominal TX power); graph: the server's hearing bitmap (pairs added).
 void prop_build(uint64_t (*graph)[SIM_MAX_NODES / 64], struct node_infos *links, const uint8_t *given);
 
+// The mean level at node of an external interferer at pos (x, y, z in m)
+// with eirp_dbm (docs/MEDIUM.md §13.1); false if node has no position. The
+// hook of sim_interf.h (intf_set_position_model()).
+bool prop_point_dbm(int node, const double pos[3], float eirp_dbm, float *dbm);
+
 // Whether the power of tx's frames at rx comes from the model (both nodes
 // positioned, no -g value, not changed by --vtime-link)
 bool prop_modelled(int rx, int tx);

@@ -24,14 +24,18 @@
 
 // Separates the interferers' streams from the verdict, sniff and port streams
 #define INTF_RNG_K 0x696e746572660001ULL
-// Queries never look further back than this before the latest time seen
-// (a lock made by a sniff counts the interference from its detection, at
-// most one sniff window back): older intervals are freed
+// Intervals that ended this long before the latest time seen are freed. A
+// query starts at the latest time, at the start of a frame being locked onto
+// (a sniff can lock onto a frame whose preamble started earlier), or at a
+// sniff's next step: only a frame on air for more than this (a long "xl"
+// preamble) would miss intervals.
 #define INTF_LOOKBACK_US 60000000ULL
 #define INTF_MAX 64
 #define INTF_CHANS_MAX 512
 #define INTF_ADJ_MAX 16
 #define INTF_NODES_MAX 1024     // at= entries per interferer
+#define INTF_CF_MAX 16          // the longest adjacent-channel table (MED_ADJ_MAX, INTF_ADJ_MAX)
+#define INTF_CACHE 256
 
 enum { PAT_CONST, PAT_PERIODIC, PAT_GE, PAT_BURST };
 static const char *const pat_names[] = { "const", "periodic", "ge", "burst" };
@@ -74,6 +78,10 @@ struct isrc {
     struct ivl *iv;
     int head, n, cap;
     uint64_t n_gen, on_gen;     // generated so far: intervals, on-time
+    double cf[INTF_CF_MAX + 1]; // coupling 0, 1, ... channels away
+    int n_cf;                   // cf[d] = 0 from d = n_cf
+    int cache_chan[INTF_CACHE]; // wideband: the summed coupling into a channel
+    double cache_sum[INTF_CACHE];
 };
 
 static struct {
@@ -182,6 +190,8 @@ static void intf_parse_chans(struct isrc *s, const char *spec, char *v)
         b = dash ? intf_long(spec, "chan", dash + 1, a, 65535) : a;
         for (c = a; c <= b; c++) {
             FATAL_ON(s->n_chans >= INTF_CHANS_MAX, 1, "--interferer: at most %d channels: %s", INTF_CHANS_MAX, spec);
+            for (int k = 0; k < s->n_chans; k++)
+                FATAL_ON(s->chans[k] == c, 1, "--interferer: channel %ld given twice: %s", c, spec);
             s->chans[s->n_chans++] = c;
         }
     }
@@ -328,10 +338,12 @@ static void intf_parse(const char *spec)
 static void intf_parse_file(const char *path)
 {
     FILE *f = fopen(path, "r");
-    char line[4096], *p, *e;
+    char *line = NULL, *p, *e;
+    size_t cap = 0;
 
     FATAL_ON(!f, 1, "--interferer-file: %s: %m", path);
-    while (fgets(line, sizeof(line), f)) {
+    // getline: lines of any length
+    while (getline(&line, &cap, f) >= 0) {
         if ((p = strchr(line, '#')))
             *p = '\0';
         for (p = line; *p == ' ' || *p == '\t'; p++)
@@ -342,6 +354,7 @@ static void intf_parse_file(const char *path)
         if (*p)
             intf_parse(p);
     }
+    free(line);
     fclose(f);
 }
 
@@ -485,6 +498,8 @@ static void intf_gen(struct isrc *s, uint64_t upto)
 
 /* ---- the run */
 
+static void intf_cf_setup(struct isrc *s);
+
 void intf_start(uint64_t seed)
 {
     struct isrc *s;
@@ -499,6 +514,7 @@ void intf_start(uint64_t seed)
     for (i = 0; i < intf.n; i++) {
         s = intf.src[i];
         s->rng = mix64(seed + mix64((uint64_t)i + 1) + INTF_RNG_K);
+        intf_cf_setup(s);
         s->lvl = malloc(SIM_MAX_NODES * sizeof(*s->lvl));
         s->lvl_mw = malloc(SIM_MAX_NODES * sizeof(*s->lvl_mw));
         FATAL_ON(!s->lvl || !s->lvl_mw, 1, "malloc: %m");
@@ -547,10 +563,11 @@ void intf_advance(uint64_t now)
 }
 
 // The coupling of a source on channel from into channel rx (a factor)
-static double intf_coupling(const struct isrc *s, uint16_t from, uint16_t rx)
+// The coupling d channels away, from the source's adj= table, else the
+// medium's table of its rate (fsk), else none (noise); computed once at the
+// start (intf_cf_setup())
+static double intf_coupling_d(const struct isrc *s, int d)
 {
-    int d = from > rx ? from - rx : rx - from;
-
     if (!d)
         return 1;
     if (s->n_adj)
@@ -560,17 +577,43 @@ static double intf_coupling(const struct isrc *s, uint16_t from, uint16_t rx)
     return 0;
 }
 
+static void intf_cf_setup(struct isrc *s)
+{
+    s->n_cf = 0;
+    for (int d = 0; d <= INTF_CF_MAX; d++) {
+        s->cf[d] = intf_coupling_d(s, d);
+        if (s->cf[d] > 0)
+            s->n_cf = d + 1;
+    }
+    for (int k = 0; k < INTF_CACHE; k++)
+        s->cache_chan[k] = -1;
+}
+
+// The coupling of a source on channel from into channel rx (a factor)
+static double intf_coupling(const struct isrc *s, uint16_t from, uint16_t rx)
+{
+    int d = from > rx ? from - rx : rx - from;
+
+    return d < s->n_cf ? s->cf[d] : 0;
+}
+
 // The power (mW) that an on-interval of s puts on chan at node
-static double intf_piece_mw(const struct isrc *s, const struct ivl *iv, int node, uint16_t chan)
+static double intf_piece_mw(struct isrc *s, const struct ivl *iv, int node, uint16_t chan)
 {
     double sum = 0;
     int k;
 
     if (iv && s->hop)
         return s->lvl_mw[node] * intf_coupling(s, iv->chan, chan);
-    for (k = 0; k < s->n_chans; k++)
-        sum += intf_coupling(s, s->chans[k], chan);
-    return s->lvl_mw[node] * sum;
+    // A wideband source: the sum over its channels, cached per channel
+    k = chan % INTF_CACHE;
+    if (s->cache_chan[k] != chan) {
+        for (int c = 0; c < s->n_chans; c++)
+            sum += intf_coupling(s, s->chans[c], chan);
+        s->cache_chan[k] = chan;
+        s->cache_sum[k] = sum;
+    }
+    return s->lvl_mw[node] * s->cache_sum[k];
 }
 
 // The first interval of s that ends after t (index), or s->n
@@ -634,6 +677,8 @@ void intf_each(int node, uint16_t chan, uint64_t from, uint64_t to, intf_cb cb, 
         if (s->pattern == PAT_CONST) {
             p.start = from;
             p.end = to;
+            p.ostart = 0;
+            p.oend = UINT64_MAX;
             p.mw = intf_piece_mw(s, NULL, node, chan);
             p.pre_end = 0;
             if (p.mw > 0)
@@ -645,6 +690,8 @@ void intf_each(int node, uint16_t chan, uint64_t from, uint64_t to, intf_cb cb, 
             p.mw = intf_piece_mw(s, &s->iv[k], node, chan);
             if (!(p.mw > 0))
                 continue;
+            p.ostart = s->iv[k].s;
+            p.oend = s->iv[k].e;
             p.start = s->iv[k].s > from ? s->iv[k].s : from;
             p.end = s->iv[k].e < to ? s->iv[k].e : to;
             p.pre_end = s->noise || !s->pre_us ? 0 : s->iv[k].s + s->pre_us;

@@ -549,6 +549,102 @@ def test_intf_sniff_adjacent():
           f"end energy: {r[2].results}")
 
 
+def test_intf_positions():
+    """pos= with --positions (§13.1): free-space path loss and the node's
+    antenna gain, without shadowing: CCA energy at node 1 (10 m away) and
+    node 2 (sqrt(200) m, gain 3 dBi); node 3 has no position and gets
+    level=. With shadowing (4 dB, the default): the same values for the same
+    seed, other values for another seed, and their spread around the mean."""
+    pos = os.path.join(tc.ARGS.logdir, "nodes.pos")
+    with open(pos, "w") as f:
+        f.write("1 0 0 0\n2 10 0 0 0 3\n")
+    f915 = 20 * math.log10(915) - 27.55
+    spec = "--interferer=chan=0,pos=0/10,eirp=10,level=-95"
+    r = {n: Radio(n, {1000: [("sense", 0)]}) for n in (1, 2, 3)}
+    d, out, rows = medium_run(r, [], opts=[f"--positions={pos}", "--prop-model=freespace", "--prop-shadow=0", spec])
+    want = {1: 10 - (20 * math.log10(10) + f915), 2: 10 + 3 - (20 * math.log10(math.sqrt(200)) + f915), 3: -95}
+    for n, lvl in want.items():
+        check(abs(r[n].sensed[0][2] - energy(lvl)) < 0.01, f"node {n}: {r[n].sensed}, expected {energy(lvl):.2f}")
+    print(f"     levels: node 1 {want[1]:.2f} dBm, node 2 {want[2]:.2f} dBm, node 3 (no position) -95 dBm")
+    got_s = {}
+    for seed in ("1", "1", "2"):
+        r = {n: Radio(n, {1000: [("sense", 0)]}) for n in (1, 2)}
+        medium_run(r, [], opts=[f"--positions={pos}", "--prop-model=freespace", spec], seed=seed)
+        got_s.setdefault(seed, []).append(tuple(round(r[n].sensed[0][2], 3) for n in (1, 2)))
+    check(got_s["1"][0] == got_s["1"][1] and got_s["1"][0] != got_s["2"][0], f"shadowing by seed: {got_s}")
+    # Spread: 40 interferers at the same distance from node 1, 4 dB shadowing
+    lv = []
+    for k in range(40):
+        a = 2 * math.pi * k / 40
+        r = {1: Radio(1, {1000: [("sense", 0)]})}
+        medium_run(r, [], opts=[f"--positions={pos}", "--prop-model=freespace",
+                                f"--interferer=chan=0,pos={10 * math.cos(a):.4f}/{10 * math.sin(a):.4f},eirp=10"])
+        e = r[1].sensed[0][2]
+        lv.append(dbm(mw(e) - mw(NOISE_DBM)) - want[1])
+    m = sum(lv) / len(lv)
+    sd = math.sqrt(sum((x - m) ** 2 for x in lv) / (len(lv) - 1))
+    check(abs(m) < 4 * 4 / math.sqrt(40) and 2.5 < sd < 5.8, f"shadowing of 40 positions: mean {m:.2f} dB, sd {sd:.2f} dB")
+    print(f"     shadowing over 40 positions: mean {m:+.2f} dB, standard deviation {sd:.2f} dB (4 dB set)")
+
+
+def test_intf_smooth_continuous():
+    """A continuous FSK interferer with --medium-capture-model=smooth: on air
+    when the frame's SHR ends, so the presync curve applies (§13.3). Against
+    the kits' continuous PN9 interferer (COCHANNEL_RESULTS.md §4.3, 50-byte
+    frames, 200 per point; the kits' W/I axis is about 1 dB below the packet
+    SIR, §3.2, so SIR = W/I + 1 dB): W/I -0.9 dB 49/200, +0.35 dB 309/400,
+    +1.4 dB 195/200. The smooth model is within 20 points at each, the step
+    model (the locked-frame curve) is more than 30 points off at the two
+    upper points."""
+    m3 = dict(M3, payload=M3_PSDU)
+    for wi, kit in ((-0.9, 49 / 200), (0.35, 309 / 400), (1.4, 195 / 200)):
+        res = {}
+        for name, opts in (("smooth", ["--medium-capture-model=smooth"]), ("step", [])):
+            e = -60 - (wi + 1)
+            xv, lines, out = frames_run(f"chan=0,level={e:.2f},kind=fsk", -60, n=200, wanted=m3, opts=opts)
+            res[name] = sum(m["ok"] for m in xv) / len(xv)
+        check(abs(res["smooth"] - kit) < 0.2, f"W/I {wi}: smooth {res['smooth']:.2f}, kit {kit:.2f}")
+        if wi > 0:
+            check(abs(res["step"] - kit) > 0.3, f"W/I {wi}: step {res['step']:.2f}, kit {kit:.2f}")
+        print(f"     W/I {wi:+.2f} dB: kit {kit * 100:.0f} %, smooth {res['smooth'] * 100:.0f} %, "
+              f"step {res['step'] * 100:.0f} %")
+
+
+def test_intf_long_sniff():
+    """A sniff of one hour with a busy noise-like interferer (a 2 ms burst
+    every 10 ms on average: about 360 000 intervals in the window) and the
+    energy detector at a threshold it never reaches: the window ends with
+    nothing detected, in a bounded time (the intervals are added a step at
+    a time and dropped once past). The summary covers the run up to its
+    end (3600.001 s: the run ends with the sniff), not its last medium event."""
+    t0 = time.time()
+    r = {2: Sniffer(2, {1000: [("sniff", 0, 3600 * 1000000)]})}
+    d, out, rows, sn = sniff_run(r, [], opts=["--interferer=name=busy,chan=0,level=-100,pattern=burst:2ms:8ms",
+                                              "--sniff-energy=-60", "--vtime-end=3700"])
+    wall = time.time() - t0
+    check(len(r[2].results) == 1 and r[2].results[0][1]["detected"] == 0 and r[2].results[0][0] == 3600001000,
+          f"long sniff: {r[2].results}")
+    check(wall < 60, f"long sniff took {wall:.1f} s")
+    check("on 19.99" in out and "of 3600.001 s" in out, f"summary at the run's end: {out[-500:]}")
+    print(f"     one-hour sniff with a busy interferer: {wall:.1f} s of wall time")
+
+
+def test_intf_parsing():
+    """--interferer-file lines of any length; a channel given twice is
+    refused."""
+    spec = os.path.join(tc.ARGS.logdir, "long.txt")
+    with open(spec, "w") as f:
+        f.write("# " + "x" * 10000 + "\n" + "name=l,chan=" + "/".join(str(c) for c in range(300)) + ",level=-90\n")
+    srv = Server(["--vtime=1", "--vtime-end=0.001", f"--interferer-file={spec}"])
+    d = Driver(tc.ARGS.sock, {1: tc.Script(1)})
+    tc.Script.TABLE = {1: {0: ([], tc.NEVER)}}
+    d.connect()
+    d.run()
+    out = srv.output()
+    check(srv.wait() == 0 and "interferer l: noise, 300 channels" in out, f"long line: {out[-400:]}")
+    start_fails(["--vtime=1", "--interferer=chan=1-3/2,level=-80"], "channel 2 given twice")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("server")

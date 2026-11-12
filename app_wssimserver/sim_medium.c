@@ -278,6 +278,7 @@ struct sn_sniff {
     struct sn_heard *h;
     uint64_t e_done;            // energy detection: the checks up to this time are done (§13.4)
     uint64_t f_time;            // a false detection at this time (MED_SNIFF_NONE: none)
+    uint64_t ext_upto;          // external interferers: added up to here (sn_ext_extend())
 };
 
 static struct {
@@ -956,7 +957,7 @@ static double med_energy_mw(int node, uint16_t chan, const struct med_frame *ski
     return sum;
 }
 
-// The external interferers' power at node on chan now, mW (§13)
+// The external interferers' power at node on chan now, mW (§13.1)
 static double med_ext_now(int node, uint16_t chan, uint64_t now)
 {
     double fsk, noise;
@@ -1332,7 +1333,8 @@ static struct med_lock *med_lock(struct med_frame *f, const struct med_rx *rx)
     // External interferers over the frame (§13)
     if (intf_any()) {
         intf_each(rx->node, f->chan, f->t_start, f->t_end, med_add_ext, l);
-        l->ext_mw = intf_max_mw(rx->node, f->chan, f->t_start, f->t_end);
+        if (med.log)            // only the log uses it
+            l->ext_mw = intf_max_mw(rx->node, f->chan, f->t_start, f->t_end);
     }
     med.locks[rx->node] = l;
     return l;
@@ -1728,16 +1730,21 @@ static void sn_add_adj(struct sn_sniff *x, const struct med_frame *f, const stru
 static void sn_add_ext(void *ctx, const struct intf_piece *p)
 {
     struct sn_sniff *x = ctx;
-    struct sn_heard *h = sn_push(x);
+    struct sn_heard *h;
 
+    // A later extension adds only the intervals that start in its range
+    // (the earlier ones are there already)
+    if (p->ostart < p->start && p->start > x->t_req)
+        return;
+    h = sn_push(x);
     h->id = 0;
     h->src = SN_SRC_NONE;
     h->start = p->start;
-    h->end = p->end;
+    h->end = p->oend < x->t1 + 1 ? p->oend : x->t1 + 1;    // + 1: on air at t1 counts (end energy)
     h->pre_end = p->pre_end;
     h->cand = !p->noise && (sn.frame_mode || p->pre_end > p->start);
     h->adj = false;
-    h->det_end = sn.frame_mode ? p->end : p->pre_end;
+    h->det_end = sn.frame_mode ? h->end : p->pre_end;
     h->dwell = ((uint64_t)sn.dwell_bits * 1000000 + p->rate_bps - 1) / p->rate_bps;
     if (!h->dwell)
         h->dwell = 1;
@@ -1747,6 +1754,53 @@ static void sn_add_ext(void *ctx, const struct intf_piece *p)
         sn_first_dwell(x, h);
     else
         h->next = 0;
+}
+
+// The external interferers of a sniff are added a step at a time (§13.4),
+// so that a long window with a busy interferer holds only the intervals
+// around the current time: every interval that starts before x->ext_upto
+// is in x->h
+#define SN_EXT_STEP_US 1000000ULL
+static void sn_ext_extend(struct sn_sniff *x, int node, uint64_t now)
+{
+    uint64_t to;
+
+    while (x->ext_upto <= now && x->ext_upto <= x->t1) {
+        to = x->ext_upto + SN_EXT_STEP_US;
+        if (to > x->t1 + 1)
+            to = x->t1 + 1;
+        intf_each(node, x->chan, x->ext_upto, to, sn_add_ext, x);
+        x->ext_upto = to;
+    }
+}
+
+// Entries that can no longer matter leave the sniff (§13.4): ended before
+// every dwell, energy window and SINR range still to evaluate. Only with
+// external interferers (the windows of the other sniffs stay as they were).
+static void sn_prune(struct sn_sniff *x, uint64_t now)
+{
+    uint64_t cutoff, margin = sn.has_energy ? sn.energy_us : 0;
+    int i, j;
+
+    if (x->n < 64)
+        return;
+    for (i = 0; i < x->n; i++)
+        if (x->h[i].dwell > margin)
+            margin = x->h[i].dwell;
+    if (now <= margin)
+        return;
+    cutoff = now - margin;
+    for (i = 0; i < x->n; i++)
+        if (x->h[i].next && x->h[i].next - x->h[i].dwell < cutoff)
+            cutoff = x->h[i].next - x->h[i].dwell;
+    for (i = j = 0; i < x->n; i++) {
+        const struct sn_heard *h = &x->h[i];
+
+        if (h->end <= cutoff && !h->next && !(sn.has_energy && h->start + sn.energy_us > x->e_done))
+            continue;
+        x->h[j++] = *h;
+    }
+    x->n = j;
 }
 
 // The false-detection stream of a node (§13.4)
@@ -1823,6 +1877,8 @@ static uint64_t sn_next(const struct sn_sniff *x)
         next = e;
     if (x->f_time < next)
         next = x->f_time;
+    if (intf_any() && x->ext_upto <= x->t1 && x->ext_upto < next)
+        next = x->ext_upto;     // to add the next step of external intervals
     return next;
 }
 
@@ -1870,6 +1926,7 @@ uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, ui
         x->t0 = x->t1;
     x->e_done = 0;
     x->f_time = MED_SNIFF_NONE;
+    x->ext_upto = now;
     for (f = med.air; f; f = f->next) {
         if (f->chan != x->chan || f->src == node) {
             // §13.4: a frame on another channel, where its power leaks
@@ -1884,7 +1941,7 @@ uint32_t med_sniff_start(int node, const struct sim_sniff *req, uint64_t now, ui
     }
     // External interferers in the window (§13.4)
     if (intf_any())
-        intf_each(node, x->chan, now, x->t1 + 1, sn_add_ext, x);    // + 1: on air at t1 counts (end energy)
+        sn_ext_extend(x, node, now);
     // A false detection on noise (§13.4): its time, drawn now
     if (sn.false_p > 0 && x->t1 > x->t0) {
         double u = sn_uniform_f(node), t;
@@ -2085,6 +2142,12 @@ bool med_sniff_check(int node, uint32_t serial, uint64_t now, struct sim_sniff_r
     memset(res, 0, sizeof(*res));
     memcpy(res->magic, "xd", 2);
     res->sniff_id = x->id;
+    // External interferers: the next step of their intervals, and the
+    // entries that no longer matter leave (§13.4)
+    if (intf_any()) {
+        sn_ext_extend(x, node, now);
+        sn_prune(x, now);
+    }
     // Each dwell that ended by now, in time order (then frame start and ID)
     for (;;) {
         best = NULL;

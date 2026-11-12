@@ -82,6 +82,7 @@ const struct option prop_long_options[] = {
 #define K_NODE   0x6e6f64655f736864ULL  // shadowing term of a node
 #define K_ROFF   0x727373695f6f6666ULL  // RSSI offset of a receiver
 #define K_RNOISE 0x727373695f6e6f69ULL  // RSSI noise of a frame at a receiver
+#define K_INTF   0x696e74665f736864ULL  // shadowing of an external interferer's path to a node
 
 static struct {
     bool tuning;                // any --prop-* option
@@ -574,6 +575,43 @@ void prop_build(uint64_t (*graph)[MAX_NODES / 64], struct node_infos *links, con
          heard, by_model, prop.tx_dbm, prop.margin, prop.cutoff, heard - by_model, prop.n_pos ? 2.0 * heard / prop.n_pos : 0.0,
          deg_min, deg_max, usable, asym, overridden,
          (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9);
+}
+
+// An external interferer at pos (docs/MEDIUM.md §13.1): the mean level at
+// node of a transmitter there with eirp_dbm (its antenna gain included), by
+// the same path loss as between nodes, the node's antenna gain, and static
+// shadowing: the link term (sigma_link) drawn for the pair (position, node),
+// both directions alike, and the node's own term (sigma_node); no direction
+// term (an interferer only transmits). The interferer's floor comes from z,
+// as for a node without FLOOR. Registered with intf_set_position_model().
+bool prop_point_dbm(int node, const double pos[3], float eirp_dbm, float *dbm)
+{
+    double dx, dy, dz, dh, d, pl, s = 0;
+    uint64_t key;
+    int fl;
+
+    if (!prop.built || !prop.has[node])
+        return false;
+    dx = pos[0] - prop.x[node];
+    dy = pos[1] - prop.y[node];
+    dz = pos[2] - prop.z[node];
+    dh = sqrt(dx * dx + dy * dy);
+    d = sqrt(dh * dh + dz * dz);
+    pl = prop.pl0 + 10 * prop.exp * log10(fmax(d, prop.min_dist)) + prop.wall_per_m * dh;
+    if (prop.wall_db > 0)
+        pl += (prop_walls_between(pos[0], prop.x[node], prop.walls_x) +
+               prop_walls_between(pos[1], prop.y[node], prop.walls_y)) * prop.wall_db;
+    fl = (int)floor(pos[2] / prop.floor_height + 0.5);
+    pl += prop_floor_loss(abs(fl - prop.floor[node]));
+    // The position's key: its coordinates rounded to the millimetre
+    key = mix64(K_INTF + mix64((uint64_t)llround(pos[0] * 1000)) + mix64(mix64((uint64_t)llround(pos[1] * 1000))) +
+                mix64(mix64(mix64((uint64_t)llround(pos[2] * 1000)))));
+    if (prop.sh_link > 0)
+        s += prop.sh_link * prop_normal(key, node, 0);
+    if (prop.sh_node > 0)
+        s += prop.node_sh[node];
+    *dbm = eirp_dbm + prop.g[node] - pl - s;
+    return true;
 }
 
 bool prop_modelled(int rx, int tx)
