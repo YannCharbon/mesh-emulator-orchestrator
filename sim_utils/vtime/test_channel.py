@@ -66,44 +66,8 @@ def autocorr(x, lag):
     return corr(x[:-lag], x[lag:])
 
 
-# Rician power (mean 1) and the layered curve averaged over it (§12.4)
-def i0(z):
-    s = t = 1.0
-    k = 0
-    while True:
-        k += 1
-        t *= (z / 2) ** 2 / (k * k)
-        s += t
-        if t < s * 1e-17:
-            return s
-
-
-def rician_grid(k, n=3000, lo=-25.0, hi=2.5):
-    out, du, tot = [], (hi - lo) / n, 0
-    for i in range(n):
-        u = lo + (i + 0.5) * du
-        x = math.exp(u)
-        f = (k + 1) * math.exp(-k - (k + 1) * x) * i0(2 * math.sqrt(k * (k + 1) * x)) if k else math.exp(-x)
-        out.append((x, f * x * du))
-        tot += f * x * du
-    return [(x, w / tot) for x, w in out]
-
-
-def rician_cdf(k, x0):
-    return sum(w for x, w in rician_grid(k) if x < x0)
-
-
-def per(snr_db, bits, x0, b):
-    ber = min(0.5, 0.5 * math.exp(-(snr_db - x0) / b))
-    return -math.expm1(bits * math.log1p(-ber))
-
-
-def per_layered_avg(p_dbm, bits, k=10, x0=9.0, b=0.9):
-    return sum(w * per(p_dbm - NOISE_DBM + 10 * math.log10(x), bits, x0, b) for x, w in rician_grid(k))
-
-
-def per_empirical(p_dbm, bits):
-    return per(p_dbm - NOISE_DBM, bits, 0, 2)
+# Rician power (mean 1) and the layered curve averaged over it (§12.3)
+from layered_fit import rician_cdf, per_layered_avg, per_empirical  # noqa: E402
 
 
 # ---- the processes
