@@ -4,14 +4,14 @@
 # exit status 1 if any run failed.
 #
 # usage: lfn_suite.sh [quick|full] <bindir> <workdir(holds examples/)> <outdir>
-#   quick  one run of each test (seed 1; the profile runs 12 h): 54 runs,
+#   quick  one run of each test (seed 1; the profile runs 12 h): 55 runs,
 #          about 70 s of wall time with 12 jobs on a 24-core PC
 #   full   the documented counts, at most 6 runs per check (the root
 #          CLAUDE.md sizing rule): 3 seeds per check, 6 for the checks that
 #          vary most (join with traffic, better parent, restart), 2 for the
 #          profile runs (48 h Balanced, 72 h Eco), one Eco run with a 4 h
 #          listen interval over 72 h, test_lfn_keyreq.sh on its seed 3:
-#          152 runs, about 7 minutes with 12 jobs
+#          153 runs, about 7 minutes with 12 jobs
 # Environment: JOBS (12: runs at once), ONLY (a regular expression: only
 # the runs whose name matches), KEEP (1: keep the run directories; by
 # default only each run's output, <outdir>/<name>.txt, is kept).
@@ -99,6 +99,7 @@ echo "power||python3 $V/test_power.py $BIN/wssimserver"
 echo "sniff||python3 $V/test_sniff.py $BIN/wssimserver --sock /tmp/lfn_suite_sniff_$$.sock"
 echo "propagation||python3 $V/test_propagation.py $BIN/wssimserver --sock /tmp/lfn_suite_prop_$$.sock --logdir <out>"
 echo "channel||python3 $V/test_channel.py $BIN/wssimserver --sock /tmp/lfn_suite_chan_$$.sock --logdir <out>"
+echo "interf||python3 $V/test_interf.py $BIN/wssimserver --sock /tmp/lfn_suite_interf_$$.sock --logdir <out>"
 } | { [ -n "${ONLY:-}" ] && grep -E "^[^|]*(${ONLY})" || cat; } > "$OUT/jobs.txt"
 
 run() {   # run <job line>

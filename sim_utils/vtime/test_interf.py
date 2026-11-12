@@ -161,8 +161,8 @@ def test_intf_cca():
             exp = NOISE_DBM if lvl is None else energy(lvl)
             check(abs(got_db - exp) < 0.01, f"{spec}: CCA at node {n} chan {c}: {got_db:.2f}, expected {exp:.2f}")
         n_on = sum(1 for v in want.values() if v is not None)
-        check(f"CCA queries with an external interferer on" in out and f"medium: {n_on} CCA queries with an external"
-              in out, f"{spec}: summary {out[-800:]}")
+        check(f"medium: an external interferer on at {n_on} of the channel-energy queries" in out,
+              f"{spec}: summary {out[-800:]}")
 
 
 def test_intf_periodic():

@@ -2226,7 +2226,7 @@ void med_finish(void)
                  (unsigned long long)sn.det_false, (unsigned long long)sn.det_ext, (unsigned long long)sn.det_adj);
     }
     if (intf_any())
-        INFO("medium: %llu CCA queries with an external interferer on", (unsigned long long)med.cca_ext);
+        INFO("medium: an external interferer on at %llu of the channel-energy queries", (unsigned long long)med.cca_ext);
     if (med.smooth_draws)
         INFO("medium: %llu draws of the smooth capture model", (unsigned long long)med.smooth_draws);
     intf_finish();
