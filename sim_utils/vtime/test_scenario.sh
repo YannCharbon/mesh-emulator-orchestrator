@@ -92,4 +92,46 @@ sys.exit(1 if fails else 0)
 EOF
 OK=$?
 [ "${KEEP:-0}" = 1 ] || rm -rf "$OUT/run"
+
+# Failures must fail the run: a node command a node refuses, an error inside
+# the driver, the driver killed; and a scenario the validator must refuse.
+check_fail() {  # check_fail <name> <status> <expected status prefix>
+    local d="$OUT/fail_$1" st
+    st=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['status'])" "$d/scenario_result.json" 2>/dev/null)
+    if [ "$2" != 0 ] && [[ $st == $3* ]]; then echo "ok   $1: the run failed (status $2), scenario status: $st"
+    else echo "FAIL $1: run status $2, scenario status: ${st:-none} ($d.out)"; OK=1; fi
+    [ "${KEEP:-0}" = 1 ] || rm -rf "$d" "$d.json" "$d.out"
+}
+for c in badcmd crash intf; do
+    case $c in
+    intf) ph='{"name": "x", "actions": [{"do": "interferer_add", "spec": "chan=1,level=-70,hop=on"}], "end": {"after_s": 5}}' ;;
+    badcmd) ph='{"name": "x", "x_test_command": "load set payload=5", "end": {"after_s": 5}}' ;;
+    crash) ph='{"name": "x", "x_test_crash": true, "end": {"after_s": 5}}' ;;
+    esac
+    d="$OUT/fail_$c"; rm -rf "$d"
+    printf '{"format": "wssim-scenario 1", "phases": [{"name": "w", "start": {"is": "time", "t_s": 60}, "end": {"after_s": 0}}, %s]}\n' "$ph" > "$d.json"
+    WSSIM_SEED=1 TUN=none SCENARIO="$d.json" "$HERE/run.sh" "$1" "$2" "$d" 400 > "$d.out" 2>&1
+    check_fail $c $? error
+done
+# the driver killed: the conductor sees its connection closed without "quit"
+d="$OUT/fail_kill"; rm -rf "$d"
+printf '{"format": "wssim-scenario 1", "phases": [{"name": "w", "start": {"is": "time", "t_s": 300}, "end": {"after_s": 0}}]}\n' > "$d.json"
+WSSIM_SEED=1 TUN=none SCENARIO="$d.json" "$HERE/run.sh" "$1" "$2" "$d" 400 > "$d.out" 2>&1 &
+RUN=$!
+for (( i = 0; i < 200; i++ )); do
+    P=$(pgrep -f "scenario.py drive .*--run $d " | head -1)
+    [ -n "$P" ] && grep -q "scenario: driver connected" "$d/simserver.log" 2>/dev/null && break
+    sleep 0.05
+done
+[ -n "$P" ] && kill -9 "$P"
+wait $RUN; RC=$?
+if [ "$RC" != 0 ] && grep -q "driver lost" "$d/simserver.log"; then echo "ok   kill: the run failed (status $RC), simserver.log: scenario driver lost"
+else echo "FAIL kill: run status $RC ($d.out)"; OK=1; fi
+[ "${KEEP:-0}" = 1 ] || rm -rf "$d" "$d.json" "$d.out"
+# refused by the validator before any run (the review's reproducer)
+printf '{"format": "wssim-scenario 1", "phases": [{"use": "probe"}, {"use": "capacity"}, {"use": "node_failure", "load_fraction": 0}]}\n' > "$OUT/bad.json"
+if python3 "$HERE/../scenario.py" --check "$OUT/bad.json" | grep -q '"/phases/2/load_fraction"'; then echo "ok   validator: load_fraction 0 refused"
+else echo "FAIL validator: load_fraction 0 accepted"; OK=1; fi
+rm -f "$OUT/bad.json"
+echo "test_scenario: $([ $OK = 0 ] && echo PASSED || echo FAILED) ($((SECONDS - T0)) s wall time)"
 exit $OK

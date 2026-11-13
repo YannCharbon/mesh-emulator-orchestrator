@@ -123,6 +123,13 @@
 #                      scenario_result.json, scenario.log; with POWER,
 #                      power_snap.jsonl. Statistics on, sampled when the driver
 #                      asks (STATS_PERIOD 0 unless given)
+#   QUEUE_LIMIT=<n>    device queue limit for every program (queue_limit: the
+#                      stack's random early detection drops from n/2 frames
+#                      and always at n, instead of its heap-sized defaults,
+#                      unbounded on a PC; docs/TRAFFIC_AND_REPORT.md §2.2)
+#   COMPACT=1          compact logs (log_level = info): no debug traces of the
+#                      stack, no "Channel changed" lines (about 10 times
+#                      smaller node logs; join milestones and LOAD1, NET1 kept)
 #   REPORT=auto|1|0    run sim_utils/report.py at the end: <outdir>/report.json.
 #                      auto (default): when LOAD, STATS or SCENARIO is set
 #   IF_NODES="<i> ..." nodes that are clients of the stack-neutral radio
@@ -290,6 +297,8 @@ fi
 for v in $(compgen -v LOAD_); do
 	k=${v#LOAD_}; APP_OPTS+=" -o load_${k,,}=${!v}"
 done
+[ -n "${QUEUE_LIMIT:-}" ] && APP_OPTS+=" -o queue_limit=$QUEUE_LIMIT"
+[ "${COMPACT:-0}" = 1 ] && APP_OPTS+=" -o log_level=info"
 if [ "${STATS:-0}" = 1 ]; then
 	APP_OPTS+=" -o stats=true -o stats_period_s=${STATS_PERIOD:-10}"
 fi
@@ -582,7 +591,8 @@ for p in "${!ACTIVE[@]}"; do
 done
 [ -n "$SAMPLER" ] && { kill "$SAMPLER" 2>/dev/null; wait "$SAMPLER" 2>/dev/null; rm -f "$OUT/rss.tmp"; }
 if [ -n "$DRIVER" ]; then
-	wait "$DRIVER"; echo "scenario driver status $?" >> "$OUT/run_info.txt"
+	wait "$DRIVER"; DRIVER_RC=$?
+	echo "scenario driver status $DRIVER_RC" >> "$OUT/run_info.txt"
 fi
 rm -f "$SOCK"
 echo "end_wall=$(date +%s.%N)" >> "$OUT/run_info.txt"
@@ -611,5 +621,16 @@ if [ -n "$BAD" ]; then
 	echo "run.sh: non-zero exit status: $BAD(exit_codes.txt)${SIM_RC:+$([ "$SIM_RC" != 0 ] && echo "; wssimserver failed, see above")}" >&2
 	echo "failed: non-zero exit status: $BAD" >> "$OUT/run_info.txt"
 	exit 1
+fi
+# A scenario that failed (an error in the driver, no result) fails the run
+if [ -n "${SCENARIO:-}" ]; then
+	if [ ! -s "$OUT/scenario_result.json" ]; then
+		echo "run.sh: the scenario driver wrote no scenario_result.json ($OUT/scenario.log)" >&2
+		echo "failed: no scenario result" >> "$OUT/run_info.txt"; exit 1
+	fi
+	if [ "${DRIVER_RC:-1}" != 0 ]; then
+		echo "run.sh: scenario failed (driver status $DRIVER_RC): $(tail -n 1 "$OUT/scenario.log")" >&2
+		echo "failed: scenario driver status $DRIVER_RC" >> "$OUT/run_info.txt"; exit 1
+	fi
 fi
 [ "${SIM_RC:-1}" = 0 ]
