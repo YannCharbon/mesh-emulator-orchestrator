@@ -17,15 +17,16 @@
 #include "common/log.h"
 #include "sl_rf_driver.h"
 #include "sl_rf_inproc.h"
+#include "sl_rf_neighbors.h"
 #ifdef NS_PORT_SIM
 #include <time.h>
 #include "ns_port/time.h"
 #endif
 
 // The same table and sizes as wshwsim (sl_wsrcp.h, g_storage_sizes).
-static struct neighbor_timings neighbors[255];
+static struct rf_neighbors neighbors;
 static mac_description_storage_size_t storage_sizes = {
-    .device_description_table_size = ARRAY_SIZE(neighbors),
+    .device_description_table_size = 255,  // the stack's neighbour table (a uint8_t)
     .key_description_table_size = 7,   // GTKs 1-4 and FAN 1.1 LGTKs 5-7
     .key_lookup_size = 1,
     .key_usage_size = 3,
@@ -63,8 +64,9 @@ struct mac_api_s *rf_inproc_init(const char *sim_socket, const uint8_t eui64[8])
     int8_t rf_id;
 
     g_rf_host.rf_fd = rf_sim_connect(sim_socket, eui64);
-    g_rf_host.neighbors = neighbors;
-    g_rf_host.neighbors_count = ARRAY_SIZE(neighbors);
+    g_rf_host.neighbors = neighbors.slot;
+    g_rf_host.neighbors_count = RF_NEIGHBORS_MAX;
+    neighbors.still_known = rf_inproc_stack_holds_neighbor;
     rf_id = virtual_rf_device_register(PHY_LINK_15_4_SUBGHZ_TYPE, 2043);
     FATAL_ON(rf_id < 0, 2, "virtual_rf_device_register: %d", rf_id);
     arm_net_phy_mac64_set((uint8_t *)eui64, rf_id);
@@ -89,41 +91,24 @@ void rf_inproc_add_to_run_loop(void)
 // the stack calls rcp/'s version directly, which does nothing because the
 // FHSS reads the neighbours from the stack itself. So the program is linked
 // with -Wl,--wrap for these two functions, and the table is kept here the way
-// wshwsim keeps it.
+// wshwsim keeps it (sl_rf_neighbors.h), except that a full table is cleaned
+// up with what the stack still holds (sl_rf_inproc_stack.c; not linked in
+// wslfntest-inproc, which has no upper stack).
 void __real_ns_fhss_ws_update_neighbor(const uint8_t eui64[8], fhss_ws_neighbor_timing_info_t *fhss_data);
 void __real_ns_fhss_ws_drop_neighbor(const uint8_t eui64[8]);
 
 void __wrap_ns_fhss_ws_update_neighbor(const uint8_t eui64[8], fhss_ws_neighbor_timing_info_t *fhss_data)
 {
-    struct fhss_ws_neighbor_timing_info *val = NULL;
-    int i;
-
-    for (i = 0; i < ARRAY_SIZE(neighbors); i++)
-        if (!memcmp(neighbors[i].eui64, eui64, 8))
-            val = &neighbors[i].val;
-    if (!val) {
-        for (i = 0; i < ARRAY_SIZE(neighbors); i++) {
-            if (!memcmp(neighbors[i].eui64, "\x00\x00\x00\x00\x00\x00\x00\x00", 8)) {
-                val = &neighbors[i].val;
-                memcpy(neighbors[i].eui64, eui64, 8);
-                break;
-            }
-        }
-        BUG_ON(i == ARRAY_SIZE(neighbors), "full");
-    }
-    *val = *fhss_data;
+    *rf_neighbors_update(&neighbors, eui64) = *fhss_data;
     __real_ns_fhss_ws_update_neighbor(eui64, fhss_data);
 }
 
 void __wrap_ns_fhss_ws_drop_neighbor(const uint8_t eui64[8])
 {
-    int i;
+    // Once entries were removed to make room, the stack may drop one of them
+    bool found = rf_neighbors_drop(&neighbors, eui64);
 
-    for (i = 0; i < ARRAY_SIZE(neighbors); i++)
-        if (!memcmp(neighbors[i].eui64, eui64, 8))
-            break;
-    BUG_ON(i == ARRAY_SIZE(neighbors), "not found");
-    memset(neighbors[i].eui64, 0, 8);
+    BUG_ON(!found && !neighbors.removed, "not found");
     __real_ns_fhss_ws_drop_neighbor(eui64);
 }
 

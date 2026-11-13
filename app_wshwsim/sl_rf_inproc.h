@@ -7,6 +7,7 @@
 #ifndef SL_RF_INPROC_H
 #define SL_RF_INPROC_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 struct mac_api_s;
@@ -21,5 +22,10 @@ struct mac_api_s *rf_inproc_init(const char *sim_socket, const uint8_t eui64[8])
 
 // Add the radio's socket to ns_port_run().
 void rf_inproc_add_to_run_loop(void);
+
+// Whether the stack still holds this neighbour: in its neighbour table or as
+// a temporary entry (sl_rf_inproc_stack.c). Weak: absent from programs
+// without the upper stack (wslfntest-inproc).
+bool rf_inproc_stack_holds_neighbor(const uint8_t eui64[8]) __attribute__((weak));
 
 #endif

@@ -46,7 +46,7 @@
 struct wsmac_ctxt g_ctxt = { };
 // FIXME: should be const
 mac_description_storage_size_t g_storage_sizes = {
-    .device_description_table_size = ARRAY_SIZE(g_ctxt.neighbor_timings),
+    .device_description_table_size = 255,  // the stack's neighbour table (a uint8_t)
     .key_description_table_size = 4,
     .key_lookup_size = 1,
     .key_usage_size = 3,
@@ -242,8 +242,8 @@ void configure(struct wsmac_ctxt *ctxt, int argc, char *argv[])
 #endif
     // The CCA looks at the neighbours the host pushed with
     // ns_fhss_ws_update_neighbor() (sl_wsrcp_mac.c).
-    g_rf_host.neighbors = ctxt->neighbor_timings;
-    g_rf_host.neighbors_count = ARRAY_SIZE(ctxt->neighbor_timings);
+    g_rf_host.neighbors = ctxt->neighbor_timings.slot;
+    g_rf_host.neighbors_count = RF_NEIGHBORS_MAX;
 }
 
 struct mac_api_s *init_mac_api(int rcp_driver_id)
