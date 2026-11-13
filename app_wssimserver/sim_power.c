@@ -1184,3 +1184,35 @@ void pwr_finish(uint64_t t_end_us, uint64_t seed)
     }
     INFO("power: report in %s", pwr.out_path);
 }
+
+void pwr_node_off(int node, uint64_t t)
+{
+    struct sim_radio_report r = { .magic = "xr", .state = SIM_RADIO_OFF };
+
+    if (pwr.nodes[node])
+        pwr_radio(node, t, &r);
+}
+
+void pwr_snapshot(FILE *f, const char *tag, uint64_t t)
+{
+    FILE *log = pwr.log;
+    struct pwr_totals tt;
+    struct pwr_node c;
+    int i;
+
+    pwr.log = NULL;     // the copies' closing intervals are not logged
+    fprintf(f, "{\"tag\":\"%s\",\"t_us\":%llu,\"nodes\":[", tag, (unsigned long long)t);
+    for (i = 0; i < pwr.num_nodes; i++) {
+        c = *pwr.nodes[pwr.ids[i]];
+        if ((double)t > c.start)
+            node_close(&c, (double)t);
+        node_totals(&c, &tt);
+        fprintf(f, "%s[%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]", i ? "," : "", c.id, tt.charge,
+                tt.mcu_q[MCU_ACTIVE] + tt.mcu_q[MCU_SLEEP] + tt.mcu_q[MCU_DEEP] + tt.wake_q +
+                tt.mt_q[MT_SLEEP_ENTER] + tt.mt_q[MT_SLEEP_WAKE] + tt.mt_q[MT_DEEP_ENTER] + tt.mt_q[MT_DEEP_WAKE],
+                tt.r_q[SIM_RADIO_LISTEN], tt.r_q[SIM_RADIO_RECEIVE], tt.r_q[SIM_RADIO_TX],
+                tt.r_q[SIM_RADIO_OFF] + tt.r_q[SIM_RADIO_IDLE] + tt.cca_q + tt.rt_q);
+    }
+    fprintf(f, "]}\n");
+    pwr.log = log;
+}

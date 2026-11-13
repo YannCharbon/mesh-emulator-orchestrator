@@ -144,6 +144,8 @@ add_executable(wsbrd
     app_wsbrd/node_table.c
     app_wsbrd/multicast_helper.c
     app_wsbrd/test_traffic.c
+    app_wsbrd/app_load.c
+    app_wsbrd/net_stats.c
     app_wsbrd/wsbr_mac.c
     app_wsbrd/wsbr_fhss_mac.c
     app_wsbrd/wsbr_fhss_net.c
@@ -180,7 +182,7 @@ target_compile_definitions(wsbrd PRIVATE MQTTCLIENT_PLATFORM_HEADER=MQTTMbed.h)
 #add_compile_definitions(MQTT_TASK)
 target_compile_definitions(wsbrd PRIVATE EXTRA_DEBUG_INFO)
 target_link_libraries(wsbrd PRIVATE nanostack_ws_border_router)
-target_link_libraries(wsbrd PRIVATE Threads::Threads)
+target_link_libraries(wsbrd PRIVATE Threads::Threads m)
 target_link_libraries(wsbrd PRIVATE PkgConfig::LIBNL_ROUTE)
 target_link_libraries(wsbrd PRIVATE MbedTLS::mbedtls MbedTLS::mbedcrypto MbedTLS::mbedx509)
 if(LIBSYSTEMD_FOUND)
@@ -216,6 +218,8 @@ if(COMPILE_SIMULATION_TOOLS)
         version.c
         app_wsbrd/multicast_helper.c
         app_wsbrd/test_traffic.c
+    app_wsbrd/app_load.c
+    app_wsbrd/net_stats.c
         app_wsbrd/wsrouter.c
         app_wsbrd/wsbr_mac.c
         app_wsbrd/wsbr_fhss_mac.c
@@ -249,7 +253,7 @@ if(COMPILE_SIMULATION_TOOLS)
     target_compile_definitions(wsnode PRIVATE MQTTCLIENT_PLATFORM_HEADER=MQTTMbed.h)
     # target_compile_definitions(wsnode PRIVATE EXTRA_DEBUG_INFO)
     target_link_libraries(wsnode PRIVATE nanostack_ws_router)
-    target_link_libraries(wsnode PRIVATE Threads::Threads)
+    target_link_libraries(wsnode PRIVATE Threads::Threads m)
     target_link_libraries(wsnode PRIVATE MbedTLS::mbedtls MbedTLS::mbedcrypto MbedTLS::mbedx509)
     if(LIBDL_FOUND)
         target_compile_definitions(wsnode PRIVATE HAVE_LIBDL)
@@ -308,6 +312,8 @@ if(COMPILE_SIMULATION_TOOLS)
             ${app_sources}
             app_wsbrd/multicast_helper.c
             app_wsbrd/test_traffic.c
+            app_wsbrd/app_load.c
+            app_wsbrd/net_stats.c
             app_wsbrd/commandline.c
             app_wsbrd/named_values.c
             application_protocols/mqtt/MQTTClient-C/src/MQTTClient.c
@@ -342,7 +348,13 @@ if(COMPILE_SIMULATION_TOOLS)
                               MbedTLS::mbedtls MbedTLS::mbedcrypto MbedTLS::mbedx509)
         # sl_rf_inproc.c keeps the neighbour list the CCA uses.
         target_link_options(${variant} PRIVATE
-            -Wl,--wrap=ns_fhss_ws_update_neighbor,--wrap=ns_fhss_ws_drop_neighbor)
+            -Wl,--wrap=ns_fhss_ws_update_neighbor,--wrap=ns_fhss_ws_drop_neighbor
+            # net_stats.c (docs/TRAFFIC_AND_REPORT.md): queue depths over time, the
+            # retries per frame, the control messages sent; only forwarding while
+            # the statistics are off
+            -Wl,--wrap=sw_mac_stats_update,--wrap=protocol_stats_update
+            -Wl,--wrap=rpl_control_transmit_dio,--wrap=rpl_control_transmit_dis,--wrap=rpl_control_transmit_dao
+            -Wl,--wrap=random_early_detection_create)
         if(NANOSTACK_PORT STREQUAL "nanostack_port_sim")
             # mbedTLS puts time() in the TLS hello randoms: virtual time instead
             # (sl_rf_inproc.c).

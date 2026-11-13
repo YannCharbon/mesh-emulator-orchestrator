@@ -14,6 +14,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "sim_proto.h"
 #include "ns_port_sim.h"
@@ -35,6 +36,12 @@ void pwr_radio(int node, uint64_t t, const struct sim_radio_report *r);
 void pwr_wake_report(int node, const struct nsim_wake *w);
 void pwr_idle(int node, uint64_t t, uint64_t next_us);     // "xi"
 void pwr_finish(uint64_t t_end_us, uint64_t seed);
+// Scenarios (docs/SCENARIOS.md): a node stopped by the driver (its radio off
+// from t; it is then charged as asleep), and a snapshot of every node's
+// charge so far, one JSON line appended to f:
+// {"tag":..,"t_us":..,"nodes":[[id,charge_uc,mcu_uc,listen_uc,receive_uc,tx_uc,other_uc],...]}
+void pwr_node_off(int node, uint64_t t);
+void pwr_snapshot(FILE *f, const char *tag, uint64_t t);
 // The node's CCA duration in µs (its profile's cca_us, for its --power-mode
 // or the common value), rounded; 0 without power recording. Sent in a radio
 // interface client's welcome (docs/RADIO_INTERFACE.md §4.3)

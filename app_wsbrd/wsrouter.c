@@ -200,6 +200,22 @@ static void wsbr_configure_ws(struct wsbr_ctxt *ctxt)
 #define WSROUTER_EVENT_RESET_DOWN 103
 #define WSROUTER_EVENT_RESET_UP 104
 
+// Runtime command "iface down|up" (docs/SCENARIOS.md: a graceful leave)
+static void wsrouter_ctl_iface(const char *args)
+{
+    struct wsbr_ctxt *ctxt = &g_ctxt;
+
+    if (!strcmp(args, "down")) {
+        INFO("control: interface down");
+        WARN_ON(arm_nwk_interface_down(ctxt->rcp_if_id));
+    } else if (!strcmp(args, "up")) {
+        INFO("control: interface up");
+        WARN_ON(arm_nwk_interface_up(ctxt->rcp_if_id));
+    } else {
+        WARN("control: iface: down or up");
+    }
+}
+
 static void wsbr_tasklet(struct arm_event_s *event)
 {
     const char *const nwk_events[] = {
@@ -238,6 +254,9 @@ static void wsbr_tasklet(struct arm_event_s *event)
             if (ctxt->mpl_legacy_k1)
                 multicast_set_parameters(10,0,1,1,75);
             test_traffic_start(&ctxt->test_traffic);
+            app_load_start(&ctxt->load, false, ctxt->rcp_if_id, NULL, ctxt->hw_mac);
+            net_stats_start(&ctxt->stats, ctxt->rcp_if_id, false, ctxt->hw_mac);
+            app_ctl_register("iface", wsrouter_ctl_iface);
 
             if (ctxt->rx_off_after_s >= 0)
                 eventOS_event_timer_request(0, WSROUTER_EVENT_RX_OFF, event->receiver,
@@ -279,6 +298,8 @@ static void wsbr_tasklet(struct arm_event_s *event)
         case ARM_LIB_NWK_INTERFACE_EVENT:
             if (event->event_id == ctxt->rcp_if_id) {
                 DEBUG("get event for ws interface: %s", nwk_events[event->event_data]);
+                if (event->event_data == ARM_NWK_BOOTSTRAP_READY)
+                    app_load_ready();
             } else {
                 WARN("received unknown network event: %d", event->event_id);
             }
@@ -364,11 +385,18 @@ int main(int argc, char *argv[])
     rf_inproc_take_eui64(&argc, argv, eui64);
 #endif
     parse_commandline(ctxt, argc, argv, print_help_node);
+    // log_level = info: no debug traces of the stack (compact logs)
+    if (g_log_compact) {
+        static char per_frame[] = "mPDs,mMCp,fhss,mMlm,mCor,mHlp,lwbr";  // per-frame MAC and FHSS lines
+        mbed_trace_config_set(TRACE_ACTIVE_LEVEL_INFO | TRACE_MODE_COLOR);
+        mbed_trace_exclude_filters_set(per_frame);
+    }
     if (memcmp(ctxt->ipv6_prefix, ADDR_UNSPECIFIED, 16))
         WARN("ipv6_prefix is ignored");
 #ifdef MAC_INPROCESS
     // -u names the wssimserver socket instead of the RCP's UART.
     mac = rf_inproc_init(ctxt->uart_dev, eui64);
+    net_stats_set_mac(mac, ctxt->stats.on);
     memcpy(ctxt->hw_mac, eui64, sizeof(ctxt->hw_mac));
     memcpy(ctxt->dynamic_mac, ctxt->hw_mac, sizeof(ctxt->dynamic_mac));
 

@@ -849,12 +849,21 @@ static void rf_medium_report(void)
          rf_medium_stats.cca, rf_medium_stats.cca_busy, rf_cca_threshold_dbm, rf_cca_threshold_sets);
 }
 
+// "xL": a text command from the conductor for the program (wssimserver
+// --vtime-control, docs/SCENARIOS.md). The program defines rf_ctl_message()
+// (app_wsbrd/app_load.c); without it the command is ignored.
+void rf_ctl_message(const char *text, int len) __attribute__((weak));
+extern bool g_log_compact __attribute__((weak));
+// Compact logs (log_level = info): no per-frame lines of the emulated radio
+#define RF_COMPACT() (&g_log_compact && g_log_compact)
+
 //int dbg_i_rx = 0;
 void phy_rf_rx_now(void)
 {
     //WARN("RX_Counter %d", dbg_i_rx++);
     static char trace_buffer[128];
-    static uint8_t msg[sizeof(struct sim_frame_hdr) + MAC_IEEE_802_15_4G_MAX_PHY_PACKET_SIZE];
+    // Frames, and the conductor's "xL" commands (up to SIM_CTL_TEXT_MAX)
+    static uint8_t msg[sizeof(struct sim_frame_hdr) + MAC_IEEE_802_15_4G_MAX_PHY_PACKET_SIZE + 65536];
     struct sim_frame_hdr *hdr = (struct sim_frame_hdr *)msg;
     uint8_t *buf = msg + sizeof(*hdr);
     uint16_t pkt_len;
@@ -864,6 +873,11 @@ void phy_rf_rx_now(void)
     len = read(g_rf_host.rf_fd, msg, sizeof(msg));
     FATAL_ON(!len, 2, "RF server has gone");
     FATAL_ON(len < 0, 2, "RF socket: %m");
+    if (len >= 2 && !memcmp(msg, "xL", 2)) {
+        if (rf_ctl_message)
+            rf_ctl_message((const char *)msg + 2, len - 2);
+        return;
+    }
     if (rf_medium && len == sizeof(struct sim_verdict) && !memcmp(msg, "xv", 2)) {
         rf_medium_verdict((const struct sim_verdict *)msg);
         return;
@@ -1020,7 +1034,8 @@ static int8_t phy_rf_tx_now()
     memcpy(msg + sizeof(*hdr), data_ptr, data_len);
     TRACE(TR_RF, "   rf tx: chan=%2d/%2d %s (%d bytes)", channel, channel,
            bytes_str(data_ptr, data_len, NULL, trace_buffer, sizeof(trace_buffer), DELIM_SPACE | ELLIPSIS_STAR), data_len);
-    __PRINT(35, "Transmitting ... chan=%d, len=%u, txseq=%d ts=%u", channel, data_len, phy_seq, rf_get_timestamp());
+    if (!RF_COMPACT())
+        __PRINT(35, "Transmitting ... chan=%d, len=%u, txseq=%d ts=%u", channel, data_len, phy_seq, rf_get_timestamp());
     phy_seq++;
     ret = write(g_rf_host.rf_fd, msg, sizeof(*hdr) + data_len);
     FATAL_ON(ret != sizeof(*hdr) + data_len, 2, "RF socket: %m");
@@ -1066,7 +1081,9 @@ static int _rf_check_and_change_channel(uint16_t new_channel){
         if (rf_medium)
             set_shm_cca_state();
     }
-    __PRINT(32, "Channel changed to %d", channel);
+    // Not in compact logs (log_level = info, app_wsbrd/app_load.c; weak: wshwsim has none)
+    if (!RF_COMPACT())
+        __PRINT(32, "Channel changed to %d", channel);
     return 0;
 }
 
@@ -1285,7 +1302,8 @@ static int _rf_tx_on_air(void)
     unsigned int sleep_time = rf_airtime_us(data_len, rf_preamble_len + rf_sfd_len, rf_fcs_len); // tx duration
     // Do tx now and signal to do callback later after sleep
     phy_rf_tx_now();
-    INFO("SIG TX in %u us for len %d", sleep_time, data_len);
+    if (!RF_COMPACT())
+        INFO("SIG TX in %u us for len %d", sleep_time, data_len);
     // Set the TX sleep timeout timer
     eventOS_callback_timer_start_usec(tx_sleep_handler_timer, sleep_time);
 
@@ -1358,7 +1376,8 @@ static void _rf_csma_timeout_handler(){
         }
         break;
     case PHY_TX_ALLOWED:
-        __PRINT(32,"CSMA-CA PHY_TX_ALLOWED");
+        if (!RF_COMPACT())
+            __PRINT(32,"CSMA-CA PHY_TX_ALLOWED");
         if (driver_state == DRVSTATE_RX){
             if (device_driver.phy_tx_done_cb)
                 device_driver.phy_tx_done_cb(rf_radio_driver_id, mac_tx_handle, PHY_LINK_CCA_FAIL_RX, 0, 0);
@@ -1390,7 +1409,8 @@ static void _rf_csma_timeout_handler(){
  * @param[in] duration before triggering the CSMA-CA timeout callback
  */
 static void _rf_start_csma_timeout_timer(uint32_t duration){
-    WARN("CSMA-CA timeout in %u us", duration);
+    if (!RF_COMPACT())
+        WARN("CSMA-CA timeout in %u us", duration);
     eventOS_callback_timer_start_usec(csma_timeout_timer, duration);
 }
 
@@ -1493,7 +1513,8 @@ static int8_t phy_rf_tx(uint8_t *data_ptr, uint16_t data_len, uint8_t tx_handle,
         WARN("RF is busy");
         return -1;
     }
-    WARN("RF is not busy, bft %u", backoff_time);
+    if (!RF_COMPACT())
+        WARN("RF is not busy, bft %u", backoff_time);
 
     //platform_enter_critical();
     mac_tx_handle = tx_handle;

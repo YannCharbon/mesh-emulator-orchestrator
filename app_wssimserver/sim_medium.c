@@ -2514,3 +2514,12 @@ void med_finish(void)
         free(f);
     }
 }
+
+int med_outcomes_str(char *buf, int len)
+{
+    int n = 0;
+
+    for (int i = 0; i < MED_OUTCOMES && n < len; i++)
+        n += snprintf(buf + n, len - n, " %s=%llu", outcome_names[i], (unsigned long long)med.outcomes[i]);
+    return n;
+}

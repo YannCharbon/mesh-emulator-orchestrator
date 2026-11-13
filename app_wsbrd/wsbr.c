@@ -311,6 +311,13 @@ static void wsbr_node_table_log(struct wsbr_ctxt *ctxt)
     fflush(stdout);
 }
 
+// Runtime command "tree" (docs/SCENARIOS.md): the node table now
+static void wsbr_ctl_tree(const char *args)
+{
+    (void)args;
+    wsbr_node_table_log(&g_ctxt);
+}
+
 static void wsbr_node_table_log_start(int8_t tasklet_id)
 {
     const arm_event_t event = {
@@ -372,6 +379,11 @@ static void wsbr_tasklet(struct arm_event_s *event)
             if (ctxt->mpl_legacy_k1)
                 multicast_set_parameters(10,0,1,1,75);
             test_traffic_start(&ctxt->test_traffic);
+            app_load_start(&ctxt->load, true, ctxt->rcp_if_id, ctxt->ipv6_prefix, ctxt->hw_mac);
+            net_stats_start(&ctxt->stats, ctxt->rcp_if_id, true, ctxt->hw_mac);
+#ifdef NS_PORT_SIM
+            app_ctl_register("tree", wsbr_ctl_tree);
+#endif
 
             INFO("Subscribing to multicast address");
             multicast_add_address(multi_cast_addr, 1);
@@ -563,6 +575,12 @@ int main(int argc, char *argv[])
     rf_inproc_take_eui64(&argc, argv, eui64);
 #endif
     parse_commandline(ctxt, argc, argv, print_help_br);
+    // log_level = info: no debug traces of the stack (compact logs)
+    if (g_log_compact) {
+        static char per_frame[] = "mPDs,mMCp,fhss,mMlm,mCor,mHlp,lwbr";  // per-frame MAC and FHSS lines
+        mbed_trace_config_set(TRACE_ACTIVE_LEVEL_INFO | TRACE_MODE_COLOR);
+        mbed_trace_exclude_filters_set(per_frame);
+    }
     if (!memcmp(ctxt->ipv6_prefix, ADDR_UNSPECIFIED, 16))
         FATAL(1, "You must specify a ipv6_prefix");
 #ifdef MAC_INPROCESS
@@ -571,6 +589,7 @@ int main(int argc, char *argv[])
     // first: in virtual time, nothing may draw random numbers before it has
     // the conductor's seed, and the TUN's interface does.
     mac = rf_inproc_init(ctxt->uart_dev, eui64);
+    net_stats_set_mac(mac, ctxt->stats.on);
     wsbr_tun_init(ctxt);
     ctxt->rcp_version_api = version_api;
     ctxt->rcp_version_fw = version_fw;
