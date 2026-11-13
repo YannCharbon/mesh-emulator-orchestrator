@@ -1,0 +1,12 @@
+{
+  "format": "wssim-scenario 1",
+  "name": "Per-hop RTT, capacity, interference, recovery",
+  "description": "Once the network is formed and stable: per-hop RTT baseline; capacity search until the RTT p95 doubles, the largest RTT reaches 5 s or the delivery falls below 95 %; 80 % of that capacity with an interferer on half of the channels; recovery after removing it.",
+  "phases": [
+    {"use": "formed", "stable_s": 60},
+    {"use": "probe", "duration_s": 180},
+    {"use": "capacity", "max_rtt_ms": 5000, "window_s": 60},
+    {"use": "interference", "spec": "chan=0-17,level=-75,kind=fsk,pattern=ge:40ms:60ms", "load_fraction": 0.8, "duration_s": 240},
+    {"use": "recovery", "max_s": 300}
+  ]
+}

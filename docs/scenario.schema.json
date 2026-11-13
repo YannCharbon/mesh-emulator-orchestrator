@@ -1,0 +1,1956 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "wssim-scenario-1",
+ "title": "Emulator measurement scenario",
+ "description": "An ordered list of phases or building blocks (docs/SCENARIOS.md)",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "format",
+  "phases"
+ ],
+ "properties": {
+  "format": {
+   "type": "string",
+   "title": "Format",
+   "description": "Always \"wssim-scenario 1\"",
+   "const": "wssim-scenario 1"
+  },
+  "name": {
+   "type": "string",
+   "title": "Name",
+   "description": "Short name of the scenario"
+  },
+  "description": {
+   "type": "string",
+   "title": "Description",
+   "description": "What it measures"
+  },
+  "settings": {
+   "type": "object",
+   "title": "Settings",
+   "description": "Defaults of the whole scenario",
+   "properties": {
+    "poll_s": {
+     "type": "number",
+     "title": "Poll",
+     "description": "How often conditions are evaluated while waiting (virtual s)",
+     "minimum": 0.5,
+     "default": 5
+    },
+    "drain_s": {
+     "type": "number",
+     "title": "Drain",
+     "description": "Packets sent in the last drain_s before an evaluation are not counted yet (s)",
+     "minimum": 0,
+     "default": 10
+    },
+    "load": {
+     "type": "object",
+     "title": "Load",
+     "description": "The application load from the start of the phase (\"off\": none; omitted: as before)",
+     "properties": {
+      "flows": {
+       "type": "array",
+       "title": "Flows",
+       "description": "up: routers to border router; down: border router to each router; mcast: border router to a group; p2p: router to router. Up, down and p2p are echoed",
+       "items": {
+        "type": "string",
+        "enum": [
+         "up",
+         "down",
+         "mcast",
+         "p2p"
+        ]
+       },
+       "default": [
+        "up"
+       ]
+      },
+      "rate_pps": {
+       "type": "number",
+       "title": "Rate",
+       "description": "Offered packets per second of each flow, whole network",
+       "minimum": 0.0001
+      },
+      "interval_s": {
+       "type": "number",
+       "title": "Interval",
+       "description": "Instead of rate_pps: mean interval of each node (s)",
+       "minimum": 0.001
+      },
+      "rate_of": {
+       "$ref": "#/$defs/relative"
+      },
+      "max_rate_pps": {
+       "type": "number",
+       "title": "Rate cap",
+       "description": "With interval_s: at most this many packets/s, whole network (a light probe whatever the network size)",
+       "minimum": 0.0001
+      },
+      "payload_b": {
+       "type": "integer",
+       "title": "Payload",
+       "description": "UDP payload (bytes)",
+       "minimum": 32,
+       "maximum": 1232,
+       "default": 64
+      },
+      "dist": {
+       "type": "string",
+       "title": "Intervals",
+       "description": "fixed or exp (Poisson)",
+       "enum": [
+        "fixed",
+        "exp"
+       ],
+       "default": "exp"
+      },
+      "nodes": {
+       "$ref": "#/$defs/selector"
+      },
+      "echo": {
+       "type": "boolean",
+       "title": "Echo",
+       "description": "Targets answer, so that originators measure the RTT",
+       "default": true
+      }
+     },
+     "additionalProperties": false
+    }
+   },
+   "additionalProperties": false
+  },
+  "phases": {
+   "type": "array",
+   "title": "Phases",
+   "description": "In order",
+   "minItems": 1,
+   "items": {
+    "oneOf": [
+     {
+      "$ref": "#/$defs/phase"
+     },
+     {
+      "$ref": "#/$defs/block_formed"
+     },
+     {
+      "$ref": "#/$defs/block_probe"
+     },
+     {
+      "$ref": "#/$defs/block_capacity"
+     },
+     {
+      "$ref": "#/$defs/block_interference"
+     },
+     {
+      "$ref": "#/$defs/block_recovery"
+     },
+     {
+      "$ref": "#/$defs/block_node_failure"
+     },
+     {
+      "$ref": "#/$defs/block_node_restart"
+     },
+     {
+      "$ref": "#/$defs/block_capacity_check"
+     }
+    ]
+   }
+  }
+ },
+ "$defs": {
+  "condition": {
+   "type": "object",
+   "title": "Condition",
+   "description": "A condition on the run, evaluated live at each poll (all fields but \"is\" depend on the kind)",
+   "properties": {
+    "is": {
+     "type": "string",
+     "title": "Kind",
+     "description": "immediately: true at once; time: virtual time reached; elapsed: time since the reference (the previous phase's end for a start, the phase's start for an end); formed: the network has joined; node_event: a node joined, changed or lost its parent, restarted; repaired: every node cut off by the last disruption has a route again; metric: a measured value compared with a threshold; all / any: a combination",
+     "enum": [
+      "immediately",
+      "time",
+      "elapsed",
+      "formed",
+      "node_event",
+      "repaired",
+      "metric",
+      "all",
+      "any"
+     ]
+    },
+    "t_s": {
+     "type": "number",
+     "title": "Time",
+     "description": "For time: virtual seconds since the run's start",
+     "minimum": 0
+    },
+    "s": {
+     "type": "number",
+     "title": "Seconds",
+     "description": "For elapsed",
+     "minimum": 0
+    },
+    "fraction": {
+     "type": "number",
+     "title": "Share of nodes",
+     "description": "For formed: the share of the routers (or of nodes) that must have reached the milestone",
+     "minimum": 0,
+     "maximum": 1,
+     "default": 1
+    },
+    "milestone": {
+     "type": "string",
+     "title": "Milestone",
+     "description": "For formed (default ready) and node_event joined (default operational): operational (Wi-SUN join done) or ready (RPL routing ready; not repeated when an interface comes back up)",
+     "enum": [
+      "operational",
+      "ready"
+     ]
+    },
+    "stable_s": {
+     "type": "number",
+     "title": "Stable for",
+     "description": "For formed: and no parent change anywhere for this long (s)",
+     "minimum": 0,
+     "default": 0
+    },
+    "nodes": {
+     "$ref": "#/$defs/selector"
+    },
+    "event": {
+     "type": "string",
+     "title": "Event",
+     "description": "For node_event",
+     "enum": [
+      "joined",
+      "parent_changed",
+      "parent_lost",
+      "restarted"
+     ]
+    },
+    "e2e": {
+     "type": "boolean",
+     "title": "End to end",
+     "description": "For repaired: also every cut-off node is in the border router's routing table and got an echo for a packet sent after the disruption (needs a running echoed flow)",
+     "default": false
+    },
+    "metric": {
+     "type": "string",
+     "title": "Metric",
+     "description": "For metric",
+     "enum": [
+      "delivered_pps",
+      "latency.max_ms",
+      "latency.mean_ms",
+      "latency.p95_ms",
+      "mac.cca_fail_rate",
+      "mac.retries_per_frame",
+      "mac.tx_fail",
+      "medium.airtime_s_per_s",
+      "medium.frames_per_s",
+      "medium.loss_share",
+      "mesh.joined_fraction",
+      "mesh.max_hops",
+      "mesh.orphans",
+      "mesh.parent_changes",
+      "offered_pps",
+      "pdr",
+      "power.avg_ma",
+      "queue.drops",
+      "queue.mean_max",
+      "queue.now_max",
+      "rtt.max_ms",
+      "rtt.mean_ms",
+      "rtt.min_ms",
+      "rtt.p50_ms",
+      "rtt.p95_ms"
+     ]
+    },
+    "op": {
+     "type": "string",
+     "title": "Comparison",
+     "description": "For metric",
+     "enum": [
+      ">=",
+      ">",
+      "<=",
+      "<",
+      "=="
+     ],
+     "default": ">="
+    },
+    "value": {
+     "type": "number",
+     "title": "Value",
+     "description": "For metric: the threshold (in the metric's unit); with relative_to, ignored"
+    },
+    "relative_to": {
+     "$ref": "#/$defs/relative"
+    },
+    "per_hop": {
+     "type": "boolean",
+     "title": "Per hop count",
+     "description": "For metric (rtt, latency): true if the comparison holds for any hop count, each against the same hop count of relative_to",
+     "default": false
+    },
+    "flow": {
+     "type": "string",
+     "title": "Flow",
+     "description": "For traffic metrics: the flow (default: up, else the first one running)",
+     "enum": [
+      "up",
+      "down",
+      "mcast",
+      "p2p"
+     ]
+    },
+    "window_s": {
+     "type": "number",
+     "title": "Window",
+     "description": "For metric: the trailing window of packets sent (s)",
+     "minimum": 1,
+     "default": 60
+    },
+    "of": {
+     "type": "array",
+     "title": "Conditions",
+     "description": "For all / any",
+     "items": {
+      "$ref": "#/$defs/condition"
+     }
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "is"
+   ]
+  },
+  "phase": {
+   "type": "object",
+   "title": "Phase",
+   "description": "Start when [start]; set [load]; do [actions]; measure [measure]; end when [end] (or repeat)",
+   "properties": {
+    "name": {
+     "type": "string",
+     "title": "Name",
+     "description": "Unique name, used by later phases"
+    },
+    "start": {
+     "type": "object",
+     "title": "Start",
+     "description": "When the phase starts (default: right after the previous phase). A condition, with a timeout and what to do when it expires",
+     "properties": {
+      "is": {
+       "type": "string",
+       "title": "Kind",
+       "description": "immediately: true at once; time: virtual time reached; elapsed: time since the reference (the previous phase's end for a start, the phase's start for an end); formed: the network has joined; node_event: a node joined, changed or lost its parent, restarted; repaired: every node cut off by the last disruption has a route again; metric: a measured value compared with a threshold; all / any: a combination",
+       "enum": [
+        "immediately",
+        "time",
+        "elapsed",
+        "formed",
+        "node_event",
+        "repaired",
+        "metric",
+        "all",
+        "any"
+       ]
+      },
+      "t_s": {
+       "type": "number",
+       "title": "Time",
+       "description": "For time: virtual seconds since the run's start",
+       "minimum": 0
+      },
+      "s": {
+       "type": "number",
+       "title": "Seconds",
+       "description": "For elapsed",
+       "minimum": 0
+      },
+      "fraction": {
+       "type": "number",
+       "title": "Share of nodes",
+       "description": "For formed: the share of the routers (or of nodes) that must have reached the milestone",
+       "minimum": 0,
+       "maximum": 1,
+       "default": 1
+      },
+      "milestone": {
+       "type": "string",
+       "title": "Milestone",
+       "description": "For formed (default ready) and node_event joined (default operational): operational (Wi-SUN join done) or ready (RPL routing ready; not repeated when an interface comes back up)",
+       "enum": [
+        "operational",
+        "ready"
+       ]
+      },
+      "stable_s": {
+       "type": "number",
+       "title": "Stable for",
+       "description": "For formed: and no parent change anywhere for this long (s)",
+       "minimum": 0,
+       "default": 0
+      },
+      "nodes": {
+       "type": "object",
+       "title": "Nodes",
+       "description": "Which nodes an action acts on, resolved from the topology when the action runs",
+       "properties": {
+        "select": {
+         "type": "string",
+         "title": "Selection",
+         "description": "id: one node; ids: a list; all: every router; hop: the routers at a hop count; br_children: the border router's children (hop 1); ancestor: the node at a hop count on the path of a given node; storey or area: by position (needs a positions file); label: the nodes an earlier action picked",
+         "enum": [
+          "id",
+          "ids",
+          "all",
+          "hop",
+          "br_children",
+          "ancestor",
+          "storey",
+          "area",
+          "label"
+         ]
+        },
+        "id": {
+         "type": "integer",
+         "title": "Node ID",
+         "description": "For select id",
+         "minimum": 0,
+         "maximum": 4095
+        },
+        "ids": {
+         "type": "array",
+         "title": "Node IDs",
+         "description": "For select ids",
+         "items": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+         }
+        },
+        "hop": {
+         "type": "integer",
+         "title": "Hop count",
+         "description": "For select hop and ancestor: hops to the border router",
+         "minimum": 1,
+         "maximum": 64
+        },
+        "of": {
+         "type": "integer",
+         "title": "Of node",
+         "description": "For select ancestor: the node whose path is taken",
+         "minimum": 1,
+         "maximum": 4095
+        },
+        "storey": {
+         "type": "integer",
+         "title": "Storey",
+         "description": "For select storey: the FLOOR of the positions file (else Z / 3.5 m)"
+        },
+        "box": {
+         "type": "array",
+         "title": "Area",
+         "description": "For select area: [x0, y0, x1, y1] in metres",
+         "items": {
+          "type": "number"
+         },
+         "minItems": 4,
+         "maxItems": 4
+        },
+        "label": {
+         "type": "string",
+         "title": "Label",
+         "description": "For select label: the label of an earlier action"
+        },
+        "pick": {
+         "type": "string",
+         "title": "Pick",
+         "description": "Among the candidates: all; largest_subtree or most_children (the worst case); random (drawn from the seed); fraction; first (lowest ID)",
+         "enum": [
+          "all",
+          "largest_subtree",
+          "most_children",
+          "random",
+          "fraction",
+          "first"
+         ],
+         "default": "all"
+        },
+        "count": {
+         "type": "integer",
+         "title": "Count",
+         "description": "How many to pick (largest_subtree, most_children, random, first)",
+         "minimum": 1,
+         "default": 1
+        },
+        "fraction": {
+         "type": "number",
+         "title": "Fraction",
+         "description": "For pick fraction: the share of the candidates, drawn from the seed",
+         "minimum": 0,
+         "maximum": 1
+        }
+       },
+       "additionalProperties": false,
+       "required": [
+        "select"
+       ]
+      },
+      "event": {
+       "type": "string",
+       "title": "Event",
+       "description": "For node_event",
+       "enum": [
+        "joined",
+        "parent_changed",
+        "parent_lost",
+        "restarted"
+       ]
+      },
+      "e2e": {
+       "type": "boolean",
+       "title": "End to end",
+       "description": "For repaired: also every cut-off node is in the border router's routing table and got an echo for a packet sent after the disruption (needs a running echoed flow)",
+       "default": false
+      },
+      "metric": {
+       "type": "string",
+       "title": "Metric",
+       "description": "For metric",
+       "enum": [
+        "delivered_pps",
+        "latency.max_ms",
+        "latency.mean_ms",
+        "latency.p95_ms",
+        "mac.cca_fail_rate",
+        "mac.retries_per_frame",
+        "mac.tx_fail",
+        "medium.airtime_s_per_s",
+        "medium.frames_per_s",
+        "medium.loss_share",
+        "mesh.joined_fraction",
+        "mesh.max_hops",
+        "mesh.orphans",
+        "mesh.parent_changes",
+        "offered_pps",
+        "pdr",
+        "power.avg_ma",
+        "queue.drops",
+        "queue.mean_max",
+        "queue.now_max",
+        "rtt.max_ms",
+        "rtt.mean_ms",
+        "rtt.min_ms",
+        "rtt.p50_ms",
+        "rtt.p95_ms"
+       ]
+      },
+      "op": {
+       "type": "string",
+       "title": "Comparison",
+       "description": "For metric",
+       "enum": [
+        ">=",
+        ">",
+        "<=",
+        "<",
+        "=="
+       ],
+       "default": ">="
+      },
+      "value": {
+       "type": "number",
+       "title": "Value",
+       "description": "For metric: the threshold (in the metric's unit); with relative_to, ignored"
+      },
+      "relative_to": {
+       "type": "object",
+       "title": "Relative to",
+       "description": "The value is factor x the same metric (or another one) measured in an earlier phase",
+       "properties": {
+        "phase": {
+         "type": "string",
+         "title": "Phase",
+         "description": "Name of an earlier phase"
+        },
+        "metric": {
+         "type": "string",
+         "title": "Metric",
+         "description": "The earlier phase's metric (default: the condition's metric); a capacity search also has capacity_pps",
+         "enum": [
+          "delivered_pps",
+          "latency.max_ms",
+          "latency.mean_ms",
+          "latency.p95_ms",
+          "mac.cca_fail_rate",
+          "mac.retries_per_frame",
+          "mac.tx_fail",
+          "medium.airtime_s_per_s",
+          "medium.frames_per_s",
+          "medium.loss_share",
+          "mesh.joined_fraction",
+          "mesh.max_hops",
+          "mesh.orphans",
+          "mesh.parent_changes",
+          "offered_pps",
+          "pdr",
+          "power.avg_ma",
+          "queue.drops",
+          "queue.mean_max",
+          "queue.now_max",
+          "rtt.max_ms",
+          "rtt.mean_ms",
+          "rtt.min_ms",
+          "rtt.p50_ms",
+          "rtt.p95_ms",
+          "capacity_pps"
+         ]
+        },
+        "factor": {
+         "type": "number",
+         "title": "Factor",
+         "description": "Multiplier of the earlier value",
+         "default": 1
+        }
+       },
+       "additionalProperties": false,
+       "required": [
+        "phase"
+       ]
+      },
+      "per_hop": {
+       "type": "boolean",
+       "title": "Per hop count",
+       "description": "For metric (rtt, latency): true if the comparison holds for any hop count, each against the same hop count of relative_to",
+       "default": false
+      },
+      "flow": {
+       "type": "string",
+       "title": "Flow",
+       "description": "For traffic metrics: the flow (default: up, else the first one running)",
+       "enum": [
+        "up",
+        "down",
+        "mcast",
+        "p2p"
+       ]
+      },
+      "window_s": {
+       "type": "number",
+       "title": "Window",
+       "description": "For metric: the trailing window of packets sent (s)",
+       "minimum": 1,
+       "default": 60
+      },
+      "of": {
+       "type": "array",
+       "title": "Conditions",
+       "description": "For all / any",
+       "items": {
+        "$ref": "#/$defs/condition"
+       }
+      },
+      "timeout_s": {
+       "type": "number",
+       "title": "Timeout",
+       "description": "Give up waiting after this long (s)",
+       "minimum": 0,
+       "default": 3600
+      },
+      "on_timeout": {
+       "type": "string",
+       "title": "On timeout",
+       "description": "start: start anyway (flagged in the report); skip: skip this phase; abort: end the scenario",
+       "enum": [
+        "start",
+        "skip",
+        "abort"
+       ],
+       "default": "start"
+      }
+     },
+     "additionalProperties": false,
+     "required": [
+      "is"
+     ]
+    },
+    "actions": {
+     "type": "array",
+     "title": "Actions",
+     "description": "Done in order at the start",
+     "items": {
+      "type": "object",
+      "title": "Action",
+      "description": "Something done at the start of the phase",
+      "properties": {
+       "do": {
+        "type": "string",
+        "title": "Action",
+        "description": "kill: power off; restart: power off and a fresh start; leave: the interface goes down (a graceful leave); cut_links: every link of the nodes (or to peers) cut; partition: links between groups a and b cut; degrade_links: every link of the nodes at rssi_dbm; interferer_add, interferer_remove: external interference (central medium); mark: a note in the logs",
+        "enum": [
+         "kill",
+         "restart",
+         "leave",
+         "cut_links",
+         "partition",
+         "degrade_links",
+         "interferer_add",
+         "interferer_remove",
+         "mark"
+        ]
+       },
+       "nodes": {
+        "$ref": "#/$defs/selector"
+       },
+       "peers": {
+        "$ref": "#/$defs/selector"
+       },
+       "a": {
+        "$ref": "#/$defs/selector"
+       },
+       "b": {
+        "$ref": "#/$defs/selector"
+       },
+       "for_s": {
+        "type": "number",
+        "title": "For",
+        "description": "Undo after this long (s): restart the killed nodes, interface up, links back, interferer removed. Omitted: permanent",
+        "minimum": 0
+       },
+       "rssi_dbm": {
+        "type": "number",
+        "title": "RSSI",
+        "description": "For degrade_links (dBm)",
+        "maximum": 0,
+        "minimum": -200
+       },
+       "spec": {
+        "type": "string",
+        "title": "Interferer",
+        "description": "For interferer_add: as wssimserver --interferer (docs/MEDIUM.md \u00a713.1), e.g. \"chan=0-9,level=-75,kind=fsk,pattern=ge:20ms:80ms\""
+       },
+       "name": {
+        "type": "string",
+        "title": "Name",
+        "description": "For interferer_add and interferer_remove (\"all\": every one)"
+       },
+       "label": {
+        "type": "string",
+        "title": "Label",
+        "description": "Name of the nodes this action picked, for later selections (select label)"
+       },
+       "text": {
+        "type": "string",
+        "title": "Text",
+        "description": "For mark"
+       }
+      },
+      "additionalProperties": false,
+      "required": [
+       "do"
+      ]
+     }
+    },
+    "load": {
+     "oneOf": [
+      {
+       "type": "object",
+       "title": "Load",
+       "description": "The application load from the start of the phase (\"off\": none; omitted: as before)",
+       "properties": {
+        "flows": {
+         "type": "array",
+         "title": "Flows",
+         "description": "up: routers to border router; down: border router to each router; mcast: border router to a group; p2p: router to router. Up, down and p2p are echoed",
+         "items": {
+          "type": "string",
+          "enum": [
+           "up",
+           "down",
+           "mcast",
+           "p2p"
+          ]
+         },
+         "default": [
+          "up"
+         ]
+        },
+        "rate_pps": {
+         "type": "number",
+         "title": "Rate",
+         "description": "Offered packets per second of each flow, whole network",
+         "minimum": 0.0001
+        },
+        "interval_s": {
+         "type": "number",
+         "title": "Interval",
+         "description": "Instead of rate_pps: mean interval of each node (s)",
+         "minimum": 0.001
+        },
+        "rate_of": {
+         "$ref": "#/$defs/relative"
+        },
+        "max_rate_pps": {
+         "type": "number",
+         "title": "Rate cap",
+         "description": "With interval_s: at most this many packets/s, whole network (a light probe whatever the network size)",
+         "minimum": 0.0001
+        },
+        "payload_b": {
+         "type": "integer",
+         "title": "Payload",
+         "description": "UDP payload (bytes)",
+         "minimum": 32,
+         "maximum": 1232,
+         "default": 64
+        },
+        "dist": {
+         "type": "string",
+         "title": "Intervals",
+         "description": "fixed or exp (Poisson)",
+         "enum": [
+          "fixed",
+          "exp"
+         ],
+         "default": "exp"
+        },
+        "nodes": {
+         "$ref": "#/$defs/selector"
+        },
+        "echo": {
+         "type": "boolean",
+         "title": "Echo",
+         "description": "Targets answer, so that originators measure the RTT",
+         "default": true
+        }
+       },
+       "additionalProperties": false
+      },
+      {
+       "type": "string",
+       "enum": [
+        "off",
+        "keep"
+       ]
+      }
+     ],
+     "title": "Load",
+     "description": "The load from this phase on: settings, \"off\", or \"keep\" (the default)"
+    },
+    "measure": {
+     "type": "object",
+     "title": "Measure",
+     "description": "What the phase measures (default: traffic)",
+     "properties": {
+      "sets": {
+       "type": "array",
+       "title": "Measurements",
+       "description": "Any of: traffic: Delivery, RTT and one-way delay overall and per hop count, offered and delivered throughput; queues: Per node: queue depths, drops, MAC retries, channel-access failures, frames relayed; mesh: Topology: parents, depths, orphans, parent changes, RPL control messages; power: Per node: charge and average current in the phase, by state (needs POWER); medium: Frames, airtime and reception outcomes of the radio medium",
+       "items": {
+        "type": "string",
+        "enum": [
+         "traffic",
+         "queues",
+         "mesh",
+         "power",
+         "medium"
+        ]
+       },
+       "default": [
+        "traffic"
+       ]
+      },
+      "settle_s": {
+       "type": "number",
+       "title": "Settle",
+       "description": "Time after the start not measured (s)",
+       "minimum": 0,
+       "default": 0
+      }
+     },
+     "additionalProperties": false
+    },
+    "end": {
+     "type": "object",
+     "title": "End",
+     "description": "When the phase ends: after_s alone (a fixed duration, the default 60 s), or a condition with a cap max_s",
+     "properties": {
+      "is": {
+       "type": "string",
+       "title": "Kind",
+       "description": "immediately: true at once; time: virtual time reached; elapsed: time since the reference (the previous phase's end for a start, the phase's start for an end); formed: the network has joined; node_event: a node joined, changed or lost its parent, restarted; repaired: every node cut off by the last disruption has a route again; metric: a measured value compared with a threshold; all / any: a combination",
+       "enum": [
+        "immediately",
+        "time",
+        "elapsed",
+        "formed",
+        "node_event",
+        "repaired",
+        "metric",
+        "all",
+        "any"
+       ],
+       "default": "elapsed"
+      },
+      "t_s": {
+       "type": "number",
+       "title": "Time",
+       "description": "For time: virtual seconds since the run's start",
+       "minimum": 0
+      },
+      "s": {
+       "type": "number",
+       "title": "Seconds",
+       "description": "For elapsed",
+       "minimum": 0
+      },
+      "fraction": {
+       "type": "number",
+       "title": "Share of nodes",
+       "description": "For formed: the share of the routers (or of nodes) that must have reached the milestone",
+       "minimum": 0,
+       "maximum": 1,
+       "default": 1
+      },
+      "milestone": {
+       "type": "string",
+       "title": "Milestone",
+       "description": "For formed (default ready) and node_event joined (default operational): operational (Wi-SUN join done) or ready (RPL routing ready; not repeated when an interface comes back up)",
+       "enum": [
+        "operational",
+        "ready"
+       ]
+      },
+      "stable_s": {
+       "type": "number",
+       "title": "Stable for",
+       "description": "For formed: and no parent change anywhere for this long (s)",
+       "minimum": 0,
+       "default": 0
+      },
+      "nodes": {
+       "type": "object",
+       "title": "Nodes",
+       "description": "Which nodes an action acts on, resolved from the topology when the action runs",
+       "properties": {
+        "select": {
+         "type": "string",
+         "title": "Selection",
+         "description": "id: one node; ids: a list; all: every router; hop: the routers at a hop count; br_children: the border router's children (hop 1); ancestor: the node at a hop count on the path of a given node; storey or area: by position (needs a positions file); label: the nodes an earlier action picked",
+         "enum": [
+          "id",
+          "ids",
+          "all",
+          "hop",
+          "br_children",
+          "ancestor",
+          "storey",
+          "area",
+          "label"
+         ]
+        },
+        "id": {
+         "type": "integer",
+         "title": "Node ID",
+         "description": "For select id",
+         "minimum": 0,
+         "maximum": 4095
+        },
+        "ids": {
+         "type": "array",
+         "title": "Node IDs",
+         "description": "For select ids",
+         "items": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+         }
+        },
+        "hop": {
+         "type": "integer",
+         "title": "Hop count",
+         "description": "For select hop and ancestor: hops to the border router",
+         "minimum": 1,
+         "maximum": 64
+        },
+        "of": {
+         "type": "integer",
+         "title": "Of node",
+         "description": "For select ancestor: the node whose path is taken",
+         "minimum": 1,
+         "maximum": 4095
+        },
+        "storey": {
+         "type": "integer",
+         "title": "Storey",
+         "description": "For select storey: the FLOOR of the positions file (else Z / 3.5 m)"
+        },
+        "box": {
+         "type": "array",
+         "title": "Area",
+         "description": "For select area: [x0, y0, x1, y1] in metres",
+         "items": {
+          "type": "number"
+         },
+         "minItems": 4,
+         "maxItems": 4
+        },
+        "label": {
+         "type": "string",
+         "title": "Label",
+         "description": "For select label: the label of an earlier action"
+        },
+        "pick": {
+         "type": "string",
+         "title": "Pick",
+         "description": "Among the candidates: all; largest_subtree or most_children (the worst case); random (drawn from the seed); fraction; first (lowest ID)",
+         "enum": [
+          "all",
+          "largest_subtree",
+          "most_children",
+          "random",
+          "fraction",
+          "first"
+         ],
+         "default": "all"
+        },
+        "count": {
+         "type": "integer",
+         "title": "Count",
+         "description": "How many to pick (largest_subtree, most_children, random, first)",
+         "minimum": 1,
+         "default": 1
+        },
+        "fraction": {
+         "type": "number",
+         "title": "Fraction",
+         "description": "For pick fraction: the share of the candidates, drawn from the seed",
+         "minimum": 0,
+         "maximum": 1
+        }
+       },
+       "additionalProperties": false,
+       "required": [
+        "select"
+       ]
+      },
+      "event": {
+       "type": "string",
+       "title": "Event",
+       "description": "For node_event",
+       "enum": [
+        "joined",
+        "parent_changed",
+        "parent_lost",
+        "restarted"
+       ]
+      },
+      "e2e": {
+       "type": "boolean",
+       "title": "End to end",
+       "description": "For repaired: also every cut-off node is in the border router's routing table and got an echo for a packet sent after the disruption (needs a running echoed flow)",
+       "default": false
+      },
+      "metric": {
+       "type": "string",
+       "title": "Metric",
+       "description": "For metric",
+       "enum": [
+        "delivered_pps",
+        "latency.max_ms",
+        "latency.mean_ms",
+        "latency.p95_ms",
+        "mac.cca_fail_rate",
+        "mac.retries_per_frame",
+        "mac.tx_fail",
+        "medium.airtime_s_per_s",
+        "medium.frames_per_s",
+        "medium.loss_share",
+        "mesh.joined_fraction",
+        "mesh.max_hops",
+        "mesh.orphans",
+        "mesh.parent_changes",
+        "offered_pps",
+        "pdr",
+        "power.avg_ma",
+        "queue.drops",
+        "queue.mean_max",
+        "queue.now_max",
+        "rtt.max_ms",
+        "rtt.mean_ms",
+        "rtt.min_ms",
+        "rtt.p50_ms",
+        "rtt.p95_ms"
+       ]
+      },
+      "op": {
+       "type": "string",
+       "title": "Comparison",
+       "description": "For metric",
+       "enum": [
+        ">=",
+        ">",
+        "<=",
+        "<",
+        "=="
+       ],
+       "default": ">="
+      },
+      "value": {
+       "type": "number",
+       "title": "Value",
+       "description": "For metric: the threshold (in the metric's unit); with relative_to, ignored"
+      },
+      "relative_to": {
+       "type": "object",
+       "title": "Relative to",
+       "description": "The value is factor x the same metric (or another one) measured in an earlier phase",
+       "properties": {
+        "phase": {
+         "type": "string",
+         "title": "Phase",
+         "description": "Name of an earlier phase"
+        },
+        "metric": {
+         "type": "string",
+         "title": "Metric",
+         "description": "The earlier phase's metric (default: the condition's metric); a capacity search also has capacity_pps",
+         "enum": [
+          "delivered_pps",
+          "latency.max_ms",
+          "latency.mean_ms",
+          "latency.p95_ms",
+          "mac.cca_fail_rate",
+          "mac.retries_per_frame",
+          "mac.tx_fail",
+          "medium.airtime_s_per_s",
+          "medium.frames_per_s",
+          "medium.loss_share",
+          "mesh.joined_fraction",
+          "mesh.max_hops",
+          "mesh.orphans",
+          "mesh.parent_changes",
+          "offered_pps",
+          "pdr",
+          "power.avg_ma",
+          "queue.drops",
+          "queue.mean_max",
+          "queue.now_max",
+          "rtt.max_ms",
+          "rtt.mean_ms",
+          "rtt.min_ms",
+          "rtt.p50_ms",
+          "rtt.p95_ms",
+          "capacity_pps"
+         ]
+        },
+        "factor": {
+         "type": "number",
+         "title": "Factor",
+         "description": "Multiplier of the earlier value",
+         "default": 1
+        }
+       },
+       "additionalProperties": false,
+       "required": [
+        "phase"
+       ]
+      },
+      "per_hop": {
+       "type": "boolean",
+       "title": "Per hop count",
+       "description": "For metric (rtt, latency): true if the comparison holds for any hop count, each against the same hop count of relative_to",
+       "default": false
+      },
+      "flow": {
+       "type": "string",
+       "title": "Flow",
+       "description": "For traffic metrics: the flow (default: up, else the first one running)",
+       "enum": [
+        "up",
+        "down",
+        "mcast",
+        "p2p"
+       ]
+      },
+      "window_s": {
+       "type": "number",
+       "title": "Window",
+       "description": "For metric: the trailing window of packets sent (s)",
+       "minimum": 1,
+       "default": 60
+      },
+      "of": {
+       "type": "array",
+       "title": "Conditions",
+       "description": "For all / any",
+       "items": {
+        "$ref": "#/$defs/condition"
+       }
+      },
+      "after_s": {
+       "type": "number",
+       "title": "Duration",
+       "description": "Fixed duration of the phase (s)",
+       "minimum": 0
+      },
+      "max_s": {
+       "type": "number",
+       "title": "Cap",
+       "description": "With a condition: end after this long anyway (s)",
+       "minimum": 0,
+       "default": 600
+      }
+     },
+     "additionalProperties": false
+    },
+    "repeat": {
+     "type": "object",
+     "title": "Repeat",
+     "description": "Iterations: the load changes at each, until a condition holds (a capacity search)",
+     "properties": {
+      "max": {
+       "type": "integer",
+       "title": "Iterations",
+       "description": "At most this many",
+       "minimum": 1,
+       "maximum": 100,
+       "default": 10
+      },
+      "mul": {
+       "type": "number",
+       "title": "Multiply",
+       "description": "The rate (or 1/interval) is multiplied by this at each iteration",
+       "minimum": 0.01,
+       "default": 1.5
+      },
+      "add_pps": {
+       "type": "number",
+       "title": "Add",
+       "description": "Instead of mul: the rate grows by this at each iteration (packets/s)"
+      },
+      "window_s": {
+       "type": "number",
+       "title": "Window",
+       "description": "Measured time of an iteration (s)",
+       "minimum": 1,
+       "default": 60
+      },
+      "settle_s": {
+       "type": "number",
+       "title": "Settle",
+       "description": "Time at the new load before the window (s)",
+       "minimum": 0,
+       "default": 15
+      },
+      "until": {
+       "$ref": "#/$defs/condition",
+       "description": "Stop when this holds on an iteration's measurements"
+      }
+     },
+     "additionalProperties": false,
+     "required": [
+      "until"
+     ]
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "name"
+   ]
+  },
+  "block_formed": {
+   "type": "object",
+   "title": "Wait for the network",
+   "description": "Wait until the network has formed (all routers ready) and no parent changed for stable_s",
+   "properties": {
+    "use": {
+     "type": "string",
+     "title": "Block",
+     "description": "Wait until the network has formed (all routers ready) and no parent changed for stable_s",
+     "enum": [
+      "formed"
+     ]
+    },
+    "name": {
+     "type": "string",
+     "title": "Name",
+     "description": "Phase name (default: the block's)"
+    },
+    "fraction": {
+     "type": "number",
+     "title": "Share of routers",
+     "description": "Share that must be ready",
+     "minimum": 0,
+     "maximum": 1,
+     "default": 1
+    },
+    "stable_s": {
+     "type": "number",
+     "title": "Stable for",
+     "description": "No parent change for this long (s)",
+     "minimum": 0,
+     "default": 60
+    },
+    "timeout_s": {
+     "type": "number",
+     "title": "Timeout",
+     "description": "Start anyway after this long (s), flagged",
+     "minimum": 0,
+     "default": 3600
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "use"
+   ]
+  },
+  "block_probe": {
+   "type": "object",
+   "title": "Per-hop RTT probe",
+   "description": "A light load, its RTT, delay and delivery per hop count: the baseline of later phases",
+   "properties": {
+    "use": {
+     "type": "string",
+     "title": "Block",
+     "description": "A light load, its RTT, delay and delivery per hop count: the baseline of later phases",
+     "enum": [
+      "probe"
+     ]
+    },
+    "name": {
+     "type": "string",
+     "title": "Name",
+     "description": "Phase name (default: the block's)"
+    },
+    "rate_pps": {
+     "type": "number",
+     "title": "Rate",
+     "description": "Offered packets/s, whole network (default: one packet per router every 30 s, at most 0.5 packets/s)",
+     "minimum": 0.0001
+    },
+    "flows": {
+     "type": "array",
+     "title": "Flows",
+     "description": "up: routers to border router; down: border router to each router; mcast: border router to a group; p2p: router to router. Up, down and p2p are echoed",
+     "items": {
+      "type": "string",
+      "enum": [
+       "up",
+       "down",
+       "mcast",
+       "p2p"
+      ]
+     },
+     "default": [
+      "up"
+     ]
+    },
+    "duration_s": {
+     "type": "number",
+     "title": "Duration",
+     "description": "Measured time (s)",
+     "minimum": 1,
+     "default": 300
+    },
+    "settle_s": {
+     "type": "number",
+     "title": "Settle",
+     "description": "Not measured at the start (s)",
+     "minimum": 0,
+     "default": 30
+    },
+    "payload_b": {
+     "type": "integer",
+     "title": "Payload",
+     "description": "UDP payload (bytes)",
+     "minimum": 32,
+     "maximum": 1232,
+     "default": 64
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "use"
+   ]
+  },
+  "block_capacity": {
+   "type": "object",
+   "title": "Capacity search",
+   "description": "Raise the load step by step until the RTT reaches factor x the baseline, the largest RTT a threshold, or the delivery falls below min_pdr; the capacity is the last load before that",
+   "properties": {
+    "use": {
+     "type": "string",
+     "title": "Block",
+     "description": "Raise the load step by step until the RTT reaches factor x the baseline, the largest RTT a threshold, or the delivery falls below min_pdr; the capacity is the last load before that",
+     "enum": [
+      "capacity"
+     ]
+    },
+    "name": {
+     "type": "string",
+     "title": "Name",
+     "description": "Phase name (default: the block's)"
+    },
+    "baseline": {
+     "type": "string",
+     "title": "Baseline phase",
+     "description": "The phase whose RTT is the reference",
+     "default": "probe"
+    },
+    "start_rate_pps": {
+     "type": "number",
+     "title": "First rate",
+     "description": "Packets/s of the first step (default: 2 x the baseline's)",
+     "minimum": 0.0001
+    },
+    "mul": {
+     "type": "number",
+     "title": "Step factor",
+     "description": "Rate multiplied by this at each step",
+     "minimum": 1.01,
+     "default": 1.5
+    },
+    "max_steps": {
+     "type": "integer",
+     "title": "Steps",
+     "description": "At most this many",
+     "minimum": 1,
+     "maximum": 100,
+     "default": 12
+    },
+    "window_s": {
+     "type": "number",
+     "title": "Window",
+     "description": "Measured time of a step (s)",
+     "minimum": 1,
+     "default": 60
+    },
+    "settle_s": {
+     "type": "number",
+     "title": "Settle",
+     "description": "Time at the new load before measuring (s)",
+     "minimum": 0,
+     "default": 15
+    },
+    "rtt_metric": {
+     "type": "string",
+     "title": "RTT metric",
+     "description": "The RTT compared with the baseline",
+     "enum": [
+      "rtt.mean_ms",
+      "rtt.p50_ms",
+      "rtt.p95_ms"
+     ],
+     "default": "rtt.p95_ms"
+    },
+    "rtt_factor": {
+     "type": "number",
+     "title": "RTT factor",
+     "description": "Saturated when the RTT reaches this x the baseline",
+     "minimum": 1,
+     "default": 2
+    },
+    "max_rtt_ms": {
+     "type": "number",
+     "title": "RTT ceiling",
+     "description": "Saturated when the largest RTT reaches this (ms)",
+     "minimum": 1
+    },
+    "min_pdr": {
+     "type": "number",
+     "title": "Delivery floor",
+     "description": "Saturated when the delivery ratio falls below this",
+     "minimum": 0,
+     "maximum": 1,
+     "default": 0.95
+    },
+    "flows": {
+     "type": "array",
+     "title": "Flows",
+     "description": "up: routers to border router; down: border router to each router; mcast: border router to a group; p2p: router to router. Up, down and p2p are echoed",
+     "items": {
+      "type": "string",
+      "enum": [
+       "up",
+       "down",
+       "mcast",
+       "p2p"
+      ]
+     },
+     "default": [
+      "up"
+     ]
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "use"
+   ]
+  },
+  "block_interference": {
+   "type": "object",
+   "title": "Interference",
+   "description": "An external interferer from the start of the phase, under a share of the capacity found",
+   "properties": {
+    "use": {
+     "type": "string",
+     "title": "Block",
+     "description": "An external interferer from the start of the phase, under a share of the capacity found",
+     "enum": [
+      "interference"
+     ]
+    },
+    "name": {
+     "type": "string",
+     "title": "Name",
+     "description": "Phase name (default: the block's)"
+    },
+    "spec": {
+     "type": "string",
+     "title": "Interferer",
+     "description": "For interferer_add: as wssimserver --interferer (docs/MEDIUM.md \u00a713.1), e.g. \"chan=0-9,level=-75,kind=fsk,pattern=ge:20ms:80ms\""
+    },
+    "interferer_name": {
+     "type": "string",
+     "title": "Interferer name",
+     "description": "Its name, to remove it later",
+     "default": "jam"
+    },
+    "capacity_phase": {
+     "type": "string",
+     "title": "Capacity phase",
+     "description": "Where the capacity comes from",
+     "default": "capacity"
+    },
+    "load_fraction": {
+     "type": "number",
+     "title": "Load",
+     "description": "Share of the capacity offered",
+     "minimum": 0,
+     "maximum": 2,
+     "default": 0.8
+    },
+    "duration_s": {
+     "type": "number",
+     "title": "Duration",
+     "description": "Length of the phase (s)",
+     "minimum": 1,
+     "default": 300
+    },
+    "settle_s": {
+     "type": "number",
+     "title": "Settle",
+     "description": "Not measured at the start (s)",
+     "minimum": 0,
+     "default": 30
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "use",
+    "spec"
+   ]
+  },
+  "block_recovery": {
+   "type": "object",
+   "title": "Recovery",
+   "description": "Remove the interferer (if any) at the same load and measure until the RTT is back near the baseline",
+   "properties": {
+    "use": {
+     "type": "string",
+     "title": "Block",
+     "description": "Remove the interferer (if any) at the same load and measure until the RTT is back near the baseline",
+     "enum": [
+      "recovery"
+     ]
+    },
+    "name": {
+     "type": "string",
+     "title": "Name",
+     "description": "Phase name (default: the block's)"
+    },
+    "interferer_name": {
+     "type": "string",
+     "title": "Interferer name",
+     "description": "The interferer removed (\"all\": every one; \"\": none)",
+     "default": "all"
+    },
+    "baseline": {
+     "type": "string",
+     "title": "Baseline phase",
+     "description": "The reference RTT",
+     "default": "probe"
+    },
+    "within": {
+     "type": "number",
+     "title": "Back within",
+     "description": "Ends when the RTT is at most this x the baseline",
+     "minimum": 1,
+     "default": 1.2
+    },
+    "max_s": {
+     "type": "number",
+     "title": "Cap",
+     "description": "At most this long (s)",
+     "minimum": 1,
+     "default": 600
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "use"
+   ]
+  },
+  "block_node_failure": {
+   "type": "object",
+   "title": "Node failure",
+   "description": "Power off nodes (default: the hop-1 router with the largest subtree) under a share of the capacity, and measure until the mesh is repaired",
+   "properties": {
+    "use": {
+     "type": "string",
+     "title": "Block",
+     "description": "Power off nodes (default: the hop-1 router with the largest subtree) under a share of the capacity, and measure until the mesh is repaired",
+     "enum": [
+      "node_failure"
+     ]
+    },
+    "name": {
+     "type": "string",
+     "title": "Name",
+     "description": "Phase name (default: the block's)"
+    },
+    "nodes": {
+     "$ref": "#/$defs/selector"
+    },
+    "label": {
+     "type": "string",
+     "title": "Label",
+     "description": "Name of the failed nodes, for a later restart",
+     "default": "failed"
+    },
+    "capacity_phase": {
+     "type": "string",
+     "title": "Capacity phase",
+     "description": "Where the capacity comes from (\"\": keep the load)",
+     "default": "capacity"
+    },
+    "load_fraction": {
+     "type": "number",
+     "title": "Load",
+     "description": "Share of the capacity offered",
+     "minimum": 0,
+     "maximum": 2,
+     "default": 0.5
+    },
+    "max_s": {
+     "type": "number",
+     "title": "Cap",
+     "description": "At most this long (s)",
+     "minimum": 1,
+     "default": 600
+    },
+    "e2e": {
+     "type": "boolean",
+     "title": "End to end",
+     "description": "For repaired: also every cut-off node is in the border router's routing table and got an echo for a packet sent after the disruption (needs a running echoed flow)",
+     "default": false
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "use"
+   ]
+  },
+  "block_node_restart": {
+   "type": "object",
+   "title": "Node restart",
+   "description": "Start the failed nodes again (fresh instances) and measure until they are ready again",
+   "properties": {
+    "use": {
+     "type": "string",
+     "title": "Block",
+     "description": "Start the failed nodes again (fresh instances) and measure until they are ready again",
+     "enum": [
+      "node_restart"
+     ]
+    },
+    "name": {
+     "type": "string",
+     "title": "Name",
+     "description": "Phase name (default: the block's)"
+    },
+    "label": {
+     "type": "string",
+     "title": "Label",
+     "description": "The nodes of an earlier action",
+     "default": "failed"
+    },
+    "max_s": {
+     "type": "number",
+     "title": "Cap",
+     "description": "At most this long (s)",
+     "minimum": 1,
+     "default": 600
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "use"
+   ]
+  },
+  "block_capacity_check": {
+   "type": "object",
+   "title": "Capacity again",
+   "description": "A shorter capacity search from a share of an earlier capacity (e.g. after a repair)",
+   "properties": {
+    "use": {
+     "type": "string",
+     "title": "Block",
+     "description": "A shorter capacity search from a share of an earlier capacity (e.g. after a repair)",
+     "enum": [
+      "capacity_check"
+     ]
+    },
+    "name": {
+     "type": "string",
+     "title": "Name",
+     "description": "Phase name (default: the block's)"
+    },
+    "capacity_phase": {
+     "type": "string",
+     "title": "Earlier capacity",
+     "description": "The capacity it starts from",
+     "default": "capacity"
+    },
+    "start_fraction": {
+     "type": "number",
+     "title": "First rate",
+     "description": "Share of the earlier capacity of the first step",
+     "minimum": 0.01,
+     "default": 0.5
+    },
+    "baseline": {
+     "type": "string",
+     "title": "Baseline phase",
+     "description": "The reference RTT",
+     "default": "probe"
+    },
+    "mul": {
+     "type": "number",
+     "title": "Step factor",
+     "description": "Rate multiplied by this at each step",
+     "minimum": 1.01,
+     "default": 1.5
+    },
+    "max_steps": {
+     "type": "integer",
+     "title": "Steps",
+     "description": "At most this many",
+     "minimum": 1,
+     "maximum": 100,
+     "default": 8
+    },
+    "window_s": {
+     "type": "number",
+     "title": "Window",
+     "description": "Measured time of a step (s)",
+     "minimum": 1,
+     "default": 60
+    },
+    "settle_s": {
+     "type": "number",
+     "title": "Settle",
+     "description": "Time at the new load before measuring (s)",
+     "minimum": 0,
+     "default": 15
+    },
+    "rtt_factor": {
+     "type": "number",
+     "title": "RTT factor",
+     "description": "Saturated when the RTT reaches this x the baseline",
+     "minimum": 1,
+     "default": 2
+    },
+    "min_pdr": {
+     "type": "number",
+     "title": "Delivery floor",
+     "description": "Saturated below this delivery ratio",
+     "minimum": 0,
+     "maximum": 1,
+     "default": 0.95
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "use"
+   ]
+  },
+  "selector": {
+   "type": "object",
+   "title": "Nodes",
+   "description": "Which nodes an action acts on, resolved from the topology when the action runs",
+   "properties": {
+    "select": {
+     "type": "string",
+     "title": "Selection",
+     "description": "id: one node; ids: a list; all: every router; hop: the routers at a hop count; br_children: the border router's children (hop 1); ancestor: the node at a hop count on the path of a given node; storey or area: by position (needs a positions file); label: the nodes an earlier action picked",
+     "enum": [
+      "id",
+      "ids",
+      "all",
+      "hop",
+      "br_children",
+      "ancestor",
+      "storey",
+      "area",
+      "label"
+     ]
+    },
+    "id": {
+     "type": "integer",
+     "title": "Node ID",
+     "description": "For select id",
+     "minimum": 0,
+     "maximum": 4095
+    },
+    "ids": {
+     "type": "array",
+     "title": "Node IDs",
+     "description": "For select ids",
+     "items": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4095
+     }
+    },
+    "hop": {
+     "type": "integer",
+     "title": "Hop count",
+     "description": "For select hop and ancestor: hops to the border router",
+     "minimum": 1,
+     "maximum": 64
+    },
+    "of": {
+     "type": "integer",
+     "title": "Of node",
+     "description": "For select ancestor: the node whose path is taken",
+     "minimum": 1,
+     "maximum": 4095
+    },
+    "storey": {
+     "type": "integer",
+     "title": "Storey",
+     "description": "For select storey: the FLOOR of the positions file (else Z / 3.5 m)"
+    },
+    "box": {
+     "type": "array",
+     "title": "Area",
+     "description": "For select area: [x0, y0, x1, y1] in metres",
+     "items": {
+      "type": "number"
+     },
+     "minItems": 4,
+     "maxItems": 4
+    },
+    "label": {
+     "type": "string",
+     "title": "Label",
+     "description": "For select label: the label of an earlier action"
+    },
+    "pick": {
+     "type": "string",
+     "title": "Pick",
+     "description": "Among the candidates: all; largest_subtree or most_children (the worst case); random (drawn from the seed); fraction; first (lowest ID)",
+     "enum": [
+      "all",
+      "largest_subtree",
+      "most_children",
+      "random",
+      "fraction",
+      "first"
+     ],
+     "default": "all"
+    },
+    "count": {
+     "type": "integer",
+     "title": "Count",
+     "description": "How many to pick (largest_subtree, most_children, random, first)",
+     "minimum": 1,
+     "default": 1
+    },
+    "fraction": {
+     "type": "number",
+     "title": "Fraction",
+     "description": "For pick fraction: the share of the candidates, drawn from the seed",
+     "minimum": 0,
+     "maximum": 1
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "select"
+   ]
+  },
+  "relative": {
+   "type": "object",
+   "title": "Relative to",
+   "description": "The value is factor x the same metric (or another one) measured in an earlier phase",
+   "properties": {
+    "phase": {
+     "type": "string",
+     "title": "Phase",
+     "description": "Name of an earlier phase"
+    },
+    "metric": {
+     "type": "string",
+     "title": "Metric",
+     "description": "The earlier phase's metric (default: the condition's metric); a capacity search also has capacity_pps",
+     "enum": [
+      "delivered_pps",
+      "latency.max_ms",
+      "latency.mean_ms",
+      "latency.p95_ms",
+      "mac.cca_fail_rate",
+      "mac.retries_per_frame",
+      "mac.tx_fail",
+      "medium.airtime_s_per_s",
+      "medium.frames_per_s",
+      "medium.loss_share",
+      "mesh.joined_fraction",
+      "mesh.max_hops",
+      "mesh.orphans",
+      "mesh.parent_changes",
+      "offered_pps",
+      "pdr",
+      "power.avg_ma",
+      "queue.drops",
+      "queue.mean_max",
+      "queue.now_max",
+      "rtt.max_ms",
+      "rtt.mean_ms",
+      "rtt.min_ms",
+      "rtt.p50_ms",
+      "rtt.p95_ms",
+      "capacity_pps"
+     ]
+    },
+    "factor": {
+     "type": "number",
+     "title": "Factor",
+     "description": "Multiplier of the earlier value",
+     "default": 1
+    }
+   },
+   "additionalProperties": false,
+   "required": [
+    "phase"
+   ]
+  }
+ }
+}
