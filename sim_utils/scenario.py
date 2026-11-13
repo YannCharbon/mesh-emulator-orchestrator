@@ -464,6 +464,7 @@ class Driver:
                 marginal = sorted(n for n in affected if n in weak and n not in strong)
                 affected = {n for n in affected if n in strong}
                 d = {'t_s': self.now, 'phase': rec['name'], 'do': do, 'failed': sorted(failed),
+                     'down': sorted(failed),    # the failed nodes not back yet
                      'affected': sorted(affected), 'marginal': marginal, 'isolated': isolated,
                      'parents_before': {str(k): v for k, v in before.items()},
                      'depths_before': {str(k): v for k, v in dep.items() if v is not None},
@@ -481,8 +482,8 @@ class Driver:
         """Failed nodes back (restarted, interface up): the repair of the
         disruptions in progress may then go through them again."""
         for d in self.open_disruptions():
-            back = [n for n in nodes if n in d['failed']]
-            d['failed'] = [n for n in d['failed'] if n not in back]
+            back = [n for n in nodes if n in d['down']]
+            d['down'] = [n for n in d['down'] if n not in back]
             if back:
                 d.setdefault('back', []).extend({'node': n, 't_s': round(self.now, 3)} for n in back)
 
@@ -790,7 +791,7 @@ class Driver:
         members = set((self.load or {}).get('member_ids', []))
         echoed = self.load and 'up' in self.load['flows'] and self.load.get('spec', {}).get('echo', True)
         for d in self.open_disruptions():
-            bad = set(d['failed'])
+            bad = set(d['down'])
             routed = e2e = 0
             for n in d['affected'] + d['marginal']:
                 if n in self.killed:
