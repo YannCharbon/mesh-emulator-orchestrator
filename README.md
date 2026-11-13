@@ -34,6 +34,13 @@
 >   web app and MTS bench, in order.
 > - **Scale**: runs of up to 4000 nodes; a 1000-node building for one virtual
 >   hour with a light load takes about 2 minutes of wall time (`docs/SCALE.md`).
+> - **Application load, statistics, run report**: UDP flows with echoes, RTT
+>   and one-way delay per hop count, queues, retries and the saturation point
+>   of a load ramp, per-node power, all in `report.json`
+>   (`docs/TRAFFIC_AND_REPORT.md`).
+> - **Measurement scenarios**: phases with live triggers and end conditions,
+>   capacity searches, interference, node failures and the mesh repair
+>   (`docs/SCENARIOS.md`).
 >
 > Wall-clock mode (`run.sh`, `wshwsim`, the GUI) keeps the behaviour of the
 > original simulator.
