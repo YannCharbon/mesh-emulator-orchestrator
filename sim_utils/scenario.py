@@ -885,7 +885,9 @@ class Driver:
         rate = (self.load or {}).get('rate_pps')
         if not rate:
             return window_s
-        return min(max(window_s, math.ceil(need / rate)), cap * window_s)
+        # 25 % more than the mean: a Poisson count falls short of its mean
+        # half the time
+        return min(max(window_s, math.ceil(1.25 * need / rate)), cap * window_s)
 
     def wait(self, c, ref_t, timeout, ctx):
         """Poll until c holds or timeout: (met, detail)."""
