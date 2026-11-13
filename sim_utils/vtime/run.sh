@@ -103,6 +103,28 @@
 #                      have N^2 entries)
 #   FRAMES=1           write every frame sent to <outdir>/frames.txt (time us,
 #                      sender, channel, PSDU in hex; --vtime-frames)
+#   LOAD=<flows>       application load (docs/TRAFFIC_AND_REPORT.md): up, down,
+#                      mcast, p2p, comma-separated (e.g. LOAD=up,down). Off by
+#                      default. Every LOAD_<KEY>=<value> becomes the conf key
+#                      load_<key> of every program, e.g. LOAD_INTERVAL_S=10,
+#                      LOAD_PAYLOAD=64, LOAD_DIST=exp, LOAD_START_S=300,
+#                      LOAD_NODES=1-20, LOAD_RAMP_STEP_S=120, LOAD_RAMP_FACTOR=2,
+#                      LOAD_RAMP_STEPS=6 (the keys: docs/TRAFFIC_AND_REPORT.md
+#                      §2). LOAD turns STATS on unless STATS=0
+#   STATS=1            per-node statistics: a "NET1 {json}" line every
+#                      STATS_PERIOD virtual seconds (default 10; 0: only at the
+#                      end) in every node's log
+#   SCENARIO=<file>    a measurement scenario (docs/SCENARIOS.md), checked with
+#                      sim_utils/scenario.py --check before the run: its driver
+#                      steps the run through the conductor's control socket
+#                      (wssimserver --vtime-control), sets the load, acts on the
+#                      nodes and the medium, and ends the run when the scenario
+#                      ends (<seconds> is then a cap). Output:
+#                      scenario_result.json, scenario.log; with POWER,
+#                      power_snap.jsonl. Statistics on, sampled when the driver
+#                      asks (STATS_PERIOD 0 unless given)
+#   REPORT=auto|1|0    run sim_utils/report.py at the end: <outdir>/report.json.
+#                      auto (default): when LOAD, STATS or SCENARIO is set
 #   IF_NODES="<i> ..." nodes that are clients of the stack-neutral radio
 #                      interface (docs/RADIO_INTERFACE.md) instead of
 #                      wsnode-inproc: each runs IF_CMD_<i> (default IF_CMD)
@@ -134,6 +156,7 @@
 # program exits with a non-zero status (an AddressSanitizer or leak report
 # included), except the instances that KILL or RESTART stopped.
 set -u
+SIMUTILS=$(cd "$(dirname "$0")/.." && pwd)   # sim_utils/
 BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3; DUR=$4
 [ -x "$BIN/wssimserver" ] || { echo "run.sh: no $BIN/wssimserver (bindir: a virtual-time or server-only build)" >&2; exit 1; }
 BR_CONF=$WORK/examples/wsbrd${CONF:+-$CONF}.conf
@@ -249,6 +272,27 @@ abs_server_opts() {   # abs_server_opts <words>: the words, input files made abs
 	echo "${out[*]}"
 }
 POWER_OPTS=$(abs_server_opts "${POWER_OPTS:-}") || exit 1
+# Application load, statistics, scenario (docs/TRAFFIC_AND_REPORT.md, docs/SCENARIOS.md)
+APP_OPTS=""
+if [ -n "${SCENARIO:-}" ]; then
+	SCENARIO=$(realpath "$SCENARIO") && [ -f "$SCENARIO" ] || { echo "run.sh: no scenario ${SCENARIO:-}" >&2; exit 1; }
+	if ! python3 "$SIMUTILS/scenario.py" --check "$SCENARIO" > /dev/null; then
+		python3 "$SIMUTILS/scenario.py" --check "$SCENARIO" >&2
+		echo "run.sh: $SCENARIO: invalid scenario (above)" >&2; exit 1
+	fi
+	APP_OPTS+=" -o load_control=true"
+	STATS=${STATS:-1}; STATS_PERIOD=${STATS_PERIOD:-0}
+fi
+if [ -n "${LOAD:-}" ]; then
+	APP_OPTS+=" -o load_flows=$LOAD"
+	STATS=${STATS:-1}
+fi
+for v in $(compgen -v LOAD_); do
+	k=${v#LOAD_}; APP_OPTS+=" -o load_${k,,}=${!v}"
+done
+if [ "${STATS:-0}" = 1 ]; then
+	APP_OPTS+=" -o stats=true -o stats_period_s=${STATS_PERIOD:-10}"
+fi
 SIM_OPTS=$(abs_server_opts "${SIM_OPTS:-}") || exit 1
 NIF=0
 declare -A ICMD IOPT  # client node -> its command, its options
@@ -343,6 +387,11 @@ cd "$OUT" || exit 1
 mac() { printf '01:02:03:04:05:06:%02X:%02X' $(($1 >> 8)) $(($1 & 0xFF)); }
 start() {   # start <log name> <program and args...>
 	local log=$1; shift
+	# The command lines, for a scenario's restarts (docs/SCENARIOS.md)
+	case $log in
+	br) echo "0 $(printf '%q ' "${PRE[@]}" "$@")" >> "$OUT/programs.txt" ;;
+	node*) [[ ${log#node} =~ ^[0-9]+$ ]] && echo "${log#node} $(printf '%q ' "${PRE[@]}" "$@")" >> "$OUT/programs.txt" ;;
+	esac
 	"${PRE[@]}" "$@" > "$OUT/$log.log" 2>&1 &
 	PIDS+=($!); NAME[$!]=$log; ACTIVE[$!]=1
 }
@@ -390,7 +439,17 @@ case ${DUMP:-auto} in
 1) DUMPOPT=(--dump) ;;
 auto) (( NODES + NSBR + NIF <= 200 )) && DUMPOPT=(--dump) ;;
 esac
-start simserver "$BIN/wssimserver" --group-file="$OUT/topology.txt" --vtime=$((NODES + NSBR + NIF)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" "${DUMPOPT[@]}" "$SOCK"
+# The routers' highest ID, for the load's node selections
+[ -n "$APP_OPTS" ] && APP_OPTS+=" -o load_max_id=$NODES"
+[ -n "$APP_OPTS" ] && echo "app_opts=$APP_OPTS" >> "$OUT/run_info.txt"
+CTLOPT=()
+if [ -n "${SCENARIO:-}" ]; then
+	CTLSOCK=${SOCK%.sock}.ctl
+	CTLOPT=(--vtime-control="$CTLSOCK")
+	echo "scenario=$SCENARIO ctl=$CTLSOCK" >> "$OUT/run_info.txt"
+	cp "$SCENARIO" "$OUT/scenario.json"
+fi
+start simserver "$BIN/wssimserver" "${CTLOPT[@]}" --group-file="$OUT/topology.txt" --vtime=$((NODES + NSBR + NIF)) --vtime-end="$DUR" "${PWR[@]}" ${SIM_OPTS:-} "${CTL[@]}" "${DUMPOPT[@]}" "$SOCK"
 SIM_PID=$!
 for (( i = 0; i < 200; i++ )); do
 	[ -S "$SOCK" ] && break
@@ -403,10 +462,10 @@ done
 [ -S "$SOCK" ] || abort "no socket $SOCK after 10 s"
 
 [ $NSBR = 1 ] && start br env ${BR_ENV:-} "$BIN/wsbrd-inproc" --eui64="$(mac 0)" -F "$BR_CONF" -u "$SOCK" -t "$TUN" \
-	-o storage_prefix=storage/br_ ${BR_OPTS:-}
+	-o storage_prefix=storage/br_ $APP_OPTS ${BR_OPTS:-}
 start_node() {   # start_node <i> <log name>
 	start "$2" env $(v="NODE_ENV_$1"; echo "${!v:-}") "$BIN/wsnode-inproc" --eui64="$(mac $1)" -F "$NODE_CONF" -u "$SOCK" \
-		-o storage_prefix="storage/n${1}_" ${NODE_OPTS:-} $(v="NODE_OPTS_$1"; echo "${!v:-}")
+		-o storage_prefix="storage/n${1}_" $APP_OPTS ${NODE_OPTS:-} $(v="NODE_OPTS_$1"; echo "${!v:-}")
 }
 for (( i = 1; i <= NODES; i++ )); do
 	start_node $i node$i
@@ -426,6 +485,12 @@ for l in "${LATE[@]}"; do
 	start_node "$i" "${l#*:}"
 done
 
+DRIVER=
+if [ -n "${SCENARIO:-}" ]; then
+	python3 "$SIMUTILS/scenario.py" drive --ctl "$CTLSOCK" --run "$OUT" --scenario "$SCENARIO" \
+		--programs "$OUT/programs.txt" > "$OUT/scenario.log" 2>&1 &
+	DRIVER=$!
+fi
 if [ "${WALL_TIMEOUT:-0}" -gt 0 ]; then
 	# The run is then incomplete: wall_timeout marks it, and run.sh fails.
 	( sleep "$WALL_TIMEOUT"; touch "$OUT/wall_timeout"
@@ -454,6 +519,10 @@ declare -A STOPPED_SEEN ACCEPTED
 stopped_ok() {   # stopped_ok <log name>
 	local n=${1#node}; n=${n%%.*}
 	[ -n "${ACCEPTED[$1]:-}" ] && return 0
+	# A scenario may stop any node, the border router too (docs/SCENARIOS.md)
+	if [ -n "${SCENARIO:-}" ] && [ "$1" != simserver ] && grep -q "conductor closed the connection" "$OUT/$1.log"; then
+		ACCEPTED[$1]=1; echo "$1 stopped by the scenario" >> "$OUT/run_info.txt"; return 0
+	fi
 	[ "$1" != br ] && [ "$1" != simserver ] || return 1
 	(( ${STOPPED_SEEN[$n]:-0} < ${STOPPED[$n]:-0} )) || return 1
 	grep -q "conductor closed the connection" "$OUT/$1.log" || return 1
@@ -512,9 +581,20 @@ for p in "${!ACTIVE[@]}"; do
 	echo "${NAME[$p]} $RC" >> "$OUT/exit_codes.txt"
 done
 [ -n "$SAMPLER" ] && { kill "$SAMPLER" 2>/dev/null; wait "$SAMPLER" 2>/dev/null; rm -f "$OUT/rss.tmp"; }
+if [ -n "$DRIVER" ]; then
+	wait "$DRIVER"; echo "scenario driver status $?" >> "$OUT/run_info.txt"
+fi
 rm -f "$SOCK"
 echo "end_wall=$(date +%s.%N)" >> "$OUT/run_info.txt"
 sort -V -o "$OUT/exit_codes.txt" "$OUT/exit_codes.txt"
+case ${REPORT:-auto} in
+1) DO_REPORT=1 ;;
+auto) [ -n "${LOAD:-}${SCENARIO:-}" ] || [ "${STATS:-0}" = 1 ] && DO_REPORT=1 ;;
+esac
+if [ -n "${DO_REPORT:-}" ]; then
+	python3 "$SIMUTILS/report.py" "$OUT" --json "$OUT/report.json" > "$OUT/report.txt" 2>&1 ||
+		echo "run.sh: report.py failed ($OUT/report.txt)" >&2
+fi
 if [ -e "$OUT/wall_timeout" ]; then
 	echo "run stopped by WALL_TIMEOUT=$WALL_TIMEOUT s before its end: $OUT" >&2
 	exit 1
