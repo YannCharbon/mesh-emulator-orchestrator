@@ -737,6 +737,7 @@ Interferers that are not emulated nodes, an adjacent-channel table beyond the ne
 | `pre` | µs | 64 bits at `rate` | `fsk`: the preamble at the start of each on-interval, which a sniff can detect (§13.4) |
 | `adj` | `DB/DB/...` (`off` for none) | `fsk`: the medium's table of its rate; `noise`: no leakage | its own attenuation 1, 2, ... channels away |
 | `name` | text | `i0`, `i1`, ... | its name in the logs |
+| `from`, `until` | times (µs, or with `us`, `ms`, `s`) | 0, none | its active window: no power outside it (its schedule is drawn as if it had existed from 0). A scenario adds and removes interferers during the run the same way ([SCENARIOS.md](SCENARIOS.md) §8: `intf add`, `intf remove`) |
 
 **Time patterns.** `periodic`: on for `ON` every `PERIOD`, from `PHASE` (drawn uniformly in the period when not given). `ge`: a two-state Gilbert-Elliott process with exponential on and off times of means `MEAN_ON` and `MEAN_OFF`, starting in its stationary state (duty `MEAN_ON / (MEAN_ON + MEAN_OFF)`). `burst`: on-intervals of fixed length `ON` separated by exponential gaps of mean `MEAN_OFF` (packets at Poisson times, such as a duty-cycled LoRa device: `burst:ON:ON·(1/duty − 1)`). Each interferer draws from its own stream, `mix64(seed + mix64(index + 1) + K)` with its index in the order given, and its on-intervals are generated in time order as the medium needs them: the schedule depends only on the seed and the SPEC, not on the emulated traffic or on the order of the medium's queries. Durations are rounded to the µs, at least 1 µs.
 
