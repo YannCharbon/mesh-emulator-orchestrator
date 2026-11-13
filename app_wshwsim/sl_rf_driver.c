@@ -849,6 +849,11 @@ static void rf_medium_report(void)
          rf_medium_stats.cca, rf_medium_stats.cca_busy, rf_cca_threshold_dbm, rf_cca_threshold_sets);
 }
 
+// "xL": a text command from the conductor for the program (wssimserver
+// --vtime-control, docs/SCENARIOS.md). The program defines rf_ctl_message()
+// (app_wsbrd/app_load.c); without it the command is ignored.
+void rf_ctl_message(const char *text, int len) __attribute__((weak));
+
 //int dbg_i_rx = 0;
 void phy_rf_rx_now(void)
 {
@@ -864,6 +869,11 @@ void phy_rf_rx_now(void)
     len = read(g_rf_host.rf_fd, msg, sizeof(msg));
     FATAL_ON(!len, 2, "RF server has gone");
     FATAL_ON(len < 0, 2, "RF socket: %m");
+    if (len >= 2 && !memcmp(msg, "xL", 2)) {
+        if (rf_ctl_message)
+            rf_ctl_message((const char *)msg + 2, len - 2);
+        return;
+    }
     if (rf_medium && len == sizeof(struct sim_verdict) && !memcmp(msg, "xv", 2)) {
         rf_medium_verdict((const struct sim_verdict *)msg);
         return;

@@ -25,6 +25,8 @@ typedef struct sd_bus sd_bus;
 #include "nanostack/source/mac/rf_driver_storage.h"
 #include "nanostack/ws_management_api.h"
 #include "test_traffic.h"
+#include "app_load.h"
+#include "net_stats.h"
 
 
 struct phy_device_driver_s;
@@ -86,6 +88,8 @@ struct wsbr_ctxt {
     bool enable_lfn;            // border router: parent LFNs (FAN 1.1)
     ws_lfn_settings_t lfn_cfg;  // lfn_* settings (defaults: ws_management_lfn_settings_defaults())
     struct test_traffic_cfg test_traffic; // test_udp_* (test_traffic.h)
+    struct app_load_cfg load;   // load_* (app_load.h, docs/TRAFFIC_AND_REPORT.md)
+    struct net_stats_cfg stats; // stats, stats_period_s (net_stats.h)
     int test_lfn_silent_at_s;   // > 0: the LFN parent goes silent then (ws_test_lfn_parent_silence())
     int test_lfn_silent_for_s;  // for this long
     uint32_t dhcp_lifetime_s;   // > 0: the DHCPv6 address lifetime given (0xffffffff: infinite); 0: the network size's

@@ -322,6 +322,15 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
             ctxt->lfn = false;
         else
             FATAL(1, "%s:%d: invalid device_type: %s (ffn or lfn)", filename, line_no, str_arg);
+    } else if (sscanf(line, " load_%63[a-z_0-9] = %255s %c", str_arg2, str_arg, &garbage) == 2) {
+        const char *err = app_load_config(&ctxt->load, str_arg2, str_arg);
+        if (err)
+            FATAL(1, "%s:%d: load_%s: %s", filename, line_no, str_arg2, err);
+    } else if (sscanf(line, " stats = %s %c", str_arg, &garbage) == 1) {
+        ctxt->stats.on = str_to_val(str_arg, valid_booleans);
+    } else if (sscanf(line, " stats_period_s = %d %c", &ctxt->stats.period_s, &garbage) == 1) {
+        if (ctxt->stats.period_s < 0)
+            FATAL(1, "%s:%d: stats_period_s: 0 or more", filename, line_no);
     } else if (sscanf(line, " test_udp_dst = %s %c", str_arg, &garbage) == 1) {
         if (ctxt->test_traffic.dst_count >= TEST_UDP_DST_MAX)
             FATAL(1, "%s:%d: at most %d test_udp_dst", filename, line_no, TEST_UDP_DST_MAX);
@@ -553,6 +562,7 @@ void parse_commandline(struct wsbr_ctxt *ctxt, int argc, char *argv[],
     ctxt->rx_on_when_idle = true;
     ctxt->rx_off_after_s = -1;
     ws_management_lfn_settings_defaults(&ctxt->lfn_cfg);
+    app_load_defaults(&ctxt->load);
 
     ctxt->uc_dwell_interval = WS_FHSS_UC_DWELL_INTERVAL;
     ctxt->bc_interval = WS_FHSS_BC_INTERVAL;
