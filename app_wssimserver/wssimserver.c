@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <time.h>
+#include <stdarg.h>
 
 #include "sim_proto.h"
 #include "ns_port_sim.h"
@@ -492,6 +493,9 @@ static int ctl_listen_fd = -1, ctl_fd = -1;
 static uint64_t ctl_until;                      // events up to this time may run
 static FILE *ctl_in;
 static uint64_t vt_airtime_us;                  // central medium: airtime of every frame sent
+static bool vt_uncharged;                       // this wake only answers measurement requests ("ask")
+static pid_t ctl_owner;                         // the server process (not a child of it)
+#define SIM_CTL_TEXT_MAX 65000                  // longest "xL" text (app_wshwsim/sl_rf_driver.c reads up to 64 KiB)
 static FILE *vt_frames_file;
 
 static uint64_t seconds_to_us(const char *opt, const char *str)
@@ -1723,8 +1727,9 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
                 WARN("node %d: bad idle message (%zd bytes): run aborted", node, len);
                 return -1;
             }
-            if (pwr_enabled())
+            if (pwr_enabled() && !vt_uncharged)
                 pwr_idle(node, vt_now, idle->next_us);
+            vt_uncharged = false;
             vt_set_deadline(node, idle->next_us);
             return 0;
         }
@@ -1803,7 +1808,7 @@ static int vt_read_until_idle(struct ctxt *ctxt, int node)
             if (pwr_enabled())
                 pwr_radio(node, vt_now, r);
         } else if (len == sizeof(struct nsim_wake) && !memcmp(buf, "xc", 2)) {
-            if (pwr_enabled())
+            if (pwr_enabled() && !vt_uncharged)
                 pwr_wake_report(node, (const struct nsim_wake *)buf);
         } else {
             WARN("node %d: unexpected message (%zd bytes, \"%.2s\"), dropped", node, len, buf);
@@ -1831,7 +1836,7 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
     struct nsim_advance adv = { .magic = "xa", .now_us = t };
     struct sim_frame_hdr *hdr;
     struct vt_event ev;
-    size_t num = 0, num_frames = 0, i;
+    size_t num = 0, num_frames = 0, num_ask = 0, i;
     uint32_t delivered = 0;     // the last medium frame delivered
     bool deadline = false;      // the node's own deadline is due
     int ret = 0;
@@ -1912,6 +1917,8 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
         msgs[num++].rx_dbm = ev.rx_dbm;
         if (ev.kind != VT_EV_CTL)
             num_frames++;
+        if (ev.kind == VT_EV_CTL && ev.sniff)   // a measurement request ("ask") has sniff = 1
+            num_ask++;
     }
     // Only verdicts of locks that ended before their frame's end (captured,
     // tx_abort, left): nothing to tell the node, so no wake (it would count
@@ -1922,7 +1929,10 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
     FATAL_ON(num > UINT16_MAX, 1, "node %d: %zu messages due at %" PRIu64 " us", node, num, t);
     adv.frames = num;
     vt_wakes++;
-    if (pwr_enabled())
+    // A wake for measurement requests only (the scenario driver's "ask"):
+    // not in the power ledger, which keeps the node asleep (docs/SCENARIOS.md)
+    vt_uncharged = !deadline && num > 0 && num_ask == num;
+    if (pwr_enabled() && !vt_uncharged)
         pwr_wake(node, t, num_frames);
     if (vt_send(node, &adv, sizeof(adv)))
         ret = -1;
@@ -2132,7 +2142,9 @@ static int vt_ctl_run(struct ctxt *ctxt, struct vt_ctl *c, struct nsim_welcome *
  */
 static void ctl_unlink(void)
 {
-    if (ctl_path)
+    // Not from a child of the server (none should exit through atexit, but
+    // a child must never remove the parent's socket)
+    if (ctl_path && getpid() == ctl_owner)
         unlink(ctl_path);
 }
 
@@ -2146,6 +2158,7 @@ static void ctl_listen(void)
     unlink(ctl_path);
     FATAL_ON(bind(ctl_listen_fd, (struct sockaddr *)&a, sizeof(a)) < 0, 1, "--vtime-control: bind %s: %m", ctl_path);
     FATAL_ON(listen(ctl_listen_fd, 1) < 0, 1, "--vtime-control: listen: %m");
+    ctl_owner = getpid();
     atexit(ctl_unlink);     // also when the server stops on an error
     INFO("scenario: control socket %s", ctl_path);
 }
@@ -2234,7 +2247,7 @@ static int ctl_start(struct ctxt *ctxt, int node, struct nsim_welcome *welcome, 
     return 0;
 }
 
-static void ctl_push_text(int node, const char *text)
+static void ctl_push_text(int node, const char *text, bool ask)
 {
     size_t n = strlen(text);
     struct vt_frame *f = malloc(sizeof(*f) + n + 2);
@@ -2244,95 +2257,161 @@ static void ctl_push_text(int node, const char *text)
     f->len = n + 2;
     memcpy(f->data, "xL", 2);
     memcpy(f->data + 2, text, n);
-    vt_push_ev((struct vt_event){ .t = vt_now, .node = node, .kind = VT_EV_CTL, .frame = f });
+    // sniff = 1 marks a measurement request: its wake is not charged
+    vt_push_ev((struct vt_event){ .t = vt_now, .node = node, .kind = VT_EV_CTL, .frame = f, .sniff = ask });
 }
 
-// One command; the answer in out. Returns 1 for quit, -1 if the run must stop.
-static int ctl_command(struct ctxt *ctxt, char *line, struct nsim_welcome *welcome, char *out, size_t outlen)
+// A node ID, the whole word: 0 to MAX_NODES - 1
+static int ctl_id(const char *w)
+{
+    char *end;
+    long v;
+
+    if (!w || !*w)
+        return -1;
+    v = strtol(w, &end, 10);
+    if (*end || v < 0 || v >= MAX_NODES)
+        return -1;
+    return v;
+}
+
+static char *ctl_word(char **rest)
+{
+    char *w;
+
+    while (**rest == ' ')
+        (*rest)++;
+    if (!**rest)
+        return NULL;
+    w = *rest;
+    while (**rest && **rest != ' ')
+        (*rest)++;
+    if (**rest)
+        *(*rest)++ = '\0';
+    while (**rest == ' ')
+        (*rest)++;
+    return w;
+}
+
+// The answer to the driver, of any length
+static void ctl_answer(const char *fmt, ...)
+{
+    va_list ap;
+    char *msg = NULL;
+    int n;
+
+    va_start(ap, fmt);
+    n = vasprintf(&msg, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return;
+    for (int off = 0; off < n; ) {
+        ssize_t r = write(ctl_fd, msg + off, n - off);
+        if (r <= 0 && errno != EINTR)
+            break;
+        if (r > 0)
+            off += r;
+    }
+    if (write(ctl_fd, "\n", 1) < 0)
+        WARN("scenario: write: %m");
+    free(msg);
+}
+
+// One command (it answers itself). Returns 0, 1 to end the run, 2 to let
+// time go on (run_until), -1 if the run must stop.
+static int ctl_command(struct ctxt *ctxt, char *line, struct nsim_welcome *welcome)
 {
     static uint64_t mask[MAX_NODES / 64];
-    char *cmd, *args, *a, *b, *c;
+    char *rest = line, *cmd, *a, *b, *c;
     int n, r;
 
-    cmd = strtok_r(line, " ", &args);
+    cmd = ctl_word(&rest);
     if (!cmd) {
-        snprintf(out, outlen, "err empty command");
+        ctl_answer("err empty command");
         return 0;
     }
-    while (*args == ' ')
-        args++;
     if (!strcmp(cmd, "run_until")) {
-        uint64_t t = strtoull(args, NULL, 10);
+        char *end;
+        unsigned long long t = strtoull(rest, &end, 10);
+        if (!*rest || *end) {
+            ctl_answer("err usage: run_until MICROSECONDS");
+            return 0;
+        }
         if (t < vt_now) {
-            snprintf(out, outlen, "err time %llu is before now %llu", (unsigned long long)t, (unsigned long long)vt_now);
+            ctl_answer("err time %llu is before now %llu", t, (unsigned long long)vt_now);
             return 0;
         }
         ctl_until = t;
-        out[0] = '\0';  // answered at the next pause
-        return 2;
+        return 2;           // answered at the next pause
     }
     if (!strcmp(cmd, "now")) {
-        snprintf(out, outlen, "at %llu", (unsigned long long)vt_now);
+        ctl_answer("at %llu", (unsigned long long)vt_now);
         return 0;
     }
     if (!strcmp(cmd, "quit")) {
-        snprintf(out, outlen, "bye");
+        ctl_answer("bye");
         return 1;
     }
     if (!strcmp(cmd, "log")) {
-        INFO("scenario: %s", args);
-        snprintf(out, outlen, "ok");
+        INFO("scenario: %s", rest);
+        ctl_answer("ok");
         return 0;
     }
-    if (!strcmp(cmd, "node")) {
-        a = strtok_r(NULL, " ", &args);
-        while (args && *args == ' ')
-            args++;
-        if (!a || !args || !*args || ctl_nodes(a, mask)) {
-            snprintf(out, outlen, "err usage: node IDS|all TEXT");
+    if (!strcmp(cmd, "node") || !strcmp(cmd, "ask")) {
+        // ask: a measurement request (stats, tree), whose wake the power
+        // ledger does not charge
+        a = ctl_word(&rest);
+        if (!a || !*rest || ctl_nodes(a, mask)) {
+            ctl_answer("err usage: %s IDS|all TEXT", cmd);
+            return 0;
+        }
+        if (strlen(rest) > SIM_CTL_TEXT_MAX) {
+            ctl_answer("err text of %zu bytes, at most %d", strlen(rest), SIM_CTL_TEXT_MAX);
             return 0;
         }
         n = 0;
         for (int i = 0; i < MAX_NODES; i++)
             if (bitmap_get(i, mask, MAX_NODES / 64) && slot_of_node[i] && !vt_radio_if(i)) {
-                ctl_push_text(i, args);
+                ctl_push_text(i, rest, !strcmp(cmd, "ask"));
                 n++;
             }
-        snprintf(out, outlen, "ok %d", n);
+        ctl_answer("ok %d", n);
         return 0;
     }
     if (!strcmp(cmd, "kill") || !strcmp(cmd, "start")) {
         char err[160];
-        n = atoi(args);
-        if (n < 0 || n >= MAX_NODES) {
-            snprintf(out, outlen, "err bad node %s", args);
+        n = ctl_id(ctl_word(&rest));
+        if (n < 0 || *rest) {
+            ctl_answer("err usage: %s ID (0 to %d)", cmd, MAX_NODES - 1);
             return 0;
         }
         if (!strcmp(cmd, "kill")) {
             if (!slot_of_node[n]) {
-                snprintf(out, outlen, "err node %d is not running", n);
+                ctl_answer("err node %d is not running", n);
                 return 0;
             }
             vt_kill(n);
             if (pwr_enabled())
                 pwr_node_off(n, vt_now);
-            snprintf(out, outlen, "ok");
+            ctl_answer("ok");
             return 0;
         }
         r = ctl_start(ctxt, n, welcome, err, sizeof(err));
         if (r)
-            snprintf(out, outlen, "err %s", err);
+            ctl_answer("err %s", err);
         else
-            snprintf(out, outlen, "ok");
+            ctl_answer("ok");
         return r == -2 ? -1 : 0;
     }
     if (!strcmp(cmd, "cut") || !strcmp(cmd, "uncut") || !strcmp(cmd, "link")) {
-        a = strtok_r(NULL, " ", &args);
-        b = strtok_r(NULL, " ", &args);
-        c = strtok_r(NULL, " ", &args);
-        int src = a ? atoi(a) : -1, dst = b ? atoi(b) : -1;
-        if (src < 0 || dst < 0 || src >= MAX_NODES || dst >= MAX_NODES || (!strcmp(cmd, "link") && !c)) {
-            snprintf(out, outlen, "err usage: cut|uncut SRC DST, link A B RSSI");
+        int src, dst;
+        a = ctl_word(&rest);
+        b = ctl_word(&rest);
+        c = ctl_word(&rest);
+        src = ctl_id(a);
+        dst = ctl_id(b);
+        if (src < 0 || dst < 0 || *rest || (!strcmp(cmd, "link") ? !c : !!c)) {
+            ctl_answer("err usage: cut|uncut SRC DST, link A B RSSI");
             return 0;
         }
         if (!strcmp(cmd, "cut")) {
@@ -2342,112 +2421,129 @@ static int ctl_command(struct ctxt *ctxt, char *line, struct nsim_welcome *welco
             vt_cut[dst][src / 64] &= ~(1ULL << (src % 64));
             INFO("virtual time: frames from node %d reach node %d again from %s (scenario)", src, dst, vt_time_str(vt_now));
         } else {
-            struct vt_ctl lc = { .t = vt_now, .kind = VT_CTL_LINK, .node = dst, .src = src, .rssi = strtof(c, NULL) };
+            char *end;
+            struct vt_ctl lc = { .t = vt_now, .kind = VT_CTL_LINK, .node = dst, .src = src, .rssi = strtof(c, &end) };
+            if (*end || lc.rssi > 0 || lc.rssi < -200) {
+                ctl_answer("err bad RSSI %s", c);
+                return 0;
+            }
             if (vt_ctl_run(ctxt, &lc, welcome)) {
-                snprintf(out, outlen, "err no link %d-%d", src, dst);
+                ctl_answer("err no link %d-%d", src, dst);
                 return 0;
             }
         }
-        snprintf(out, outlen, "ok");
+        ctl_answer("ok");
         return 0;
     }
     if (!strcmp(cmd, "neighbors")) {
-        int len2 = 0;
-        n = atoi(args);
-        len2 += snprintf(out + len2, outlen - len2, "ok");
-        for (int i = 0; i < MAX_NODES && len2 < (int)outlen - 8; i++)
-            if (i != n && n >= 0 && n < MAX_NODES && bitmap_get(i, ctxt->node_graph[n], MAX_NODES / 64))
-                len2 += snprintf(out + len2, outlen - len2, " %d", i);
+        // "ok ID:RSSI ...": the hearing graph, with the stored mean level of
+        // each link (the weaker direction, dBm)
+        char *buf = NULL;
+        size_t sz = 0;
+        FILE *f;
+        n = ctl_id(ctl_word(&rest));
+        if (n < 0) {
+            ctl_answer("err usage: neighbors ID");
+            return 0;
+        }
+        f = open_memstream(&buf, &sz);
+        FATAL_ON(!f, 1, "open_memstream: %m");
+        fputs("ok", f);
+        for (int i = 0; i < MAX_NODES; i++)
+            if (i != n && bitmap_get(i, ctxt->node_graph[n], MAX_NODES / 64)) {
+                float x = sim_link(nodes_infos_flat_map, n, i)->rssi, y = sim_link(nodes_infos_flat_map, i, n)->rssi;
+                fprintf(f, " %d:%.1f", i, x < y ? x : y);
+            }
+        fclose(f);
+        ctl_answer("%s", buf);
+        free(buf);
         return 0;
     }
     if (!strcmp(cmd, "intf")) {
-        char err[200];
-        a = strtok_r(NULL, " ", &args);
-        while (args && *args == ' ')
-            args++;
+        char err[300];
+        a = ctl_word(&rest);
         if (!med_central()) {
-            snprintf(out, outlen, "err interferers need the central medium");
+            ctl_answer("err interferers need the central medium");
             return 0;
         }
-        if (a && !strcmp(a, "add") && args && *args) {
-            const char *name = intf_add_runtime(args, vt_now, err, sizeof(err));
+        if (a && !strcmp(a, "add") && *rest) {
+            const char *name = intf_add_runtime(rest, vt_now, err, sizeof(err));
             if (name)
-                snprintf(out, outlen, "ok %s", name);
+                ctl_answer("ok %s", name);
             else
-                snprintf(out, outlen, "err %s", err);
+                ctl_answer("err %s", err);
             return 0;
         }
-        if (a && !strcmp(a, "remove") && args && *args) {
-            n = intf_remove_runtime(args, vt_now);
+        if (a && !strcmp(a, "remove") && *rest) {
+            n = intf_remove_runtime(rest, vt_now);
             if (n)
-                snprintf(out, outlen, "ok %d", n);
+                ctl_answer("ok %d", n);
             else
-                snprintf(out, outlen, "err no active interferer %s", args);
+                ctl_answer("err no active interferer %s", rest);
             return 0;
         }
-        snprintf(out, outlen, "err usage: intf add SPEC | intf remove NAME|all");
+        ctl_answer("err usage: intf add SPEC | intf remove NAME|all");
         return 0;
     }
     if (!strcmp(cmd, "counters")) {
-        int len2 = snprintf(out, outlen, "ok t_us=%llu wakes=%llu frames_in=%llu frames_out=%llu airtime_us=%llu",
+        char outc[1024];
+        int len2 = snprintf(outc, sizeof(outc), "ok t_us=%llu wakes=%llu frames_in=%llu frames_out=%llu airtime_us=%llu",
                             (unsigned long long)vt_now, (unsigned long long)vt_wakes, (unsigned long long)vt_frames_in,
                             (unsigned long long)vt_frames_out, (unsigned long long)vt_airtime_us);
         if (med_central())
-            med_outcomes_str(out + len2, outlen - len2);
+            med_outcomes_str(outc + len2, sizeof(outc) - len2);
+        ctl_answer("%s", outc);
         return 0;
     }
     if (!strcmp(cmd, "power")) {
-        a = strtok_r(NULL, " ", &args);
-        b = strtok_r(NULL, " ", &args);
-        while (args && *args == ' ')
-            args++;
+        FILE *f;
+        a = ctl_word(&rest);
+        b = ctl_word(&rest);
         if (!pwr_enabled()) {
-            snprintf(out, outlen, "err no power recording (--power)");
+            ctl_answer("err no power recording (--power)");
             return 0;
         }
         if (!a || strcmp(a, "snap") || !b) {
-            snprintf(out, outlen, "err usage: power snap FILE TAG");
+            ctl_answer("err usage: power snap FILE TAG");
             return 0;
         }
-        FILE *f = fopen(b, "a");
+        f = fopen(b, "a");
         if (!f) {
-            snprintf(out, outlen, "err %s: %m", b);
+            ctl_answer("err %s: %s", b, strerror(errno));
             return 0;
         }
-        pwr_snapshot(f, args && *args ? args : "-", vt_now);
+        pwr_snapshot(f, *rest ? rest : "-", vt_now);
         fclose(f);
-        snprintf(out, outlen, "ok");
+        ctl_answer("ok");
         return 0;
     }
-    snprintf(out, outlen, "err unknown command %s", cmd);
+    ctl_answer("err unknown command %s", cmd);
     return 0;
 }
 
 // Paused: answer the driver until it allows time to go on. Returns 0 to go
-// on, 1 when the driver ends the run, -1 on an error.
+// on, 1 when the driver ends the run ("quit"), -1 on an error, -3 when the
+// driver is gone (its connection closed without "quit": the run fails).
 static int ctl_pause(struct ctxt *ctxt, struct nsim_welcome *welcome)
 {
-    static char line[8192], out[65536];
-    bool answered = false;
+    static char *line;
+    static size_t cap;
+    ssize_t len;
     int r;
 
     if (ctl_until > vt_now)
         vt_now = ctl_until;      // nothing happened in between: commands act at the pause time
+    ctl_answer("at %llu", (unsigned long long)vt_now);
     for (;;) {
-        if (!answered) {
-            dprintf(ctl_fd, "at %llu\n", (unsigned long long)vt_now);
-            answered = true;
-        }
-        if (!fgets(line, sizeof(line), ctl_in)) {
-            WARN("scenario: the driver closed the control connection");
-            return 1;
+        len = getline(&line, &cap, ctl_in);
+        if (len < 0) {
+            WARN("scenario: the driver closed the control connection without \"quit\"");
+            return -3;
         }
         line[strcspn(line, "\r\n")] = '\0';
-        r = ctl_command(ctxt, line, welcome, out, sizeof(out));
+        r = ctl_command(ctxt, line, welcome);
         if (r == 2)
-            return 0;               // events up to ctl_until run, then the next pause answers
-
-        dprintf(ctl_fd, "%s\n", out);
+            return 0;            // events up to ctl_until run, then the next pause answers
         if (r == 1)
             return 1;
         if (r < 0)
@@ -2572,6 +2668,11 @@ static int vt_run(struct ctxt *ctxt)
                     reason = "scenario end";
                     break;
                 }
+                if (r == -3) {
+                    reason = "scenario driver lost";
+                    status = 1;
+                    break;
+                }
                 if (r < 0) {
                     reason = stop ? "interrupted" : "a node failed";
                     status = stop ? 0 : 1;
@@ -2622,10 +2723,10 @@ out:
     if (ctl_fd >= 0) {
         dprintf(ctl_fd, "ended %llu %s\n", (unsigned long long)vt_now, reason);
         if (ctl_in)
-            fclose(ctl_in);
-        else
-            close(ctl_fd);
+            fclose(ctl_in);     // its own descriptor (a dup)
+        close(ctl_fd);
         ctl_fd = -1;
+        ctl_in = NULL;
     }
     vt_quit_all();
     wall = timespec_diff(&start, &end);

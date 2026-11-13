@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <sys/wait.h>
+#include <setjmp.h>
 #include <unistd.h>
 #include "common/log.h"
 #include "sim_interf.h"
@@ -146,6 +146,22 @@ void intf_set_position_model(intf_pos_fn fn)
 
 /* ---- parsing */
 
+// At run time (a scenario's "intf add"), a bad SPEC is an answer, not the
+// end of the server: the parser's errors jump back to intf_add_runtime()
+static jmp_buf *intf_rt_jmp;
+static char intf_rt_msg[300];
+static struct isrc *intf_parsing;
+static char *intf_parsing_copy;
+#define IFATAL(CODE, ...) do {                                                   \
+        if (intf_rt_jmp) {                                                       \
+            snprintf(intf_rt_msg, sizeof(intf_rt_msg), "" __VA_ARGS__);          \
+            longjmp(*intf_rt_jmp, 1);                                            \
+        }                                                                        \
+        FATAL(CODE, __VA_ARGS__);                                                \
+    } while (0)
+#define IFATAL_ON(COND, CODE, ...) do { if (COND) IFATAL(CODE, __VA_ARGS__); } while (0)
+
+
 // A duration: a number of µs, or with a unit (us, ms, s)
 static uint64_t intf_time(const char *spec, const char *v)
 {
@@ -157,8 +173,8 @@ static uint64_t intf_time(const char *spec, const char *v)
     else if (!strcmp(end, "s"))
         mult = 1e6;
     else
-        FATAL_ON(*end && strcmp(end, "us"), 1, "--interferer: bad time \"%s\" in %s", v, spec);
-    FATAL_ON(end == v || !(d >= 0) || d * mult > 1e15, 1, "--interferer: bad time \"%s\" in %s", v, spec);
+        IFATAL_ON(*end && strcmp(end, "us"), 1, "--interferer: bad time \"%s\" in %s", v, spec);
+    IFATAL_ON(end == v || !(d >= 0) || d * mult > 1e15, 1, "--interferer: bad time \"%s\" in %s", v, spec);
     return llround(d * mult);
 }
 
@@ -167,7 +183,7 @@ static float intf_float(const char *spec, const char *key, const char *v, float 
     char *end;
     float f = strtof(v, &end);
 
-    FATAL_ON(end == v || *end || !(f >= min && f <= max), 1, "--interferer: %s: expected a number from %g to %g: %s",
+    IFATAL_ON(end == v || *end || !(f >= min && f <= max), 1, "--interferer: %s: expected a number from %g to %g: %s",
              key, min, max, spec);
     return f;
 }
@@ -177,7 +193,7 @@ static long intf_long(const char *spec, const char *key, const char *v, long min
     char *end;
     long n = strtol(v, &end, 10);
 
-    FATAL_ON(end == v || *end || n < min || n > max, 1, "--interferer: %s: expected a whole number from %ld to %ld: %s",
+    IFATAL_ON(end == v || *end || n < min || n > max, 1, "--interferer: %s: expected a whole number from %ld to %ld: %s",
              key, min, max, spec);
     return n;
 }
@@ -194,9 +210,9 @@ static void intf_parse_chans(struct isrc *s, const char *spec, char *v)
         a = intf_long(spec, "chan", tok, 0, 65535);
         b = dash ? intf_long(spec, "chan", dash + 1, a, 65535) : a;
         for (c = a; c <= b; c++) {
-            FATAL_ON(s->n_chans >= INTF_CHANS_MAX, 1, "--interferer: at most %d channels: %s", INTF_CHANS_MAX, spec);
+            IFATAL_ON(s->n_chans >= INTF_CHANS_MAX, 1, "--interferer: at most %d channels: %s", INTF_CHANS_MAX, spec);
             for (int k = 0; k < s->n_chans; k++)
-                FATAL_ON(s->chans[k] == c, 1, "--interferer: channel %ld given twice: %s", c, spec);
+                IFATAL_ON(s->chans[k] == c, 1, "--interferer: channel %ld given twice: %s", c, spec);
             s->chans[s->n_chans++] = c;
         }
     }
@@ -208,17 +224,17 @@ static void intf_parse_pattern(struct isrc *s, const char *spec, char *v)
     int n = 0;
 
     for (char *tok = strtok_r(v, ":", &save); tok; tok = strtok_r(NULL, ":", &save)) {
-        FATAL_ON(n >= 4, 1, "--interferer: pattern: too many fields: %s", spec);
+        IFATAL_ON(n >= 4, 1, "--interferer: pattern: too many fields: %s", spec);
         f[n++] = tok;
     }
-    FATAL_ON(!n, 1, "--interferer: empty pattern: %s", spec);
+    IFATAL_ON(!n, 1, "--interferer: empty pattern: %s", spec);
     if (!strcmp(f[0], "const") && n == 1) {
         s->pattern = PAT_CONST;
     } else if (!strcmp(f[0], "periodic") && (n == 3 || n == 4)) {
         s->pattern = PAT_PERIODIC;
         s->a = intf_time(spec, f[1]);
         s->b = intf_time(spec, f[2]);
-        FATAL_ON(!s->a || !s->b || s->b >= s->a, 1,
+        IFATAL_ON(!s->a || !s->b || s->b >= s->a, 1,
                  "--interferer: periodic:PERIOD:ON needs 0 < ON < PERIOD: %s", spec);
         if (n == 4) {
             s->c = intf_time(spec, f[3]) % s->a;
@@ -228,14 +244,14 @@ static void intf_parse_pattern(struct isrc *s, const char *spec, char *v)
         s->pattern = PAT_GE;
         s->a = intf_time(spec, f[1]);
         s->b = intf_time(spec, f[2]);
-        FATAL_ON(!s->a || !s->b, 1, "--interferer: ge:MEAN_ON:MEAN_OFF needs both above 0: %s", spec);
+        IFATAL_ON(!s->a || !s->b, 1, "--interferer: ge:MEAN_ON:MEAN_OFF needs both above 0: %s", spec);
     } else if (!strcmp(f[0], "burst") && n == 3) {
         s->pattern = PAT_BURST;
         s->a = intf_time(spec, f[1]);
         s->b = intf_time(spec, f[2]);
-        FATAL_ON(!s->a || !s->b, 1, "--interferer: burst:ON:MEAN_OFF needs both above 0: %s", spec);
+        IFATAL_ON(!s->a || !s->b, 1, "--interferer: burst:ON:MEAN_OFF needs both above 0: %s", spec);
     } else {
-        FATAL(1, "--interferer: pattern: expected const, periodic:PERIOD:ON[:PHASE], ge:MEAN_ON:MEAN_OFF "
+        IFATAL(1, "--interferer: pattern: expected const, periodic:PERIOD:ON[:PHASE], ge:MEAN_ON:MEAN_OFF "
               "or burst:ON:MEAN_OFF: %s", spec);
     }
 }
@@ -246,24 +262,24 @@ static void intf_parse(const char *spec)
     char *copy, *tok, *save, *eq, *v, *colon, *dash;
     bool kind_given = false;
 
-    FATAL_ON(intf.n >= INTF_MAX, 1, "--interferer: at most %d interferers", INTF_MAX);
-    s = calloc(1, sizeof(*s));
-    FATAL_ON(!s, 1, "calloc: %m");
+    IFATAL_ON(intf.n >= INTF_MAX, 1, "--interferer: at most %d interferers", INTF_MAX);
+    s = intf_parsing = calloc(1, sizeof(*s));
+    IFATAL_ON(!s, 1, "calloc: %m");
     s->index = intf.n;
     snprintf(s->name, sizeof(s->name), "i%d", intf.n);
     s->noise = true;
     s->rate_bps = 150000;
     s->pattern = PAT_CONST;
     s->until = UINT64_MAX;
-    copy = strdup(spec);
-    FATAL_ON(!copy, 1, "strdup: %m");
+    copy = intf_parsing_copy = strdup(spec);
+    IFATAL_ON(!copy, 1, "strdup: %m");
     for (tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
         eq = strchr(tok, '=');
-        FATAL_ON(!eq, 1, "--interferer: expected KEY=VALUE: \"%s\" in %s", tok, spec);
+        IFATAL_ON(!eq, 1, "--interferer: expected KEY=VALUE: \"%s\" in %s", tok, spec);
         *eq = '\0';
         v = eq + 1;
         if (!strcmp(tok, "name")) {
-            FATAL_ON(!*v || strlen(v) >= sizeof(s->name) || strpbrk(v, " \t"), 1,
+            IFATAL_ON(!*v || strlen(v) >= sizeof(s->name) || strpbrk(v, " \t"), 1,
                      "--interferer: name: 1 to %zu characters, no space: %s", sizeof(s->name) - 1, spec);
             strcpy(s->name, v);
         } else if (!strcmp(tok, "chan")) {
@@ -277,9 +293,9 @@ static void intf_parse(const char *spec)
             }
         } else if (!strcmp(tok, "at")) {
             colon = strchr(v, ':');
-            FATAL_ON(!colon, 1, "--interferer: at=IDS:DBM: %s", spec);
+            IFATAL_ON(!colon, 1, "--interferer: at=IDS:DBM: %s", spec);
             *colon = '\0';
-            FATAL_ON(s->n_at >= INTF_NODES_MAX, 1, "--interferer: at most %d at= entries", INTF_NODES_MAX);
+            IFATAL_ON(s->n_at >= INTF_NODES_MAX, 1, "--interferer: at most %d at= entries", INTF_NODES_MAX);
             dash = strchr(v, '-');
             if (dash)
                 *dash = '\0';
@@ -291,10 +307,10 @@ static void intf_parse(const char *spec)
         } else if (!strcmp(tok, "pattern")) {
             intf_parse_pattern(s, spec, v);
         } else if (!strcmp(tok, "hop")) {
-            FATAL_ON(strcmp(v, "on") && strcmp(v, "off"), 1, "--interferer: hop=on|off: %s", spec);
+            IFATAL_ON(strcmp(v, "on") && strcmp(v, "off"), 1, "--interferer: hop=on|off: %s", spec);
             s->hop = !strcmp(v, "on");
         } else if (!strcmp(tok, "kind")) {
-            FATAL_ON(strcmp(v, "noise") && strcmp(v, "fsk"), 1, "--interferer: kind=noise|fsk: %s", spec);
+            IFATAL_ON(strcmp(v, "noise") && strcmp(v, "fsk"), 1, "--interferer: kind=noise|fsk: %s", spec);
             s->noise = !strcmp(v, "noise");
             kind_given = true;
         } else if (!strcmp(tok, "rate")) {
@@ -307,21 +323,21 @@ static void intf_parse(const char *spec)
 
             s->n_adj = 0;
             for (t2 = strtok_r(v, "/", &save2); t2; t2 = strtok_r(NULL, "/", &save2)) {
-                FATAL_ON(s->n_adj >= INTF_ADJ_MAX, 1, "--interferer: adj: at most %d values: %s", INTF_ADJ_MAX, spec);
+                IFATAL_ON(s->n_adj >= INTF_ADJ_MAX, 1, "--interferer: adj: at most %d values: %s", INTF_ADJ_MAX, spec);
                 s->adj_on[s->n_adj] = strcmp(t2, "off");
                 s->adj[s->n_adj] = s->adj_on[s->n_adj] ? intf_float(spec, "adj", t2, -100, 200) : 0;
                 s->n_adj++;
             }
-            FATAL_ON(!s->n_adj, 1, "--interferer: adj: no value: %s", spec);
+            IFATAL_ON(!s->n_adj, 1, "--interferer: adj: no value: %s", spec);
         } else if (!strcmp(tok, "pos")) {
             char *t2, *save2;
             int n = 0;
 
             for (t2 = strtok_r(v, "/", &save2); t2; t2 = strtok_r(NULL, "/", &save2)) {
-                FATAL_ON(n >= 3, 1, "--interferer: pos=X/Y[/Z]: %s", spec);
+                IFATAL_ON(n >= 3, 1, "--interferer: pos=X/Y[/Z]: %s", spec);
                 s->pos[n++] = intf_float(spec, "pos", t2, -1e6, 1e6);
             }
-            FATAL_ON(n < 2, 1, "--interferer: pos=X/Y[/Z]: %s", spec);
+            IFATAL_ON(n < 2, 1, "--interferer: pos=X/Y[/Z]: %s", spec);
             s->has_pos = true;
         } else if (!strcmp(tok, "eirp")) {
             s->eirp = intf_float(spec, "eirp", v, -100, 60);
@@ -330,15 +346,16 @@ static void intf_parse(const char *spec)
         } else if (!strcmp(tok, "until")) {
             s->until = intf_time(spec, v);
         } else {
-            FATAL(1, "--interferer: unknown key \"%s\": %s", tok, spec);
+            IFATAL(1, "--interferer: unknown key \"%s\": %s", tok, spec);
         }
     }
     free(copy);
-    FATAL_ON(!s->n_chans, 1, "--interferer: chan= is required: %s", spec);
-    FATAL_ON(!s->has_level && !s->n_at && !s->has_pos, 1, "--interferer: needs level=, at= or pos=: %s", spec);
-    FATAL_ON(s->hop && s->pattern == PAT_CONST, 1, "--interferer: hop=on needs a pattern with bursts: %s", spec);
-    FATAL_ON(s->pre_given && (s->noise || !kind_given), 1, "--interferer: pre= needs kind=fsk: %s", spec);
-    FATAL_ON(s->until <= s->from, 1, "--interferer: until= must be after from=: %s", spec);
+    intf_parsing_copy = NULL;
+    IFATAL_ON(!s->n_chans, 1, "--interferer: chan= is required: %s", spec);
+    IFATAL_ON(!s->has_level && !s->n_at && !s->has_pos, 1, "--interferer: needs level=, at= or pos=: %s", spec);
+    IFATAL_ON(s->hop && s->pattern == PAT_CONST, 1, "--interferer: hop=on needs a pattern with bursts: %s", spec);
+    IFATAL_ON(s->pre_given && (s->noise || !kind_given), 1, "--interferer: pre= needs kind=fsk: %s", spec);
+    IFATAL_ON(s->until <= s->from, 1, "--interferer: until= must be after from=: %s", spec);
     // An FSK interferer sends the Wi-SUN minimum preamble (8 bytes) at the
     // start of each burst, unless pre= says otherwise
     if (!s->noise && !s->pre_given)
@@ -576,36 +593,67 @@ void intf_set_dynamic(void)
 const char *intf_add_runtime(const char *spec, uint64_t now, char *err, size_t errlen)
 {
     struct isrc *s;
-    pid_t pid;
-    int st;
+    jmp_buf jb;
+    int slot = -1;
+    static struct isrc *volatile old;
 
     if (intf.n >= INTF_MAX) {
-        snprintf(err, errlen, "at most %d interferers", INTF_MAX);
+        // The slot of an interferer removed before now is reused
+        for (int i = 0; i < intf.n && slot < 0; i++)
+            if (intf.src[i]->until <= now)
+                slot = i;
+        if (slot < 0) {
+            snprintf(err, errlen, "at most %d interferers active or not yet removed", INTF_MAX);
+            return NULL;
+        }
+    }
+    intf_parsing = NULL;
+    intf_parsing_copy = NULL;
+    old = NULL;
+    if (setjmp(jb)) {
+        intf_rt_jmp = NULL;
+        snprintf(err, errlen, "%s", intf_rt_msg);
+        free(intf_parsing_copy);
+        free(intf_parsing);
+        if (old) {          // the removed interferer back in its slot
+            intf.src[intf.n++] = intf.src[slot];
+            intf.src[slot] = old;
+        }
         return NULL;
     }
-    // The parser stops the program on an error: try it in a child first
-    fflush(NULL);
-    pid = fork();
-    if (pid == 0) {
+    intf_rt_jmp = &jb;
+    if (slot >= 0) {
+        // intf_parse() appends: make room, then move the new one there
+        old = intf.src[slot];
+        intf.src[slot] = intf.src[--intf.n];
         intf_parse(spec);
-        _exit(0);
+        s = intf.src[intf.n - 1];
+        intf.src[intf.n - 1] = intf.src[slot];
+        intf.src[slot] = s;
+        s->index = slot;
+        INFO("medium: interferer %s (removed) frees its slot", old->name);
+        free(old->iv);
+        free(old->lvl);
+        free(old->lvl_mw);
+        free(old);
+    } else {
+        intf_parse(spec);
+        s = intf.src[intf.n - 1];
+        slot = intf.n - 1;
     }
-    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st)) {
-        snprintf(err, errlen, "invalid interferer (the reason is in simserver.log): %s", spec);
-        return NULL;
-    }
-    intf_parse(spec);
-    s = intf.src[intf.n - 1];
-    for (int i = 0; i < intf.n - 1; i++)
-        if (!strcmp(intf.src[i]->name, s->name) && intf.src[i]->until > now) {
+    intf_rt_jmp = NULL;
+    free(intf_parsing_copy);
+    intf_parsing_copy = NULL;
+    for (int i = 0; i < intf.n; i++)
+        if (i != slot && !strcmp(intf.src[i]->name, s->name) && intf.src[i]->until > now) {
             snprintf(err, errlen, "an active interferer is already named %s", s->name);
+            intf.src[slot] = intf.src[--intf.n];
             free(s);
-            intf.n--;
             return NULL;
         }
     if (s->from < now)
         s->from = now;
-    intf_src_init(s, intf.n - 1);
+    intf_src_init(s, s->index);
     INFO("medium: interferer %s added at %.6f s (scenario)", s->name, now / 1e6);
     return s->name;
 }
