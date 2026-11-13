@@ -60,6 +60,8 @@ bool med_central(void);
 // node); links: the "/wssimnodesinfos" table.
 void med_start(uint64_t seed, const uint8_t *cca_shm, struct node_infos *links);
 void med_finish(void);
+// The outcome totals so far, " ok=N noise=N ..." (scenario counters)
+int med_outcomes_str(char *buf, int len);
 
 // A frame from src starts now. Returns NULL (with a warning) if its header
 // cannot give an airtime. The frame stays on air until its end; the caller

@@ -42,6 +42,15 @@ typedef bool (*intf_pos_fn)(int node, const double pos[3], float eirp_dbm, float
 void intf_set_position_model(intf_pos_fn fn);
 
 void intf_start(uint64_t seed);
+// Scenarios (docs/SCENARIOS.md): interferers may be added and removed during
+// the run; with this, intf_any() is true from the start (the medium log has
+// its interferer column), whether or not one is defined yet
+void intf_set_dynamic(void);
+// A new interferer from now (SPEC as --interferer): its name, or NULL with
+// the reason in err. Its schedule is drawn as if it had existed from 0.
+const char *intf_add_runtime(const char *spec, uint64_t now, char *err, size_t errlen);
+// The interferer(s) named (or "all") stop now; returns how many
+int intf_remove_runtime(const char *name, uint64_t now);
 void intf_finish(void);
 // At least one interferer is defined
 bool intf_any(void);

@@ -342,6 +342,9 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "                            this RSSI (dBm), both directions (it must exist); repeatable\n");
     fprintf(stream, "  --vtime-drop=SRC:DST:SEQ:FROM:TO virtual time: frames from SRC with this MAC sequence\n");
     fprintf(stream, "                            number are not delivered to DST between FROM and TO s; repeatable\n");
+    fprintf(stream, "  --vtime-control=SOCKET    virtual time: a scenario driver connects to this UNIX stream socket\n");
+    fprintf(stream, "                            and steps the run (pause, run until, commands to the nodes and the\n");
+    fprintf(stream, "                            medium; docs/SCENARIOS.md)\n");
     fprintf(stream, "  --vtime-frames=FILE       virtual time: write every frame sent (time us, sender, channel,\n");
     fprintf(stream, "                            PSDU in hex) to FILE\n");
     fprintf(stream, "  --power=PROFILE           virtual time: record power, every node with this profile\n");
@@ -422,6 +425,7 @@ enum {
     OPT_VTIME_POWER_UP,
     OPT_VTIME_CUT,
     OPT_VTIME_FRAMES,
+    OPT_VTIME_CONTROL,
     OPT_VTIME_LINK,
     OPT_VTIME_DROP,
     OPT_MEDIUM,
@@ -482,6 +486,12 @@ static struct vt_ctl vt_ctls[VT_CTL_MAX];
 static int vt_ctls_n, vt_ctls_next;
 static int vt_starts_n;
 static const char *vt_frames_path;
+// --vtime-control (docs/SCENARIOS.md): a scenario driver steps the run
+static const char *ctl_path;
+static int ctl_listen_fd = -1, ctl_fd = -1;
+static uint64_t ctl_until;                      // events up to this time may run
+static FILE *ctl_in;
+static uint64_t vt_airtime_us;                  // central medium: airtime of every frame sent
 static FILE *vt_frames_file;
 
 static uint64_t seconds_to_us(const char *opt, const char *str)
@@ -641,6 +651,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "vtime-power-up", required_argument, 0, OPT_VTIME_POWER_UP },
         { "vtime-cut", required_argument, 0, OPT_VTIME_CUT },
         { "vtime-frames", required_argument, 0, OPT_VTIME_FRAMES },
+        { "vtime-control", required_argument, 0, OPT_VTIME_CONTROL },
         { "vtime-link", required_argument, 0, OPT_VTIME_LINK },
         { "vtime-drop", required_argument, 0, OPT_VTIME_DROP },
         { "medium", required_argument, 0, OPT_MEDIUM },
@@ -910,6 +921,11 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
             }
             case OPT_VTIME_LINK:
                 vt_ctl_add(VT_CTL_LINK, "--vtime-link", optarg, false);
+                break;
+            case OPT_VTIME_CONTROL:
+                FATAL_ON(strlen(optarg) >= sizeof(((struct sockaddr_un *)0)->sun_path), 1,
+                         "--vtime-control: path too long: %s", optarg);
+                ctl_path = optarg;
                 break;
             case OPT_VTIME_FRAMES:
                 vt_frames_path = optarg;
@@ -1324,7 +1340,7 @@ struct vt_frame {
     uint8_t data[];
 };
 
-enum { VT_EV_DEADLINE, VT_EV_FRAME, VT_EV_VERDICT, VT_EV_SNIFF };
+enum { VT_EV_DEADLINE, VT_EV_FRAME, VT_EV_VERDICT, VT_EV_SNIFF, VT_EV_CTL };
 
 struct vt_event {
     uint64_t t;
@@ -1448,7 +1464,7 @@ static void vt_push_ev(struct vt_event ev)
     ev.seq = vt_seq++;
     if (ev.kind == VT_EV_DEADLINE)
         vt_deadline_seq[ev.node] = ev.seq;
-    else if (ev.kind == VT_EV_FRAME)
+    else if (ev.kind == VT_EV_FRAME || ev.kind == VT_EV_CTL)
         ev.frame->refs++;
     for (i = vt_heap_len++; i > 0; i = parent) {
         parent = (i - 1) / 2;
@@ -1596,6 +1612,7 @@ static void vt_queue_frame_medium(struct ctxt *ctxt, int src, void *msg, int len
     f = med_frame_start_lp(src, hdr, vt_now, preamble_us);
     if (!f)
         return;
+    vt_airtime_us += med_frame_end(f) - vt_now;
     for (i = vt_next_neighbour(ctxt, src, -1); i >= 0; i = vt_next_neighbour(ctxt, src, i))
         if (vt_hears(ctxt, src, i, hdr))
             med_add_rx(f, i);
@@ -1805,6 +1822,7 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
         struct vt_frame *frame;     // NULL: verdict or sniff result
         float rx_dbm;
         bool sniff;                 // sniff result, not verdict
+        bool ctl;                   // a control message ("xL"), sent as it is
         struct sim_verdict verdict;
         struct sim_sniff_result result;
     } *msgs;
@@ -1837,6 +1855,7 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
             if (!med_verdict(ev.lock, t, &msgs[num].verdict))
                 continue;
             msgs[num].sniff = false;
+            msgs[num].ctl = false;
             msgs[num++].frame = NULL;
             continue;
         }
@@ -1865,6 +1884,7 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
                     vt_sniff_radio(node, t, state, lock ? ((const struct sim_frame_hdr *)fmsg)->chan : -1, true);
             }
             msgs[num].sniff = true;
+            msgs[num].ctl = false;
             msgs[num++].frame = NULL;
             if (!lock)
                 continue;
@@ -1879,6 +1899,7 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
             msgs[num].frame->len = flen;
             memcpy(msgs[num].frame->data, fmsg, flen);
             msgs[num].sniff = false;
+            msgs[num].ctl = false;
             msgs[num++].rx_dbm = rx_dbm;
             num_frames++;
             vt_push_ev((struct vt_event){ .t = med_lock_end(lock), .node = node, .kind = VT_EV_VERDICT,
@@ -1886,9 +1907,11 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
             continue;
         }
         msgs[num].sniff = false;
+        msgs[num].ctl = ev.kind == VT_EV_CTL;
         msgs[num].frame = ev.frame;
         msgs[num++].rx_dbm = ev.rx_dbm;
-        num_frames++;
+        if (ev.kind != VT_EV_CTL)
+            num_frames++;
     }
     // Only verdicts of locks that ended before their frame's end (captured,
     // tx_abort, left): nothing to tell the node, so no wake (it would count
@@ -1917,6 +1940,12 @@ static int vt_wake(struct ctxt *ctxt, int node, uint64_t t)
             if (!ret && vt_send(node, &msgs[i].verdict, sizeof(msgs[i].verdict)))
                 ret = -1;
             vt_verdicts_out++;
+            continue;
+        }
+        if (msgs[i].ctl) {
+            if (!ret && vt_send(node, msgs[i].frame->data, msgs[i].frame->len))
+                ret = -1;
+            vt_unref(msgs[i].frame);
             continue;
         }
         hdr = (struct sim_frame_hdr *)msgs[i].frame->data;
@@ -2092,6 +2121,333 @@ static int vt_ctl_run(struct ctxt *ctxt, struct vt_ctl *c, struct nsim_welcome *
     return 0;
 }
 
+/*
+ * Scenario control (--vtime-control, docs/SCENARIOS.md). A driver connects to
+ * a UNIX stream socket and sends one command per line; the server answers
+ * each with one line. The run pauses whenever its next event is later than
+ * the time the driver allowed ("run_until"): every node is then idle and its
+ * log written up to that time, so the driver's decisions depend on virtual
+ * time only and the run stays reproducible from the seed and the scenario.
+ * Commands act at the pause time (vt_now).
+ */
+static void ctl_listen(void)
+{
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+
+    strcpy(a.sun_path, ctl_path);
+    ctl_listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    FATAL_ON(ctl_listen_fd < 0, 1, "--vtime-control: socket: %m");
+    unlink(ctl_path);
+    FATAL_ON(bind(ctl_listen_fd, (struct sockaddr *)&a, sizeof(a)) < 0, 1, "--vtime-control: bind %s: %m", ctl_path);
+    FATAL_ON(listen(ctl_listen_fd, 1) < 0, 1, "--vtime-control: listen: %m");
+    INFO("scenario: control socket %s", ctl_path);
+}
+
+static void ctl_accept(void)
+{
+    struct pollfd p = { .fd = ctl_listen_fd, .events = POLLIN };
+
+    INFO("scenario: waiting for the driver");
+    FATAL_ON(poll(&p, 1, 120000) <= 0, 1, "--vtime-control: no driver connected within 120 s");
+    ctl_fd = accept(ctl_listen_fd, NULL, NULL);
+    FATAL_ON(ctl_fd < 0, 1, "--vtime-control: accept: %m");
+    close(ctl_listen_fd);
+    ctl_listen_fd = -1;
+    ctl_in = fdopen(dup(ctl_fd), "r");
+    FATAL_ON(!ctl_in, 1, "fdopen: %m");
+    INFO("scenario: driver connected");
+}
+
+// A node list: "all" (every connected Nanostack node), or IDs and ranges
+static int ctl_nodes(char *spec, uint64_t *mask)
+{
+    memset(mask, 0, MAX_NODES / 8);
+    if (!strcmp(spec, "all")) {
+        for (int n = 0; n < MAX_NODES; n++)
+            if (slot_of_node[n] && !vt_radio_if(n))
+                bitmap_set(n, mask, MAX_NODES / 64);
+        return 0;
+    }
+    return bitmap_parse(spec, mask, MAX_NODES / 64);
+}
+
+// A new instance of node, started by the driver (it connects to the
+// simulation socket): welcomed now, its clock at 0, as --vtime-start
+static int ctl_start(struct ctxt *ctxt, int node, struct nsim_welcome *welcome, char *err, size_t errlen)
+{
+    struct pollfd p = { .fd = fds[0].fd, .events = POLLIN };
+    struct sim_hello hello;
+    int slot, fd;
+    ssize_t len;
+
+    if (fds[0].fd < 0) {
+        snprintf(err, errlen, "no listening socket");
+        return -1;
+    }
+    if (slot_of_node[node])
+        vt_kill(node);
+    if (poll(&p, 1, 60000) <= 0) {
+        snprintf(err, errlen, "no new instance connected within 60 s");
+        return -1;
+    }
+    fd = accept(fds[0].fd, NULL, NULL);
+    if (fd < 0) {
+        snprintf(err, errlen, "accept: %m");
+        return -1;
+    }
+    for (slot = 1; slot < fd_limit && fds[slot].fd >= 0; slot++)
+        ;
+    if (slot >= fd_limit) {
+        close(fd);
+        snprintf(err, errlen, "no free connection slot");
+        return -1;
+    }
+    p.fd = fd;
+    if (poll(&p, 1, 60000) <= 0 || (len = recv(fd, &hello, sizeof(hello), 0)) != sizeof(hello) ||
+        memcmp(hello.magic, "xh", 2) || hello.node_id != node || !(hello.flags & SIM_HELLO_VTIME)) {
+        close(fd);
+        snprintf(err, errlen, "the new connection is not node %d's virtual-time hello", node);
+        return -1;
+    }
+    fds[slot].fd = fd;
+    fds[slot].events = 0;
+    conns[slot].node = node;
+    conns[slot].radio_if = 0;
+    slot_of_node[node] = slot;
+    num_connected++;
+    INFO("virtual time: node %d started at %s (scenario: new instance)", node, vt_time_str(vt_now));
+    welcome->start_us = vt_now;
+    if (pwr_enabled())
+        pwr_wake(node, vt_now, 0);
+    welcome->drift_ppb = drift_of(node, welcome->seed);
+    if (vt_welcome(node, welcome) || vt_read_until_idle(ctxt, node)) {
+        snprintf(err, errlen, "node %d failed at its start", node);
+        return -2;
+    }
+    return 0;
+}
+
+static void ctl_push_text(int node, const char *text)
+{
+    size_t n = strlen(text);
+    struct vt_frame *f = malloc(sizeof(*f) + n + 2);
+
+    FATAL_ON(!f, 1, "malloc: %m");
+    f->refs = 0;
+    f->len = n + 2;
+    memcpy(f->data, "xL", 2);
+    memcpy(f->data + 2, text, n);
+    vt_push_ev((struct vt_event){ .t = vt_now, .node = node, .kind = VT_EV_CTL, .frame = f });
+}
+
+// One command; the answer in out. Returns 1 for quit, -1 if the run must stop.
+static int ctl_command(struct ctxt *ctxt, char *line, struct nsim_welcome *welcome, char *out, size_t outlen)
+{
+    static uint64_t mask[MAX_NODES / 64];
+    char *cmd, *args, *a, *b, *c;
+    int n, r;
+
+    cmd = strtok_r(line, " ", &args);
+    if (!cmd) {
+        snprintf(out, outlen, "err empty command");
+        return 0;
+    }
+    while (*args == ' ')
+        args++;
+    if (!strcmp(cmd, "run_until")) {
+        uint64_t t = strtoull(args, NULL, 10);
+        if (t < vt_now) {
+            snprintf(out, outlen, "err time %llu is before now %llu", (unsigned long long)t, (unsigned long long)vt_now);
+            return 0;
+        }
+        ctl_until = t;
+        out[0] = '\0';  // answered at the next pause
+        return 2;
+    }
+    if (!strcmp(cmd, "now")) {
+        snprintf(out, outlen, "at %llu", (unsigned long long)vt_now);
+        return 0;
+    }
+    if (!strcmp(cmd, "quit")) {
+        snprintf(out, outlen, "bye");
+        return 1;
+    }
+    if (!strcmp(cmd, "log")) {
+        INFO("scenario: %s", args);
+        snprintf(out, outlen, "ok");
+        return 0;
+    }
+    if (!strcmp(cmd, "node")) {
+        a = strtok_r(NULL, " ", &args);
+        while (args && *args == ' ')
+            args++;
+        if (!a || !args || !*args || ctl_nodes(a, mask)) {
+            snprintf(out, outlen, "err usage: node IDS|all TEXT");
+            return 0;
+        }
+        n = 0;
+        for (int i = 0; i < MAX_NODES; i++)
+            if (bitmap_get(i, mask, MAX_NODES / 64) && slot_of_node[i] && !vt_radio_if(i)) {
+                ctl_push_text(i, args);
+                n++;
+            }
+        snprintf(out, outlen, "ok %d", n);
+        return 0;
+    }
+    if (!strcmp(cmd, "kill") || !strcmp(cmd, "start")) {
+        char err[160];
+        n = atoi(args);
+        if (n < 0 || n >= MAX_NODES) {
+            snprintf(out, outlen, "err bad node %s", args);
+            return 0;
+        }
+        if (!strcmp(cmd, "kill")) {
+            if (!slot_of_node[n]) {
+                snprintf(out, outlen, "err node %d is not running", n);
+                return 0;
+            }
+            vt_kill(n);
+            if (pwr_enabled())
+                pwr_node_off(n, vt_now);
+            snprintf(out, outlen, "ok");
+            return 0;
+        }
+        r = ctl_start(ctxt, n, welcome, err, sizeof(err));
+        if (r)
+            snprintf(out, outlen, "err %s", err);
+        else
+            snprintf(out, outlen, "ok");
+        return r == -2 ? -1 : 0;
+    }
+    if (!strcmp(cmd, "cut") || !strcmp(cmd, "uncut") || !strcmp(cmd, "link")) {
+        a = strtok_r(NULL, " ", &args);
+        b = strtok_r(NULL, " ", &args);
+        c = strtok_r(NULL, " ", &args);
+        int src = a ? atoi(a) : -1, dst = b ? atoi(b) : -1;
+        if (src < 0 || dst < 0 || src >= MAX_NODES || dst >= MAX_NODES || (!strcmp(cmd, "link") && !c)) {
+            snprintf(out, outlen, "err usage: cut|uncut SRC DST, link A B RSSI");
+            return 0;
+        }
+        if (!strcmp(cmd, "cut")) {
+            bitmap_set(src, vt_cut[dst], MAX_NODES / 64);
+            INFO("virtual time: frames from node %d no longer reach node %d from %s (scenario)", src, dst, vt_time_str(vt_now));
+        } else if (!strcmp(cmd, "uncut")) {
+            vt_cut[dst][src / 64] &= ~(1ULL << (src % 64));
+            INFO("virtual time: frames from node %d reach node %d again from %s (scenario)", src, dst, vt_time_str(vt_now));
+        } else {
+            struct vt_ctl lc = { .t = vt_now, .kind = VT_CTL_LINK, .node = dst, .src = src, .rssi = strtof(c, NULL) };
+            if (vt_ctl_run(ctxt, &lc, welcome)) {
+                snprintf(out, outlen, "err no link %d-%d", src, dst);
+                return 0;
+            }
+        }
+        snprintf(out, outlen, "ok");
+        return 0;
+    }
+    if (!strcmp(cmd, "neighbors")) {
+        int len2 = 0;
+        n = atoi(args);
+        len2 += snprintf(out + len2, outlen - len2, "ok");
+        for (int i = 0; i < MAX_NODES && len2 < (int)outlen - 8; i++)
+            if (i != n && n >= 0 && n < MAX_NODES && bitmap_get(i, ctxt->node_graph[n], MAX_NODES / 64))
+                len2 += snprintf(out + len2, outlen - len2, " %d", i);
+        return 0;
+    }
+    if (!strcmp(cmd, "intf")) {
+        char err[200];
+        a = strtok_r(NULL, " ", &args);
+        while (args && *args == ' ')
+            args++;
+        if (!med_central()) {
+            snprintf(out, outlen, "err interferers need the central medium");
+            return 0;
+        }
+        if (a && !strcmp(a, "add") && args && *args) {
+            const char *name = intf_add_runtime(args, vt_now, err, sizeof(err));
+            if (name)
+                snprintf(out, outlen, "ok %s", name);
+            else
+                snprintf(out, outlen, "err %s", err);
+            return 0;
+        }
+        if (a && !strcmp(a, "remove") && args && *args) {
+            n = intf_remove_runtime(args, vt_now);
+            if (n)
+                snprintf(out, outlen, "ok %d", n);
+            else
+                snprintf(out, outlen, "err no active interferer %s", args);
+            return 0;
+        }
+        snprintf(out, outlen, "err usage: intf add SPEC | intf remove NAME|all");
+        return 0;
+    }
+    if (!strcmp(cmd, "counters")) {
+        int len2 = snprintf(out, outlen, "ok t_us=%llu wakes=%llu frames_in=%llu frames_out=%llu airtime_us=%llu",
+                            (unsigned long long)vt_now, (unsigned long long)vt_wakes, (unsigned long long)vt_frames_in,
+                            (unsigned long long)vt_frames_out, (unsigned long long)vt_airtime_us);
+        if (med_central())
+            med_outcomes_str(out + len2, outlen - len2);
+        return 0;
+    }
+    if (!strcmp(cmd, "power")) {
+        a = strtok_r(NULL, " ", &args);
+        b = strtok_r(NULL, " ", &args);
+        while (args && *args == ' ')
+            args++;
+        if (!pwr_enabled()) {
+            snprintf(out, outlen, "err no power recording (--power)");
+            return 0;
+        }
+        if (!a || strcmp(a, "snap") || !b) {
+            snprintf(out, outlen, "err usage: power snap FILE TAG");
+            return 0;
+        }
+        FILE *f = fopen(b, "a");
+        if (!f) {
+            snprintf(out, outlen, "err %s: %m", b);
+            return 0;
+        }
+        pwr_snapshot(f, args && *args ? args : "-", vt_now);
+        fclose(f);
+        snprintf(out, outlen, "ok");
+        return 0;
+    }
+    snprintf(out, outlen, "err unknown command %s", cmd);
+    return 0;
+}
+
+// Paused: answer the driver until it allows time to go on. Returns 0 to go
+// on, 1 when the driver ends the run, -1 on an error.
+static int ctl_pause(struct ctxt *ctxt, struct nsim_welcome *welcome)
+{
+    static char line[8192], out[65536];
+    bool answered = false;
+    int r;
+
+    if (ctl_until > vt_now)
+        vt_now = ctl_until;      // nothing happened in between: commands act at the pause time
+    for (;;) {
+        if (!answered) {
+            dprintf(ctl_fd, "at %llu\n", (unsigned long long)vt_now);
+            answered = true;
+        }
+        if (!fgets(line, sizeof(line), ctl_in)) {
+            WARN("scenario: the driver closed the control connection");
+            return 1;
+        }
+        line[strcspn(line, "\r\n")] = '\0';
+        r = ctl_command(ctxt, line, welcome, out, sizeof(out));
+        if (r == 2)
+            return 0;               // events up to ctl_until run, then the next pause answers
+
+        dprintf(ctl_fd, "%s\n", out);
+        if (r == 1)
+            return 1;
+        if (r < 0)
+            return -1;
+    }
+}
+
 static int vt_run(struct ctxt *ctxt)
 {
     struct nsim_welcome welcome = { .magic = "xw", .version = NSIM_PROTO_VERSION, .seed = 1 };
@@ -2114,9 +2470,14 @@ static int vt_run(struct ctxt *ctxt)
         vt_quit_all();
         return 0;
     }
-    // No more connections: the run is complete.
-    close(fds[0].fd);
-    fds[0].fd = -1;
+    // No more connections: the run is complete (a scenario driver may start
+    // new instances: the listening socket stays open for them).
+    if (!ctl_path) {
+        close(fds[0].fd);
+        fds[0].fd = -1;
+    } else {
+        fds[0].events = 0;
+    }
     for (i = 1; i < fd_limit; i++)
         if (fds[i].fd >= 0 && conns[i].node < 0)
             conn_close(i);
@@ -2154,6 +2515,8 @@ static int vt_run(struct ctxt *ctxt)
             vt_cca_shm[node * SIM_SHM_CCA_STRIDE + 3] = SIM_RADIO_OFF;
         }
     }
+    if (ctl_path)
+        ctl_accept();
     clock_gettime(CLOCK_MONOTONIC, &start);
     // Welcome the nodes one at a time, in ID order, and read each one's first
     // run at time 0 until its "xi": no two nodes ever run at once.
@@ -2182,11 +2545,33 @@ static int vt_run(struct ctxt *ctxt)
         // Events of a node that is stopped (frames, its old deadline)
         while (vt_heap_len && !slot_of_node[vt_heap[0].node]) {
             struct vt_event ev = vt_pop();
-            if (ev.kind == VT_EV_FRAME)
+            if (ev.kind == VT_EV_FRAME || ev.kind == VT_EV_CTL)
                 vt_unref(ev.frame);
             else if (ev.kind == VT_EV_VERDICT)
                 med_lock_free(ev.lock);
             vt_drop_stale();
+        }
+        if (ctl_fd >= 0) {
+            uint64_t next = UINT64_MAX;
+            int r;
+
+            if (vt_ctls_next < vt_ctls_n)
+                next = vt_ctls[vt_ctls_next].t;
+            if (vt_heap_len && vt_heap[0].t < next)
+                next = vt_heap[0].t;
+            if (next > ctl_until && !(ctxt->has_vtime_end && next > ctxt->vtime_end_us && ctl_until >= ctxt->vtime_end_us)) {
+                r = ctl_pause(ctxt, &welcome);
+                if (r == 1) {
+                    reason = "scenario end";
+                    break;
+                }
+                if (r < 0) {
+                    reason = stop ? "interrupted" : "a node failed";
+                    status = stop ? 0 : 1;
+                    break;
+                }
+                continue;
+            }
         }
         if (vt_ctls_next < vt_ctls_n && (!vt_heap_len || vt_ctls[vt_ctls_next].t <= vt_heap[0].t) &&
             !(ctxt->has_vtime_end && vt_ctls[vt_ctls_next].t > ctxt->vtime_end_us)) {
@@ -2227,6 +2612,14 @@ static int vt_run(struct ctxt *ctxt)
     }
 out:
     clock_gettime(CLOCK_MONOTONIC, &end);
+    if (ctl_fd >= 0) {
+        dprintf(ctl_fd, "ended %llu %s\n", (unsigned long long)vt_now, reason);
+        if (ctl_in)
+            fclose(ctl_in);
+        else
+            close(ctl_fd);
+        ctl_fd = -1;
+    }
     vt_quit_all();
     wall = timespec_diff(&start, &end);
     INFO("virtual time: end (%s)", reason);
@@ -2314,6 +2707,12 @@ int main(int argc, char **argv)
         conns[i].node = -1;
     }
     listen_socket(&ctxt);
+    if (ctl_path) {
+        FATAL_ON(!ctxt.vtime_nodes, 1, "--vtime-control needs --vtime");
+        ctl_listen();
+        if (med_central())
+            intf_set_dynamic();
+    }
 
     if (ctxt.vtime_nodes)
         status = vt_run(&ctxt);
@@ -2328,6 +2727,8 @@ int main(int argc, char **argv)
     if (fds[0].fd >= 0)
         close(fds[0].fd);
     unlink(ctxt.addr.sun_path);
+    if (ctl_path)
+        unlink(ctl_path);
     munmap(ptr, SIM_SHM_CCA_SIZE);
     munmap(infos_ptr, SIM_SHM_INFOS_SIZE);
     close(shm_fd);

@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <sys/wait.h>
+#include <unistd.h>
 #include "common/log.h"
 #include "sim_interf.h"
 #include "sim_medium.h"
@@ -78,6 +80,7 @@ struct isrc {
     struct ivl *iv;
     int head, n, cap;
     uint64_t n_gen, on_gen;     // generated so far: intervals, on-time
+    uint64_t from, until;       // active window (from=, until=; a scenario's add and remove)
     double cf[INTF_CF_MAX + 1]; // coupling 0, 1, ... channels away
     int n_cf;                   // cf[d] = 0 from d = n_cf
     int cache_chan[INTF_CACHE]; // wideband: the summed coupling into a channel
@@ -88,6 +91,8 @@ static struct {
     bool given;
     struct isrc *src[INTF_MAX];
     int n;
+    bool dynamic, started;
+    const char *rt_err;             // runtime parse: the first error, instead of FATAL
     const char *log_path;
     FILE *log;
     intf_pos_fn pos_fn;
@@ -249,6 +254,7 @@ static void intf_parse(const char *spec)
     s->noise = true;
     s->rate_bps = 150000;
     s->pattern = PAT_CONST;
+    s->until = UINT64_MAX;
     copy = strdup(spec);
     FATAL_ON(!copy, 1, "strdup: %m");
     for (tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
@@ -319,6 +325,10 @@ static void intf_parse(const char *spec)
             s->has_pos = true;
         } else if (!strcmp(tok, "eirp")) {
             s->eirp = intf_float(spec, "eirp", v, -100, 60);
+        } else if (!strcmp(tok, "from")) {
+            s->from = intf_time(spec, v);
+        } else if (!strcmp(tok, "until")) {
+            s->until = intf_time(spec, v);
         } else {
             FATAL(1, "--interferer: unknown key \"%s\": %s", tok, spec);
         }
@@ -328,6 +338,7 @@ static void intf_parse(const char *spec)
     FATAL_ON(!s->has_level && !s->n_at && !s->has_pos, 1, "--interferer: needs level=, at= or pos=: %s", spec);
     FATAL_ON(s->hop && s->pattern == PAT_CONST, 1, "--interferer: hop=on needs a pattern with bursts: %s", spec);
     FATAL_ON(s->pre_given && (s->noise || !kind_given), 1, "--interferer: pre= needs kind=fsk: %s", spec);
+    FATAL_ON(s->until <= s->from, 1, "--interferer: until= must be after from=: %s", spec);
     // An FSK interferer sends the Wi-SUN minimum preamble (8 bytes) at the
     // start of each burst, unless pre= says otherwise
     if (!s->noise && !s->pre_given)
@@ -500,11 +511,46 @@ static void intf_gen(struct isrc *s, uint64_t upto)
 
 static void intf_cf_setup(struct isrc *s);
 
+// Levels, coupling and stream of interferer i (at the start, or when a
+// scenario adds it)
+static void intf_src_init(struct isrc *s, int i)
+{
+    int k, node;
+    float dbm;
+
+    s->rng = mix64(intf.seed + mix64((uint64_t)i + 1) + INTF_RNG_K);
+    intf_cf_setup(s);
+    s->lvl = malloc(SIM_MAX_NODES * sizeof(*s->lvl));
+    s->lvl_mw = malloc(SIM_MAX_NODES * sizeof(*s->lvl_mw));
+    FATAL_ON(!s->lvl || !s->lvl_mw, 1, "malloc: %m");
+    FATAL_ON(s->has_pos && !intf.pos_fn, 1,
+             "interferer %s: pos= needs node positions (a propagation model): none is loaded", s->name);
+    for (node = 0; node < SIM_MAX_NODES; node++) {
+        s->lvl[node] = s->has_level ? s->level : NAN;
+        if (s->has_pos && intf.pos_fn(node, s->pos, s->eirp, &dbm))
+            s->lvl[node] = dbm;
+    }
+    for (k = 0; k < s->n_at; k++)
+        for (node = s->at[k].from; node <= s->at[k].to; node++)
+            s->lvl[node] = s->at[k].dbm;
+    for (node = 0; node < SIM_MAX_NODES; node++)
+        s->lvl_mw[node] = isnan(s->lvl[node]) ? 0 : pow(10, s->lvl[node] / 10);
+    if (s->pattern == PAT_CONST)
+        INFO("medium: interferer %s: %s, %d channel%s%s, constant", s->name, s->noise ? "noise" : "fsk",
+             s->n_chans, s->n_chans > 1 ? "s" : "", s->has_level ? "" : ", levels per node");
+    else
+        INFO("medium: interferer %s: %s, %d channel%s%s%s, %s %llu/%llu us", s->name, s->noise ? "noise" : "fsk",
+             s->n_chans, s->n_chans > 1 ? "s" : "", s->hop ? " (hopping)" : "",
+             s->has_level ? "" : ", levels per node", pat_names[s->pattern], (unsigned long long)s->a,
+             (unsigned long long)s->b);
+    if (s->from || s->until != UINT64_MAX)
+        INFO("medium: interferer %s: active from %.6f s%s%.6f s", s->name, s->from / 1e6,
+             s->until == UINT64_MAX ? "" : " until ", s->until == UINT64_MAX ? 0.0 : s->until / 1e6);
+}
+
 void intf_start(uint64_t seed)
 {
-    struct isrc *s;
-    int i, k, node;
-    float dbm;
+    int i;
 
     intf.seed = seed;
     FATAL_ON(intf.log_path && !intf.n, 1, "--interferer-log needs --interferer or --interferer-file");
@@ -512,39 +558,71 @@ void intf_start(uint64_t seed)
         intf.log = fopen(intf.log_path, "w");
         FATAL_ON(!intf.log, 1, "%s: %m", intf.log_path);
     }
-    for (i = 0; i < intf.n; i++) {
-        s = intf.src[i];
-        s->rng = mix64(seed + mix64((uint64_t)i + 1) + INTF_RNG_K);
-        intf_cf_setup(s);
-        s->lvl = malloc(SIM_MAX_NODES * sizeof(*s->lvl));
-        s->lvl_mw = malloc(SIM_MAX_NODES * sizeof(*s->lvl_mw));
-        FATAL_ON(!s->lvl || !s->lvl_mw, 1, "malloc: %m");
-        FATAL_ON(s->has_pos && !intf.pos_fn, 1,
-                 "interferer %s: pos= needs node positions (a propagation model): none is loaded", s->name);
-        for (node = 0; node < SIM_MAX_NODES; node++) {
-            s->lvl[node] = s->has_level ? s->level : NAN;
-            if (s->has_pos && intf.pos_fn(node, s->pos, s->eirp, &dbm))
-                s->lvl[node] = dbm;
-        }
-        for (k = 0; k < s->n_at; k++)
-            for (node = s->at[k].from; node <= s->at[k].to; node++)
-                s->lvl[node] = s->at[k].dbm;
-        for (node = 0; node < SIM_MAX_NODES; node++)
-            s->lvl_mw[node] = isnan(s->lvl[node]) ? 0 : pow(10, s->lvl[node] / 10);
-        if (s->pattern == PAT_CONST)
-            INFO("medium: interferer %s: %s, %d channel%s%s, constant", s->name, s->noise ? "noise" : "fsk",
-                 s->n_chans, s->n_chans > 1 ? "s" : "", s->has_level ? "" : ", levels per node");
-        else
-            INFO("medium: interferer %s: %s, %d channel%s%s%s, %s %llu/%llu us", s->name, s->noise ? "noise" : "fsk",
-                 s->n_chans, s->n_chans > 1 ? "s" : "", s->hop ? " (hopping)" : "",
-                 s->has_level ? "" : ", levels per node", pat_names[s->pattern], (unsigned long long)s->a,
-                 (unsigned long long)s->b);
-    }
+    for (i = 0; i < intf.n; i++)
+        intf_src_init(intf.src[i], i);
+    intf.started = true;
 }
 
 bool intf_any(void)
 {
-    return intf.n > 0;
+    return intf.n > 0 || intf.dynamic;
+}
+
+void intf_set_dynamic(void)
+{
+    intf.dynamic = true;
+}
+
+const char *intf_add_runtime(const char *spec, uint64_t now, char *err, size_t errlen)
+{
+    struct isrc *s;
+    pid_t pid;
+    int st;
+
+    if (intf.n >= INTF_MAX) {
+        snprintf(err, errlen, "at most %d interferers", INTF_MAX);
+        return NULL;
+    }
+    // The parser stops the program on an error: try it in a child first
+    fflush(NULL);
+    pid = fork();
+    if (pid == 0) {
+        intf_parse(spec);
+        _exit(0);
+    }
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st)) {
+        snprintf(err, errlen, "invalid interferer (the reason is in simserver.log): %s", spec);
+        return NULL;
+    }
+    intf_parse(spec);
+    s = intf.src[intf.n - 1];
+    for (int i = 0; i < intf.n - 1; i++)
+        if (!strcmp(intf.src[i]->name, s->name) && intf.src[i]->until > now) {
+            snprintf(err, errlen, "an active interferer is already named %s", s->name);
+            free(s);
+            intf.n--;
+            return NULL;
+        }
+    if (s->from < now)
+        s->from = now;
+    intf_src_init(s, intf.n - 1);
+    INFO("medium: interferer %s added at %.6f s (scenario)", s->name, now / 1e6);
+    return s->name;
+}
+
+int intf_remove_runtime(const char *name, uint64_t now)
+{
+    int n = 0;
+
+    for (int i = 0; i < intf.n; i++) {
+        struct isrc *s = intf.src[i];
+        if ((strcmp(name, "all") && strcmp(name, s->name)) || s->until <= now)
+            continue;
+        s->until = now > s->from ? now : s->from;
+        INFO("medium: interferer %s removed at %.6f s (scenario)", s->name, now / 1e6);
+        n++;
+    }
+    return n;
 }
 
 void intf_advance(uint64_t now)
@@ -642,7 +720,7 @@ void intf_power(int node, uint16_t chan, uint64_t t, double *fsk, double *noise)
     *fsk = *noise = 0;
     for (i = 0; i < intf.n; i++) {
         s = intf.src[i];
-        if (!s->lvl_mw[node])
+        if (!s->lvl_mw[node] || t < s->from || t >= s->until)
             continue;
         if (s->pattern == PAT_CONST) {
             mw = intf_piece_mw(s, NULL, node, chan);
@@ -669,35 +747,45 @@ void intf_each(int node, uint16_t chan, uint64_t from, uint64_t to, intf_cb cb, 
     if (from >= to)
         return;
     for (i = 0; i < intf.n; i++) {
+        uint64_t wf, wt;
+
         s = intf.src[i];
         if (!s->lvl_mw[node])
+            continue;
+        // Its active window
+        wf = from > s->from ? from : s->from;
+        wt = to < s->until ? to : s->until;
+        if (wf >= wt)
             continue;
         p.noise = s->noise;
         p.rate_bps = s->rate_bps;
         p.src = i;
         if (s->pattern == PAT_CONST) {
-            p.start = from;
-            p.end = to;
-            p.ostart = 0;
-            p.oend = UINT64_MAX;
+            p.start = wf;
+            p.end = wt;
+            p.ostart = s->from;
+            p.oend = s->until;
             p.mw = intf_piece_mw(s, NULL, node, chan);
             p.pre_end = 0;
             if (p.mw > 0)
                 cb(ctx, &p);
             continue;
         }
-        intf_gen(s, to);
-        for (k = intf_find(s, from); k < s->n && s->iv[k].s < to; k++) {
+        intf_gen(s, wt);
+        for (k = intf_find(s, wf); k < s->n && s->iv[k].s < wt; k++) {
             p.mw = intf_piece_mw(s, &s->iv[k], node, chan);
             if (!(p.mw > 0))
                 continue;
-            p.ostart = s->iv[k].s;
-            p.oend = s->iv[k].e;
-            p.start = s->iv[k].s > from ? s->iv[k].s : from;
-            p.end = s->iv[k].e < to ? s->iv[k].e : to;
-            p.pre_end = s->noise || !s->pre_us ? 0 : s->iv[k].s + s->pre_us;
-            if (p.pre_end > s->iv[k].e)
-                p.pre_end = s->iv[k].e;
+            // An interval cut by the window starts (or ends) with it
+            p.ostart = s->iv[k].s > s->from ? s->iv[k].s : s->from;
+            p.oend = s->iv[k].e < s->until ? s->iv[k].e : s->until;
+            p.start = p.ostart > wf ? p.ostart : wf;
+            p.end = p.oend < wt ? p.oend : wt;
+            if (p.start >= p.end)
+                continue;
+            p.pre_end = s->noise || !s->pre_us ? 0 : p.ostart + s->pre_us;
+            if (p.pre_end > p.oend)
+                p.pre_end = p.oend;
             cb(ctx, &p);
         }
     }
@@ -716,7 +804,11 @@ double intf_max_mw(int node, uint16_t chan, uint64_t from, uint64_t to)
     pts.t[pts.n++] = from;
     for (i = 0; i < intf.n; i++) {
         s = intf.src[i];
-        if (!s->lvl_mw[node] || s->pattern == PAT_CONST)
+        if (!s->lvl_mw[node])
+            continue;
+        if (s->from > from && s->from < to && pts.n < 256)
+            pts.t[pts.n++] = s->from;
+        if (s->pattern == PAT_CONST)
             continue;
         intf_gen(s, to);
         for (k = intf_find(s, from); k < s->n && s->iv[k].s < to && pts.n < 256; k++)
