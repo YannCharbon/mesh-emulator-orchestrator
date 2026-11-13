@@ -80,11 +80,14 @@ class Run:
         self._tree_cur = None
         self.keep_net = keep_net
         # packets
-        self.tx = {}                # (flow, src, seq) -> [t_tx, dst, len, step, rc]
+        self.tx = {}                # (flow, src, seq) -> [t_tx, dst, len, step, rc, type]
+        self.cfg = {}               # node -> [(t, flows, member, echo, step)] (LOAD1 cfg)
+        self.acks = {}              # (node, seq) -> (ok, reason) (CTL1)
         self.skips = []             # (flow, src, dst, step, t, reason)
         self.rx = {}                # (flow, src, seq) -> list of (dst, t_rx, hops)
         self.echo = {}              # (flow, src, seq) -> (t_rx, t_peer_rx, hops_back)
         self.lines_read = 0
+        self._cur_nid = None
 
     def node(self, nid):
         n = self.nodes.get(nid)
@@ -124,7 +127,15 @@ class Run:
         for line in self.tails[f].lines():
             self.lines_read += 1
             if ' LOAD1 ' in line:
+                self._cur_nid = nid
                 self._load1(line)
+                continue
+            if ' CTL1 ' in line:
+                w = line.split(' CTL1 ', 1)[1].split(' ', 2)
+                try:
+                    self.acks[(nid, int(w[1]))] = (w[0] == 'ok', w[2] if len(w) > 2 else '')
+                except (IndexError, ValueError):
+                    pass
                 continue
             if ' NET1 ' in line:
                 try:
@@ -165,9 +176,15 @@ class Run:
     def _load1(self, line):
         w = line.split(' LOAD1 ', 1)[1].split()
         try:
+            if w[0] == 'cfg':
+                t = self._t(line)
+                self.cfg.setdefault(self._cur_nid, []).append((t, int(w[1]), w[2] == '1', w[3] == '1', int(w[4])))
+                return
             kind, flow, seq, src, dst = w[0], int(w[1]), int(w[2]), int(w[3]), int(w[4])
             if kind == 'tx':
-                self.tx[(flow, src, seq)] = [int(w[7]) / 1e6, dst, int(w[5]), int(w[6]), int(w[8])]
+                # type: 0 request (echoed), 2 one-way; older logs have none
+                typ = int(w[9]) if len(w) > 9 else (2 if flow == 3 else 0)
+                self.tx[(flow, src, seq)] = [int(w[7]) / 1e6, dst, int(w[5]), int(w[6]), int(w[8]), typ]
             elif kind == 'rx':
                 hl_tx, hl_rx = int(w[9]), int(w[10])
                 hops = hl_tx - hl_rx + 1 if hl_rx > 0 else None
@@ -218,6 +235,21 @@ class Run:
             if s is not None:
                 out[nid] = s.get('rpl', {}).get('parent')
         return out
+
+    def member_at(self, nid, t):
+        """Whether the router took part in the load at t (its last LOAD1 cfg
+        line), None if it printed none."""
+        last = None
+        for c in self.cfg.get(nid, []):
+            if c[0] <= t + 1e-9:
+                last = c
+        return None if last is None else last[2]
+
+    def mcast_receivers(self, t):
+        """Routers expected to receive a group packet sent at t: members then,
+        operational (Wi-SUN join done) by then."""
+        return {nid for nid in self.routers()
+                if self.member_at(nid, t) and any(k == 'operational' and tt <= t for _, k, tt in self.nodes[nid].ms_history)}
 
     def br_tree(self, until=None):
         for t, tree in reversed(self.tree):
@@ -287,12 +319,18 @@ def packet_metrics(run, t_from, t_to, t_eval, flows=None, hop_of=None):
     delivered / sent), RTT and one-way latency (ms) overall and by hop count.
     hop_of(flow, src, dst, seq, echo_hops, rx_hops) may override the hop count."""
     out = {}
-    for (flow, src, seq), (t_tx, dst, length, step, rc) in run.tx.items():
+    exp_cache = {}
+    for key, v in run.tx.items():
+        flow, src, seq = key
+        t_tx, dst, length, step, rc = v[:5]
+        typ = v[5] if len(v) > 5 else (2 if flow == 3 else 0)
         if not (t_from <= t_tx < t_to) or (flows and FLOW_NAMES.get(flow) not in flows):
             continue
         f = out.setdefault(FLOW_NAMES.get(flow, str(flow)), {
-            'sent': 0, 'send_errors': 0, 'delivered': 0, 'echoed': 0, 'bytes': 0,
-            '_rtt': [], '_lat': [], '_rtt_hop': {}, '_lat_hop': {}, '_rcv': 0})
+            'sent': 0, 'send_errors': 0, 'delivered': 0, 'echoed': 0, 'bytes': 0, '_requests': 0,
+            '_rtt': [], '_lat': [], '_rtt_hop': {}, '_lat_hop': {}, '_rcv': 0, '_exp': 0})
+        if typ == 0:
+            f['_requests'] += 1
         if rc < 0:
             f['send_errors'] += 1
             continue
@@ -301,6 +339,11 @@ def packet_metrics(run, t_from, t_to, t_eval, flows=None, hop_of=None):
         rxs = [r for r in run.rx.get((flow, src, seq), []) if r[1] <= t_eval]
         if flow == 3:
             f['_rcv'] += len(rxs)
+            tk = round(t_tx, 1)
+            if tk not in exp_cache:
+                exp_cache[tk] = run.mcast_receivers(t_tx) if hasattr(run, 'mcast_receivers') else set()
+            # expected: the members operational then, and any that received it anyway
+            f['_exp'] += len(exp_cache[tk] | {r[0] for r in rxs})
         if rxs:
             f['delivered'] += 1
             for r in rxs:
@@ -321,13 +364,20 @@ def packet_metrics(run, t_from, t_to, t_eval, flows=None, hop_of=None):
             if h is not None:
                 f['_rtt_hop'].setdefault(h, []).append(rtt)
     for name, f in out.items():
-        echoed_flow = name != 'mcast' and f['echoed'] > 0
-        f['pdr'] = (f['echoed'] if echoed_flow else f['delivered']) / f['sent'] if f['sent'] else None
+        # Echoed: the packets were requests (a property of the flow's sends,
+        # not of the echoes that came back)
+        echoed_flow = f.pop('_requests') > f['sent'] / 2
+        f['echoed_flow'] = echoed_flow
         f['delivery'] = f['delivered'] / f['sent'] if f['sent'] else None
         if name == 'mcast':
+            # receptions / (sends x the members expected to receive each)
             f['receptions'] = f.pop('_rcv')
+            f['expected_receptions'] = f.pop('_exp')
+            f['pdr'] = f['receptions'] / f['expected_receptions'] if f['expected_receptions'] else None
         else:
             f.pop('_rcv')
+            f.pop('_exp')
+            f['pdr'] = (f['echoed'] if echoed_flow else f['delivered']) / f['sent'] if f['sent'] else None
         f['rtt_ms'] = stats(f.pop('_rtt'))
         f['latency_ms'] = stats(f.pop('_lat'))
         f['rtt_ms_by_hops'] = {str(h): stats(v) for h, v in sorted(f.pop('_rtt_hop').items())}
@@ -335,6 +385,8 @@ def packet_metrics(run, t_from, t_to, t_eval, flows=None, hop_of=None):
         span = max(t_to - t_from, 1e-9)
         f['offered_pps'] = f['sent'] / span
         f['delivered_pps'] = (f['echoed'] if echoed_flow else f['delivered']) / span
+        if name == 'mcast' and f['expected_receptions']:
+            f['delivered_pps'] = f['sent'] * f['pdr'] / span
         f['offered_bps'] = f['bytes'] * 8 / span
     return out
 
@@ -356,8 +408,18 @@ def net_delta(run, t_from, t_to, nodes=None):
             return s or 0
         dt = (b['t_us'] - (a['t_us'] if a else 0)) or 1
         d = {}
-        for k in ('tx', 'rx', 'bc_tx', 'retries', 'tx_fail', 'cca_att', 'cca_fail', 'rx_drop'):
+        for k in ('tx', 'rx', 'bc_tx', 'retry_attempts', 'cca_att', 'cca_fail', 'rx_drop', 'bc_done'):
             d['mac_' + k] = g(b, 'mac', k) - g(a, 'mac', k)
+        # Unicast frames the MAC confirmed: successes by retries, and give-ups
+        hb = g(b, 'mac', 'uc_retry_hist') or []
+        ha = g(a, 'mac', 'uc_retry_hist') or [0] * len(hb)
+        d['uc_retry_hist'] = [x - y for x, y in zip(hb, ha)]
+        gu = {k: g(b, 'mac', 'uc_give_up', k) - g(a, 'mac', 'uc_give_up', k)
+              for k in ('no_ack', 'channel_access', 'other')}
+        d['uc_give_up'] = gu
+        d['give_up'] = sum(gu.values())
+        d['uc_frames'] = sum(d['uc_retry_hist']) + d['give_up']
+        d['sock_tx_fail'] = g(b, 'app', 'sock', 'tx_fail') - g(a, 'app', 'sock', 'tx_fail')
         d['mac_q_mean'] = (g(b, 'mac', 'q_int_us') - g(a, 'mac', 'q_int_us')) / dt
         d['al_q_mean'] = (g(b, 'al', 'q_int_us') - g(a, 'al', 'q_int_us')) / dt
         d['mac_q_peak'] = g(b, 'mac', 'q_max')
@@ -365,19 +427,26 @@ def net_delta(run, t_from, t_to, nodes=None):
         d['mac_q_now'] = g(b, 'mac', 'q')
         d['al_q_now'] = g(b, 'al', 'q')
         d['red_drop'] = g(b, 'al', 'red_drop') - g(a, 'al', 'red_drop')
-        d['routed'] = g(b, 'ip', 'routed') - g(a, 'ip', 'routed')
         d['no_route'] = g(b, 'ip', 'no_route') - g(a, 'ip', 'no_route')
         d['parent_changes'] = g(b, 'rpl', 'parent_changes') - g(a, 'rpl', 'parent_changes')
         d['parent_tx_fail'] = g(b, 'rpl', 'parent_tx_fail') - g(a, 'rpl', 'parent_tx_fail')
         for k in ('dis', 'dio', 'dao'):
             d['ctl_' + k] = g(b, 'ctl', k) - g(a, 'ctl', k)
-        hist_b = g(b, 'mac', 'retry_hist') or []
-        hist_a = g(a, 'mac', 'retry_hist') or [0] * len(hist_b)
-        d['retry_hist'] = [x - y for x, y in zip(hist_b, hist_a)]
-        uni = d['mac_tx'] - d['mac_bc_tx']
-        d['retries_per_frame'] = d['mac_retries'] / uni if uni > 0 else None
+        ok = sum(d['uc_retry_hist'])
+        # retries per unicast frame delivered (bin 8 counts 8 or more)
+        d['retries_per_frame'] = (sum(i * x for i, x in enumerate(d['uc_retry_hist'])) / ok) if ok else None
         d['parent'] = g(b, 'rpl', 'parent') if b.get('rpl', {}).get('parent') is not None else None
         d['dag_rank'] = b.get('rpl', {}).get('dag_rank')
         d['rank'] = b.get('rpl', {}).get('rank')
         out[nid] = d
     return out
+
+
+def retries_per_frame(deltas):
+    """MAC retries per unicast frame delivered, over several nodes' net_delta()."""
+    num = den = 0
+    for d in deltas:
+        h = d.get('uc_retry_hist') or []
+        num += sum(i * x for i, x in enumerate(h))
+        den += sum(h)
+    return num / den if den else None

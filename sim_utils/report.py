@@ -56,7 +56,7 @@ def read_info(d):
 
 def load_settings(app_opts):
     out = {}
-    for m in re.finditer(r'-o (load_\w+|stats\w*)=(\S+)', app_opts or ''):
+    for m in re.finditer(r'-o (load_\w+|stats\w*|queue_limit|log_level)=(\S+)', app_opts or ''):
         out[m.group(1)] = m.group(2)
     return out
 
@@ -261,12 +261,25 @@ def report(d, top=5, pdr_min=0.99, lat_factor=3.0, tail=20.0):
             for tag, label, a, b, extra in steps:
                 sel = {k: v for k, v in run.tx.items() if v[3] == tag and v[0] < t_last}
                 sub = runlog.Run.__new__(runlog.Run)
-                sub.tx, sub.rx, sub.echo = sel, run.rx, run.echo
+                sub.tx, sub.rx, sub.echo, sub.cfg, sub.nodes = sel, run.rx, run.echo, run.cfg, run.nodes
+                # the last step ends with the counted window (--tail)
+                b = min(b, t_last)
+                if b <= a:
+                    continue
                 pm = runlog.packet_metrics(sub, a, b, end_s)
                 rows.append(dict({'tag': tag, 'label': label, 't_from_s': r4(a, 3), 't_to_s': r4(b, 3),
                                   'flows': pm, 'queues': step_queues(run, a, b)}, **extra))
             traffic['steps'] = rows
             traffic['saturation'] = saturation(rows, pdr_min, lat_factor)
+            # RTT and delay by hop count at light load: the first step
+            if rows:
+                traffic['light_load'] = {'tag': rows[0]['tag'], 'label': rows[0]['label'],
+                                         'flows': {n: {k: f[k] for k in ('sent', 'pdr', 'rtt_ms', 'rtt_ms_by_hops',
+                                                                         'latency_ms', 'latency_ms_by_hops')}
+                                                   for n, f in rows[0]['flows'].items()}}
+        flag = queue_flag(run, rep['run']['load'], rows if steps else [])
+        if flag:
+            traffic['queue_warning'] = flag
     rep['traffic'] = traffic
 
     # ---- bottlenecks: counters over the load period (or the whole run)
@@ -274,19 +287,19 @@ def report(d, top=5, pdr_min=0.99, lat_factor=3.0, tail=20.0):
     nd = runlog.net_delta(run, a, end_s)
     table = []
     for n, x in sorted(nd.items()):
-        uni = x['mac_tx'] - x['mac_bc_tx']
         row = {'node': n, 'hops': dep.get(n) if n else 0, 'children': len(ch.get(n, [])),
                'subtree': len(runlog.subtree(par, n)) if n else len(routers),
                'mac_q_mean': r4(x['mac_q_mean']), 'al_q_mean': r4(x['al_q_mean']),
                'mac_q_peak': x['mac_q_peak'], 'al_q_peak': x['al_q_peak'],
-               'queue_drops': x['red_drop'], 'mac_tx': x['mac_tx'], 'mac_unicast_tx': uni,
-               'retries': x['mac_retries'], 'retries_per_frame': r4(x['retries_per_frame']),
-               'retry_hist': x['retry_hist'], 'tx_fail': x['mac_tx_fail'],
+               'queue_drops': x['red_drop'], 'mac_tx': x['mac_tx'],
+               'uc_frames': x['uc_frames'], 'retries_per_frame': r4(x['retries_per_frame']),
+               'uc_retry_hist': x['uc_retry_hist'], 'give_up': x['give_up'], 'give_up_by_reason': x['uc_give_up'],
+               'sock_tx_fail': x['sock_tx_fail'], 'retry_attempts': x['mac_retry_attempts'],
                'cca_attempts': x['mac_cca_att'], 'cca_fail': x['mac_cca_fail'], 'rx': x['mac_rx'],
                'parent_changes': x['parent_changes'], 'parent_tx_fail': x['parent_tx_fail'],
                'no_route': x['no_route'], 'control_messages': {k: x['ctl_' + k] for k in ('dis', 'dio', 'dao')}}
         row['score'] = r4(x['mac_q_mean'] + x['al_q_mean'] + 0.1 * x['red_drop'] / max(1, (end_s - a) / 60)
-                          + 0.01 * x['mac_tx_fail'])
+                          + 0.01 * x['give_up'])
         table.append(row)
     for row in table:
         why = []
@@ -298,8 +311,8 @@ def report(d, top=5, pdr_min=0.99, lat_factor=3.0, tail=20.0):
             why.append(f'{row["queue_drops"]} packets dropped by its full queue')
         if row['retries_per_frame'] and row['retries_per_frame'] >= 0.3:
             why.append(f'{row["retries_per_frame"]:.2f} MAC retries per unicast frame')
-        if row['tx_fail']:
-            why.append(f'{row["tx_fail"]} frames given up after the last retry')
+        if row['give_up']:
+            why.append(f'{row["give_up"]} unicast frames given up by the MAC ({row["give_up_by_reason"]})')
         if row['cca_attempts'] and row['cca_fail'] / row['cca_attempts'] > 0.05:
             why.append(f'{100 * row["cca_fail"] / row["cca_attempts"]:.1f} % channel-access failures')
         if row['subtree'] and row['node'] != 0:
@@ -313,10 +326,11 @@ def report(d, top=5, pdr_min=0.99, lat_factor=3.0, tail=20.0):
                                         for r in ranked[:top] if (r['score'] or 0) > 0],
                     'score': 'mean queue depth (adaptation + MAC, frames) + 0.1 x queue drops per minute + '
                              '0.01 x frames given up'}
-    tot_uni = sum(r['mac_unicast_tx'] for r in table)
-    rep['network'] = {'mac_frames': sum(r['mac_tx'] for r in table), 'mac_unicast_frames': tot_uni,
-                      'retries_per_frame': r4(sum(r['retries'] for r in table) / tot_uni) if tot_uni else None,
-                      'tx_fail': sum(r['tx_fail'] for r in table), 'queue_drops': sum(r['queue_drops'] for r in table),
+    rep['network'] = {'mac_frames': sum(r['mac_tx'] for r in table),
+                      'mac_unicast_frames': sum(r['uc_frames'] for r in table),
+                      'retries_per_frame': r4(runlog.retries_per_frame(nd.values())),
+                      'give_up': sum(r['give_up'] for r in table), 'sock_tx_fail': sum(r['sock_tx_fail'] for r in table),
+                      'queue_drops': sum(r['queue_drops'] for r in table),
                       'parent_changes': sum(r['parent_changes'] for r in table),
                       'control_messages': {k: sum(r['control_messages'][k] for r in table) for k in ('dis', 'dio', 'dao')}}
     rep['medium'] = srv
@@ -334,40 +348,69 @@ def step_queues(run, a, b):
     if not nd:
         return None
     top = max(nd.items(), key=lambda kv: kv[1]['mac_q_mean'] + kv[1]['al_q_mean'])
-    uni = sum(x['mac_tx'] - x['mac_bc_tx'] for x in nd.values())
     return {'mean_max': r4(top[1]['mac_q_mean'] + top[1]['al_q_mean']), 'mean_max_node': top[0],
-            'drops': sum(x['red_drop'] for x in nd.values()), 'tx_fail': sum(x['mac_tx_fail'] for x in nd.values()),
-            'retries_per_frame': r4(sum(x['mac_retries'] for x in nd.values()) / uni) if uni > 0 else None}
+            'drops': sum(x['red_drop'] for x in nd.values()), 'give_up': sum(x['give_up'] for x in nd.values()),
+            'retries_per_frame': r4(runlog.retries_per_frame(nd.values()))}
 
 
 def saturation(rows, pdr_min, lat_factor):
-    """The first saturated step: delivery below pdr_min, or RTT p95 (one-way p95
-    without echoes) above lat_factor x the first step's."""
-    def key(r):
-        f = r['flows'].get('up') or next(iter(r['flows'].values()), None)
-        if not f or not f['sent']:
-            return None, None, None
-        st = f['rtt_ms'] if f['rtt_ms']['n'] else f['latency_ms']
-        return f['pdr'], st.get('p95'), f
-    base = None
+    """Per flow, the first saturated step: delivery below pdr_min, or p95 RTT
+    (one-way p95 for a flow without echoes) above lat_factor x the flow's
+    first step's; overall: the earliest over the flows."""
     out = {'criterion': f'delivery ratio < {pdr_min} or p95 delay > {lat_factor} x the first step\'s',
-           'saturated_step': None, 'last_good_step': None}
-    for r in rows:
-        pdr, p95, f = key(r)
-        if f is None:
-            continue
-        if base is None:
-            base = p95
-        bad = (pdr is not None and pdr < pdr_min) or (p95 is not None and base and p95 > lat_factor * base)
-        if bad:
-            out['saturated_step'] = r['tag']
-            out['saturated_offered_pps'] = r4(f['offered_pps'])
-            break
-        out['last_good_step'] = r['tag']
-        out['capacity_offered_pps'] = r4(f['offered_pps'])
-        out['capacity_delivered_pps'] = r4(f['delivered_pps'])
-    out['max_delivered_pps'] = r4(max((key(r)[2]['delivered_pps'] for r in rows if key(r)[2]), default=None))
+           'flows': {}, 'saturated_step': None, 'last_good_step': None}
+    names = sorted({n for r in rows for n in r['flows']})
+    for name in names:
+        fo = {'saturated_step': None, 'last_good_step': None}
+        base = None
+        for r in rows:
+            f = r['flows'].get(name)
+            if not f or not f['sent']:
+                continue
+            st = f['rtt_ms'] if f['rtt_ms']['n'] else f['latency_ms']
+            pdr, p95 = f['pdr'], st.get('p95')
+            if base is None:
+                base = p95
+            if (pdr is not None and pdr < pdr_min) or (p95 is not None and base and p95 > lat_factor * base):
+                fo['saturated_step'] = r['tag']
+                fo['saturated_offered_pps'] = r4(f['offered_pps'])
+                break
+            fo['last_good_step'] = r['tag']
+            fo['capacity_offered_pps'] = r4(f['offered_pps'])
+            fo['capacity_delivered_pps'] = r4(f['delivered_pps'])
+        fo['max_delivered_pps'] = r4(max((r['flows'][name]['delivered_pps'] for r in rows if name in r['flows']),
+                                         default=None))
+        out['flows'][name] = fo
+    order = [r['tag'] for r in rows]
+    sat = [fo for fo in out['flows'].values() if fo['saturated_step'] is not None]
+    if sat:
+        first = min(sat, key=lambda fo: order.index(fo['saturated_step']))
+        out['saturated_step'] = first['saturated_step']
+        i = order.index(first['saturated_step'])
+        out['last_good_step'] = order[i - 1] if i > 0 else None
+    else:
+        out['last_good_step'] = order[-1] if order else None
     return out
+
+
+def queue_flag(run, load_opts, rows):
+    """Whether delays were made by queues larger than a device holds: without
+    queue_limit the stack sizes the adaptation-layer queues from an unbounded
+    heap on a PC. Flags each step whose highest mean queue exceeds 16 frames."""
+    if 'queue_limit' in (load_opts or {}):
+        return None
+    peaks = {}
+    for nid in run.nodes:
+        s = run.last_net(nid)
+        if s:
+            peaks[nid] = s.get('al', {}).get('q_max', 0)
+    worst = max(peaks.items(), key=lambda kv: kv[1], default=(None, 0))
+    steps = [r['tag'] for r in rows if (r.get('queues') or {}).get('mean_max') and r['queues']['mean_max'] > 16]
+    if worst[1] <= 32 and not steps:
+        return None
+    return {'text': 'no queue_limit: queues grew beyond what a device holds (heap-sized on a PC); delays at '
+                    'these loads include waits a device would turn into drops',
+            'al_q_peak': worst[1], 'node': worst[0], 'steps': steps}
 
 
 def summary(rep):
@@ -396,7 +439,7 @@ def summary(rep):
         lines.append(f'bottleneck node {b["node"]} (score {b["score"]}): {"; ".join(b["reasons"])}')
     n = rep['network']
     lines.append(f'network: {n["mac_frames"]} MAC frames, {n["retries_per_frame"]} retries per unicast frame, '
-                 f'{n["tx_fail"]} given up, {n["queue_drops"]} queue drops, {n["parent_changes"]} parent changes')
+                 f'{n["give_up"]} given up, {n["queue_drops"]} queue drops, {n["parent_changes"]} parent changes')
     m = rep['medium']
     lines.append(f'medium: {m.get("frames_sent")} frames, loss share {m.get("loss_share")}, collisions {m.get("collision_share")}')
     if rep['power']:

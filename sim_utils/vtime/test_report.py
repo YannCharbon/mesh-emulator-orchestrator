@@ -3,9 +3,9 @@
 validator (sim_utils/scenario.py), on synthetic run directories whose figures
 are known. No emulator program runs: about one second.
 
-usage: test_report.py [<scratch dir>]
+usage: test_report.py <scratch dir>   (default: $TMPDIR; files go to <dir>/test_report, removed at the end)
 """
-import json, os, shutil, sys, tempfile
+import json, os, shutil, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
@@ -25,14 +25,15 @@ def line(t_us, text):
     return f'{T0 + t_us // 1000000}.{t_us % 1000000:06d} {text}\n'
 
 
-def net1(node, t_us, parent, q_int_mac=0, q_int_al=0, retries=0, tx=0, bc_tx=0, red=0, hist=None, final=False):
-    j = {'v': 1, 'node': node, 't_us': t_us, 'final': final,
-         'mac': {'tx': tx, 'tx_bytes': 0, 'rx': 0, 'rx_bytes': 0, 'bc_tx': bc_tx, 'bc_rx': 0, 'retries': retries,
-                 'tx_fail': 0, 'cca_att': tx, 'cca_fail': 0, 'rx_drop': 0, 'q': 0, 'q_max': 3,
-                 'q_int_us': q_int_mac, 'lat_max_ms': 0, 'retry_hist': hist or [tx - bc_tx, 0, 0, 0, 0, 0, 0, 0, 0]},
+def net1(node, t_us, parent, q_int_mac=0, q_int_al=0, hist=None, tx=0, bc_tx=0, red=0, give_up=0, final=False):
+    j = {'v': 2, 'node': node, 't_us': t_us, 'final': final,
+         'mac': {'tx': tx, 'rx': 0, 'bc_tx': bc_tx, 'bc_rx': 0, 'retry_attempts': 0,
+                 'cca_att': tx, 'cca_fail': 0, 'rx_drop': 0, 'q': 0, 'q_max': 3,
+                 'q_int_us': q_int_mac, 'lat_max_ms': 0,
+                 'uc_retry_hist': hist or [tx - bc_tx, 0, 0, 0, 0, 0, 0, 0, 0],
+                 'uc_give_up': {'no_ack': give_up, 'channel_access': 0, 'other': 0}, 'bc_done': bc_tx},
          'al': {'q': 0, 'q_max': 9, 'q_int_us': q_int_al, 'red_drop': red, 'lat_max_s': 0},
-         'ip': {'tx': 0, 'rx': 0, 'tx_bytes': 0, 'rx_bytes': 0, 'routed': 0, 'routed_bytes': 0, 'no_route': 0,
-                'rx_drop': 0, 'frag_tx_err': 0, 'frag_rx_err': 0, 'buf_fail': 0},
+         'ip': {'tx': 0, 'tx_bytes': 0, 'no_route': 0, 'rx_drop': 0, 'frag_tx_err': 0, 'frag_rx_err': 0, 'buf_fail': 0},
          'rpl': {'parent': parent, 'rank': 256, 'dag_rank': 2, 'min_hop_inc': 128, 'parent_changes': 0,
                  'parent_tx_fail': 0, 'local_repair': 0, 'global_repair': 0, 'etx_parent': 128},
          'ws': {}, 'ctl': {'dis': 1, 'dio': 2, 'dao': 1}, 'app': {}}
@@ -81,7 +82,8 @@ def synthetic(d):
         tu = t * 1_000_000
         # router 1: the adaptation queue holds 2 frames from 100 s on
         al = 2 * max(0, tu - 100_000_000)
-        nodes[1].append(net1(1, tu, 0, q_int_al=al, tx=t, retries=t // 2))
+        # router 1: half its frames delivered at the first try, half after one retry
+        nodes[1].append(net1(1, tu, 0, q_int_al=al, tx=t, hist=[t // 2, t // 2, 0, 0, 0, 0, 0, 0, 0], give_up=t // 10))
         nodes[2].append(net1(2, tu, 1, tx=t // 2))
         br.append(net1(0, tu, None, tx=t))
         if t and t % 30 == 0:
@@ -129,6 +131,8 @@ def test_report(scratch):
     check(near(tab[1]['al_q_mean'], 2, 1e-3), f'bottlenecks: router 1 mean adaptation queue 2 ({tab[1]["al_q_mean"]})')
     check(rep['nodes']['top_bottlenecks'][0]['node'] == 1, 'bottlenecks: router 1 first')
     check(near(tab[1]['retries_per_frame'], 0.5, 1e-3), 'bottlenecks: 0.5 retries per frame')
+    check(tab[1]['give_up'] == 32 - 10 and rep['network']['give_up'] == 22,
+          f'bottlenecks: frames given up from [100, 320) ({tab[1]["give_up"]})')
     check(rep['medium']['outcomes']['ok'] == 90 and near(rep['medium']['loss_share'], 0.1), 'medium totals')
     q = steps[1]['queues']
     check(q['mean_max_node'] == 1 and near(q['mean_max'], 2, 1e-3), 'steps: queue of router 1 in step 1')
@@ -196,7 +200,12 @@ def test_validator():
 
 
 def main():
-    scratch = sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp()
+    # No system temporary directory: an argument, else $TMPDIR (CLAUDE.md)
+    base = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('TMPDIR')
+    if not base:
+        print('usage: test_report.py <scratch dir> (or set TMPDIR)', file=sys.stderr)
+        return 2
+    scratch = base
     scratch = os.path.join(scratch, 'test_report')
     shutil.rmtree(scratch, ignore_errors=True)
     os.makedirs(scratch)
