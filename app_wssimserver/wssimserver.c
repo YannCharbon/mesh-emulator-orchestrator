@@ -2130,6 +2130,12 @@ static int vt_ctl_run(struct ctxt *ctxt, struct vt_ctl *c, struct nsim_welcome *
  * time only and the run stays reproducible from the seed and the scenario.
  * Commands act at the pause time (vt_now).
  */
+static void ctl_unlink(void)
+{
+    if (ctl_path)
+        unlink(ctl_path);
+}
+
 static void ctl_listen(void)
 {
     struct sockaddr_un a = { .sun_family = AF_UNIX };
@@ -2140,6 +2146,7 @@ static void ctl_listen(void)
     unlink(ctl_path);
     FATAL_ON(bind(ctl_listen_fd, (struct sockaddr *)&a, sizeof(a)) < 0, 1, "--vtime-control: bind %s: %m", ctl_path);
     FATAL_ON(listen(ctl_listen_fd, 1) < 0, 1, "--vtime-control: listen: %m");
+    atexit(ctl_unlink);     // also when the server stops on an error
     INFO("scenario: control socket %s", ctl_path);
 }
 
