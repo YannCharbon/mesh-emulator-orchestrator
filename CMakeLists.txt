@@ -265,6 +265,7 @@ if(COMPILE_SIMULATION_TOOLS)
         app_wshwsim/sl_wsrcp_mac.c
         app_wshwsim/ringbufindex.c
         app_wshwsim/sl_rf_driver.c
+        app_wshwsim/sl_rf_neighbors.c
     )
     target_include_directories(wshwsim PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -322,7 +323,9 @@ if(COMPILE_SIMULATION_TOOLS)
             application_protocols/mqtt/MQTTPacket/src/MQTTUnsubscribeClient.c
             application_protocols/mqtt/MQTTPacket/src/MQTTUnsubscribeServer.c
             app_wshwsim/sl_rf_driver.c
+            app_wshwsim/sl_rf_neighbors.c
             app_wshwsim/sl_rf_inproc.c
+            app_wshwsim/sl_rf_inproc_stack.c
             app_wshwsim/ringbufindex.c
         )
         target_include_directories(${variant} PRIVATE
@@ -362,6 +365,7 @@ if(COMPILE_SIMULATION_TOOLS)
         # upper stack, which this program does not link
         ${NANOSTACK_ROOT}/rcp/mac/rf_driver_storage.c
         app_wshwsim/sl_rf_driver.c
+        app_wshwsim/sl_rf_neighbors.c
         app_wshwsim/sl_rf_inproc.c
         app_wshwsim/ringbufindex.c
     )

@@ -260,26 +260,13 @@ static void wsmac_spinel_fhss_set_tx_allowance_level(struct wsmac_ctxt *ctxt, ml
 
 static void wsmac_spinel_fhss_update_neighbor(struct wsmac_ctxt *ctxt, mlme_attr_t attr, struct spinel_buffer *buf)
 {
-    struct fhss_ws_neighbor_timing_info *fhss_data = NULL;
+    struct fhss_ws_neighbor_timing_info *fhss_data;
     uint8_t eui64[8];
-    int i;
 
     spinel_pop_fixed_u8_array(buf, eui64, 8);
-    for (i = 0; i < ARRAY_SIZE(ctxt->neighbor_timings); i++)
-        if (!memcmp(ctxt->neighbor_timings[i].eui64, eui64, 8))
-            fhss_data = &ctxt->neighbor_timings[i].val;
-    if (!fhss_data) {
-        DEBUG("add new entry");
-        for (i = 0; i < ARRAY_SIZE(ctxt->neighbor_timings); i++) {
-            if (!memcmp(ctxt->neighbor_timings[i].eui64,
-                        "\x00\x00\x00\x00\x00\x00\x00\x00", 8)) {
-                fhss_data = &ctxt->neighbor_timings[i].val;
-                memcpy(ctxt->neighbor_timings[i].eui64, eui64, 8);
-                break;
-            }
-        }
-        BUG_ON(i == ARRAY_SIZE(ctxt->neighbor_timings), "full");
-    }
+    // Full (the stack reports temporary entries it never drops): the entry
+    // updated longest ago makes room (sl_rf_neighbors.h)
+    fhss_data = rf_neighbors_update(&ctxt->neighbor_timings, eui64);
 
     fhss_data->clock_drift                               = spinel_pop_u8(buf);
     fhss_data->timing_accuracy                           = spinel_pop_u8(buf);
@@ -297,26 +284,20 @@ static void wsmac_spinel_fhss_update_neighbor(struct wsmac_ctxt *ctxt, mlme_attr
 static void wsmac_spinel_fhss_drop_neighbor(struct wsmac_ctxt *ctxt, mlme_attr_t attr, struct spinel_buffer *buf)
 {
     uint8_t eui64[8];
-    int i;
+    bool found;
 
     spinel_pop_fixed_u8_array(buf, eui64, 8);
-    for (i = 0; i < ARRAY_SIZE(ctxt->neighbor_timings); i++)
-        if (!memcmp(ctxt->neighbor_timings[i].eui64, eui64, 8))
-            break;
-    BUG_ON(i == ARRAY_SIZE(ctxt->neighbor_timings), "not found");
-    memset(ctxt->neighbor_timings[i].eui64, 0, 8);
+    found = rf_neighbors_drop(&ctxt->neighbor_timings, eui64);
+    // Once entries were removed to make room, the stack may drop one of them
+    BUG_ON(!found && !ctxt->neighbor_timings.removed, "not found");
 }
 
 static fhss_ws_neighbor_timing_info_t *wsmac_fhss_get_neighbor_info(const fhss_api_t *fhss_api, uint8_t eui64[8])
 {
     struct wsmac_ctxt *ctxt = &g_ctxt;
-    int i;
 
     BUG_ON(fhss_api != ctxt->fhss_api);
-    for (i = 0; i < ARRAY_SIZE(ctxt->neighbor_timings); i++)
-        if (!memcmp(ctxt->neighbor_timings[i].eui64, eui64, sizeof(uint8_t[8])))
-            return &ctxt->neighbor_timings[i].val;
-    return NULL;
+    return rf_neighbors_get(&ctxt->neighbor_timings, eui64);
 }
 
 static void wsmac_spinel_fhss_create(struct wsmac_ctxt *ctxt, mlme_attr_t attr, struct spinel_buffer *buf)
@@ -596,7 +577,7 @@ void wsmac_rx_host(struct wsmac_ctxt *ctxt)
         BUG_ON(spinel_remaining_size(rx_buf));
         ns_sw_mac_fhss_unregister(ctxt->rcp_mac_api);
         ns_fhss_delete(ctxt->fhss_api);
-        memset(ctxt->neighbor_timings, 0, sizeof(ctxt->neighbor_timings));
+        rf_neighbors_clear(&ctxt->neighbor_timings);
         ctxt->fhss_api = NULL;
         ctxt->rcp_mac_api = init_mac_api(ctxt->rcp_driver_id);
         wsmac_reset_ind(ctxt, false);
