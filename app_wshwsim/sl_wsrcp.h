@@ -17,6 +17,7 @@
 #include "nanostack/mac/fhss_ws_extension.h"
 #include "mac/rf_driver_storage.h"
 #include "sl_rf_driver.h"
+#include "sl_rf_neighbors.h"
 
 struct mac_api_s;
 
@@ -49,7 +50,7 @@ struct wsmac_ctxt {
     struct fhss_api *fhss_api;
     struct slist *msdu_malloc_list;
 
-    struct neighbor_timings neighbor_timings[255];
+    struct rf_neighbors neighbor_timings;   // the FHSS reads it (sl_rf_neighbors.h)
 
     int spinel_tid;
     int spinel_iid;
