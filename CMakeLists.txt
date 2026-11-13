@@ -353,7 +353,8 @@ if(COMPILE_SIMULATION_TOOLS)
             # retries per frame, the control messages sent; only forwarding while
             # the statistics are off
             -Wl,--wrap=sw_mac_stats_update,--wrap=protocol_stats_update
-            -Wl,--wrap=rpl_control_transmit_dio,--wrap=rpl_control_transmit_dis,--wrap=rpl_control_transmit_dao)
+            -Wl,--wrap=rpl_control_transmit_dio,--wrap=rpl_control_transmit_dis,--wrap=rpl_control_transmit_dao
+            -Wl,--wrap=random_early_detection_create)
         if(NANOSTACK_PORT STREQUAL "nanostack_port_sim")
             # mbedTLS puts time() in the TLS hello randoms: virtual time instead
             # (sl_rf_inproc.c).

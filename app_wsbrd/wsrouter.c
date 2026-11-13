@@ -385,12 +385,18 @@ int main(int argc, char *argv[])
     rf_inproc_take_eui64(&argc, argv, eui64);
 #endif
     parse_commandline(ctxt, argc, argv, print_help_node);
+    // log_level = info: no debug traces of the stack (compact logs)
+    if (g_log_compact) {
+        static char per_frame[] = "mPDs,mMCp,fhss,mMlm,mCor,mHlp,lwbr";  // per-frame MAC and FHSS lines
+        mbed_trace_config_set(TRACE_ACTIVE_LEVEL_INFO | TRACE_MODE_COLOR);
+        mbed_trace_exclude_filters_set(per_frame);
+    }
     if (memcmp(ctxt->ipv6_prefix, ADDR_UNSPECIFIED, 16))
         WARN("ipv6_prefix is ignored");
 #ifdef MAC_INPROCESS
     // -u names the wssimserver socket instead of the RCP's UART.
     mac = rf_inproc_init(ctxt->uart_dev, eui64);
-    net_stats_set_mac(mac);
+    net_stats_set_mac(mac, ctxt->stats.on);
     memcpy(ctxt->hw_mac, eui64, sizeof(ctxt->hw_mac));
     memcpy(ctxt->dynamic_mac, ctxt->hw_mac, sizeof(ctxt->dynamic_mac));
 

@@ -60,6 +60,8 @@ bool rpl_control_read_dodag_info(const struct rpl_instance *instance, rpl_dodag_
 #define REFRESH_FLOW 0                  // the border router's route check, in the heap as flow 0
 
 static void join_group(void);
+static void print_cfg(void);
+static bool excluded(int id);
 // Only the border router's library has it
 #pragma weak ws_bbr_routing_table_get
 void rf_ctl_message(const char *text, int len);
@@ -92,6 +94,7 @@ static struct {
     bool *down_known;                   // border router: routers with a DOWN stream
     struct flow_counters c[APP_LOAD_FLOWS];
     uint32_t flow_seq[APP_LOAD_FLOWS];
+    uint64_t excluded[64];              // routers stopped by a scenario (load exclude)
     uint32_t sock_tx_done, sock_tx_fail, sock_no_route;
     uint8_t buf[APP_LOAD_MAX_PAYLOAD];
 } ld = { .sock = -1, .tasklet = -1 };
@@ -142,7 +145,7 @@ static double urand(void)   // [0, 1)
 void app_load_defaults(struct app_load_cfg *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
-    strcpy(cfg->nodes, "all");
+    cfg->nodes_kind = 0;
     cfg->payload = 64;
     cfg->interval_s = 30;
     cfg->jitter_s = -1;
@@ -210,9 +213,43 @@ const char *app_load_config(struct app_load_cfg *cfg, const char *key, const cha
         return NULL;
     }
     if (!strcmp(key, "nodes")) {
-        if (strlen(value) >= sizeof(cfg->nodes))
-            return "too long";
-        strcpy(cfg->nodes, value);
+        const char *v = value;
+        char *end;
+
+        if (!strcmp(value, "all")) {
+            cfg->nodes_kind = 0;
+            return NULL;
+        }
+        if (strchr(value, '.')) {
+            double f = strtod(value, &end);
+            if (*end || !(f >= 0 && f <= 1))
+                return "nodes: a fraction from 0 to 1";
+            cfg->nodes_kind = 2;
+            cfg->nodes_fraction = f;
+            return NULL;
+        }
+        memset(cfg->nodes_list, 0, sizeof(cfg->nodes_list));
+        while (*v) {
+            long lo = strtol(v, &end, 10), hi = lo;
+            if (end == v)
+                return "nodes: all, IDs and ranges (1-5,9), or a fraction";
+            v = end;
+            if (*v == '-') {
+                hi = strtol(v + 1, &end, 10);
+                if (end == v + 1)
+                    return "nodes: a range needs its end";
+                v = end;
+            }
+            if (lo < 0 || hi > 4095 || hi < lo)
+                return "nodes: IDs from 0 to 4095, ranges ascending";
+            for (long i = lo; i <= hi; i++)
+                cfg->nodes_list[i / 64] |= 1ULL << (i % 64);
+            if (*v == ',')
+                v++;
+            else if (*v)
+                return "nodes: all, IDs and ranges (1-5,9), or a fraction";
+        }
+        cfg->nodes_kind = 1;
         return NULL;
     }
     if (!strcmp(key, "max_id")) {
@@ -302,35 +339,24 @@ const char *app_load_config(struct app_load_cfg *cfg, const char *key, const cha
  * seed and the ID alone, so every program agrees. */
 static bool is_member(int id)
 {
-    const char *s = ld.cfg.nodes;
-    char *end;
+    uint64_t h;
 
-    if (id <= 0)
+    if (id <= 0 || id > 4095)
         return false;
-    if (!strcmp(s, "all"))
+    switch (ld.cfg.nodes_kind) {
+    case 0:
         return true;
-    if (strchr(s, '.')) {
-        double f = strtod(s, &end);
-        uint64_t h = mix64(run_seed() ^ mix64(0x4c4f4144ULL + (uint64_t)id));
-        return (h >> 11) * (1.0 / 9007199254740992.0) < f;
+    case 1:
+        return ld.cfg.nodes_list[id / 64] >> (id % 64) & 1;
+    default:
+        h = mix64(run_seed() ^ mix64(0x4c4f4144ULL + (uint64_t)id));
+        return (h >> 11) * (1.0 / 9007199254740992.0) < ld.cfg.nodes_fraction;
     }
-    while (*s) {
-        long lo = strtol(s, &end, 10), hi = lo;
-        if (end == s)
-            return false;
-        s = end;
-        if (*s == '-') {
-            hi = strtol(s + 1, &end, 10);
-            s = end;
-        }
-        if (id >= lo && id <= hi)
-            return true;
-        if (*s == ',')
-            s++;
-        else if (*s)
-            return false;
-    }
-    return false;
+}
+
+static bool excluded(int id)
+{
+    return id >= 0 && id < 4096 && (ld.excluded[id / 64] >> (id % 64) & 1);
 }
 
 /* --------------------------------------------------------------- the heap */
@@ -541,7 +567,7 @@ static void send_one(struct stream *s, uint64_t now, int step)
         // A peer: a member other than this router, drawn uniformly
         for (k = 0; k < 64 && span > 1 && !peer; k++) {
             int c = 1 + (int)(urand() * span);
-            if (c != ld.id && is_member(c))
+            if (c != ld.id && is_member(c) && !excluded(c))
                 peer = c;
         }
         if (!peer)
@@ -585,8 +611,8 @@ static void send_one(struct stream *s, uint64_t now, int step)
     else
         ld.c[s->flow].tx++;
     if (ld.cfg.log_packets)
-        printf("LOAD1 tx %u %u %u %u %d %d %llu %d\n", s->flow, s->seq, ld.id, peer, len, step,
-               (unsigned long long)now, rc);
+        printf("LOAD1 tx %u %u %u %u %d %d %llu %d %u\n", s->flow, s->seq, ld.id, peer, len, step,
+               (unsigned long long)now, rc, type);
 }
 
 static void refresh_routes(uint64_t now)
@@ -600,7 +626,7 @@ static void refresh_routes(uint64_t now)
     for (i = 0; i < len; i++) {
         // The table holds IIDs: the last two bytes are the node's ID
         uint16_t id = table[i].target[6] << 8 | table[i].target[7];
-        if (id < 4096 && !ld.down_known[id] && is_member(id)) {
+        if (id < 4096 && !ld.down_known[id] && is_member(id) && !excluded(id)) {
             ld.down_known[id] = true;
             add_stream(APP_LOAD_DOWN, id, first_send_us(APP_LOAD_DOWN, now > s_to_us(ld.cfg.start_s) ? now : s_to_us(ld.cfg.start_s)));
         }
@@ -614,20 +640,26 @@ static void on_timer(void)
     ld.armed = NULL;
     while (ld.n && ld.streams[0].next_us <= now) {
         struct stream *s = &ld.streams[0];
+        uint64_t gap;
+
+        if (stopped(now)) {
+            // no more packets from this stream (nor route checks)
+            ld.streams[0] = ld.streams[--ld.n];
+            sift_down(0);
+            continue;
+        }
         if (s->flow == REFRESH_FLOW) {
             s->next_us = now + APP_LOAD_REFRESH_S * 1000000ULL;
             sift_down(0);
             refresh_routes(now);
             continue;
         }
-        if (stopped(now)) {
-            // no more packets from this stream
-            ld.streams[0] = ld.streams[--ld.n];
-            sift_down(0);
-            continue;
-        }
         send_one(s, now, step_at(now));
-        s->next_us = now + next_gap_us(s->flow, now);
+        // From the scheduled time, not the (up to 1 ms later) wake: the
+        // offered rate is the one asked for. A stream far behind (more than
+        // a second) starts again from now.
+        gap = next_gap_us(s->flow, now);
+        s->next_us = s->next_us + gap + 1000000 < now ? now + gap : s->next_us + gap;
         sift_down(0);
     }
     arm();
@@ -750,6 +782,7 @@ static void tasklet_cb(arm_event_t *ev)
     INFO("load: node %u, flows 0x%x, member %d, payload %d B, interval %.3f s (%s), start %.1f s, ramp %.1f s x %d / %.2f",
          ld.id, ld.cfg.flows, ld.is_br || is_member(ld.id), ld.cfg.payload, ld.cfg.interval_s,
          ld.cfg.exponential ? "exp" : "fixed", ld.cfg.start_s, ld.cfg.ramp_step_s, ld.cfg.ramp_steps, ld.cfg.ramp_factor);
+    print_cfg();
     // A router whose start does not wait for its ready event
     if (!ld.is_br && ld.cfg.after_ready_s < 0)
         app_load_ready();
@@ -759,7 +792,7 @@ static void add_router_streams(void)
 {
     uint64_t t0 = start_point_us();
 
-    if (!is_member(ld.id))
+    if (!is_member(ld.id) || excluded(ld.id))
         return;
     if (ld.cfg.flows & 1u << APP_LOAD_UP)
         add_stream(APP_LOAD_UP, 0, first_send_us(APP_LOAD_UP, t0));
@@ -816,42 +849,126 @@ static void restart_streams(void)
     arm();
 }
 
+// The module's state for the report: "LOAD1 cfg <flows> <member> <echo> <step>"
+static void print_cfg(void)
+{
+    if (ld.cfg.log_packets)
+        printf("LOAD1 cfg %u %d %d %d\n", ld.cfg.flows, ld.is_br || (is_member(ld.id) && !excluded(ld.id)),
+               ld.cfg.echo, ld.cfg.tag);
+}
+
+// Remove the streams for which drop() is true, keep the heap
+static void drop_streams(bool (*drop)(const struct stream *s))
+{
+    int i, n = 0;
+
+    for (i = 0; i < ld.n; i++)
+        if (!drop(&ld.streams[i]))
+            ld.streams[n++] = ld.streams[i];
+    ld.n = n;
+    for (i = ld.n / 2 - 1; i >= 0; i--)
+        sift_down(i);
+    if (ld.armed)
+        eventOS_cancel(ld.armed);
+    ld.armed = NULL;
+    arm();
+}
+
+static bool drop_excluded(const struct stream *s)
+{
+    if (s->flow == REFRESH_FLOW || s->flow == APP_LOAD_MCAST)
+        return false;
+    if (!ld.is_br && excluded(ld.id))
+        return true;        // this router no longer sends
+    return s->flow == APP_LOAD_DOWN && excluded(s->peer);
+}
+
+static const char *parse_ids(const char *v, uint64_t *mask)
+{
+    struct app_load_cfg tmp;
+    const char *err = app_load_config(&tmp, "nodes", v);
+
+    if (err)
+        return err;
+    if (tmp.nodes_kind != 1)
+        return "expected IDs and ranges";
+    memcpy(mask, tmp.nodes_list, sizeof(tmp.nodes_list));
+    return NULL;
+}
+
 const char *app_load_command(const char *text)
 {
-    char tmp[2048], *tok, *save, *eq;
-    const char *err;
+    char *tmp, *tok, *save, *eq;
+    const char *err = NULL;
+    struct app_load_cfg cfg;
+    uint64_t mask[64];
 
     if (!ld.on || ld.sock < 0)
         return "load module not running (load_control)";
-    if (strlen(text) >= sizeof(tmp))
-        return "too long";
-    strcpy(tmp, text);
+    tmp = strdup(text);
+    if (!tmp)
+        return "out of memory";
     tok = strtok_r(tmp, " ", &save);
-    if (!tok || strcmp(tok, "load"))
-        return "not a load command";
+    if (!tok || strcmp(tok, "load")) {
+        err = "not a load command";
+        goto out;
+    }
     tok = strtok_r(NULL, " ", &save);
     if (tok && !strcmp(tok, "stop")) {
         ld.cfg.flows = 0;
         restart_streams();
         INFO("load: stopped (command)");
-        return NULL;
+        print_cfg();
+        goto out;
     }
-    if (!tok || strcmp(tok, "set"))
-        return "expected load set KEY=VALUE ... or load stop";
+    if (tok && (!strcmp(tok, "exclude") || !strcmp(tok, "include"))) {
+        // Routers stopped or started again by a scenario: no streams to or
+        // from them while excluded
+        bool ex = !strcmp(tok, "exclude");
+        tok = strtok_r(NULL, " ", &save);
+        if (!tok || (err = parse_ids(tok, mask)))
+            goto out;
+        for (int i = 0; i < 64; i++)
+            ld.excluded[i] = ex ? ld.excluded[i] | mask[i] : ld.excluded[i] & ~mask[i];
+        if (ex) {
+            drop_streams(drop_excluded);
+        } else if (ld.is_br && ld.down_known) {
+            for (int id = 0; id < 4096; id++)
+                if (mask[id / 64] >> (id % 64) & 1)
+                    ld.down_known[id] = false;     // added again at the next route check
+        } else if (!ld.is_br && (mask[ld.id / 64] >> (ld.id % 64) & 1) && ld.ready) {
+            add_router_streams();
+            arm();
+        }
+        print_cfg();
+        goto out;
+    }
+    if (!tok || strcmp(tok, "set")) {
+        err = "expected load set KEY=VALUE ..., load stop, load exclude IDS or load include IDS";
+        goto out;
+    }
+    // All or nothing: the settings are checked on a copy
+    cfg = ld.cfg;
     while ((tok = strtok_r(NULL, " ", &save))) {
         eq = strchr(tok, '=');
-        if (!eq)
-            return "expected KEY=VALUE";
+        if (!eq) {
+            err = "expected KEY=VALUE";
+            goto out;
+        }
         *eq = '\0';
-        if ((err = app_load_config(&ld.cfg, tok, eq + 1)))
-            return err;
+        if ((err = app_load_config(&cfg, tok, eq + 1)))
+            goto out;
     }
-    ld.cfg.ramp_step_s = 0;
+    cfg.ramp_step_s = 0;
+    ld.cfg = cfg;
     restart_streams();
-    INFO("load: set by command: flows 0x%x, step %d, payload %d B, interval %.4f s (%s), nodes %s",
+    INFO("load: set by command: flows 0x%x, step %d, payload %d B, interval %.4f s (%s), member %d",
          ld.cfg.flows, ld.cfg.tag, ld.cfg.payload, ld.cfg.interval_s, ld.cfg.exponential ? "exp" : "fixed",
-         ld.cfg.nodes);
-    return NULL;
+         ld.is_br || is_member(ld.id));
+    print_cfg();
+out:
+    free(tmp);
+    return err;
 }
 
 static struct {
@@ -871,31 +988,52 @@ void app_ctl_register(const char *verb, void (*fn)(const char *args))
 }
 
 // The conductor's "xL" message (app_wshwsim/sl_rf_driver.c: a weak symbol
-// there): a text command for this program, "VERB [ARGS]"
+// there): a text command for this program, "[#SEQ ]VERB [ARGS]". With a
+// sequence number the program answers "CTL1 ok SEQ" or "CTL1 err SEQ reason".
 void rf_ctl_message(const char *text, int len)
 {
-    char cmd[2048], *sp;
-    const char *err;
+    char *cmd, *c, *sp;
+    const char *err = NULL;
+    long seq = -1;
+    bool known = false;
 
-    if (len <= 0 || len >= (int)sizeof(cmd))
+    if (len <= 0)
+        return;
+    cmd = malloc(len + 1);
+    if (!cmd)
         return;
     memcpy(cmd, text, len);
     cmd[len] = '\0';
-    if (!strncmp(cmd, "load ", 5)) {
-        err = app_load_command(cmd);
-        if (err)
-            WARN("control: %s: %s", cmd, err);
-        return;
+    c = cmd;
+    if (*c == '#') {
+        seq = strtol(c + 1, &sp, 10);
+        c = *sp == ' ' ? sp + 1 : sp;
     }
-    sp = strchr(cmd, ' ');
-    if (sp)
-        *sp++ = '\0';
-    for (int i = 0; i < 8 && ctl_verbs[i].verb; i++)
-        if (!strcmp(ctl_verbs[i].verb, cmd)) {
-            ctl_verbs[i].fn(sp ? sp : "");
-            return;
-        }
-    WARN("control: unknown command: %s", cmd);
+    if (!strncmp(c, "load ", 5)) {
+        err = app_load_command(c);
+        known = true;
+    } else {
+        sp = strchr(c, ' ');
+        if (sp)
+            *sp++ = '\0';
+        for (int i = 0; i < 8 && ctl_verbs[i].verb; i++)
+            if (!strcmp(ctl_verbs[i].verb, c)) {
+                ctl_verbs[i].fn(sp ? sp : "");
+                known = true;
+                break;
+            }
+        if (!known)
+            err = "unknown command";
+    }
+    if (err)
+        WARN("control: %.200s: %s", c, err);
+    if (seq >= 0) {
+        if (err)
+            printf("CTL1 err %ld %s\n", seq, err);
+        else
+            printf("CTL1 ok %ld\n", seq);
+    }
+    free(cmd);
 }
 
 void app_load_start(const struct app_load_cfg *cfg, bool is_br, int8_t rcp_if_id,
@@ -943,3 +1081,25 @@ int app_load_counters_json(char *buf, int len)
                       first ? "" : ",", ld.sock_tx_done, ld.sock_tx_fail, ld.sock_no_route);
     return n;
 }
+
+int app_queue_limit;
+bool g_log_compact;
+
+#ifdef MAC_INPROCESS
+// queue_limit (app_load.h): the stack sizes its queues' random early
+// detection from the heap, which is unbounded on a PC; a device drops much
+// earlier. Linked with -Wl,--wrap=random_early_detection_create.
+void *__real_random_early_detection_create(uint16_t threshold_min, uint16_t threshold_max, uint8_t drop_max_p,
+                                           uint16_t weight);
+void *__wrap_random_early_detection_create(uint16_t threshold_min, uint16_t threshold_max, uint8_t drop_max_p,
+                                           uint16_t weight)
+{
+    if (app_queue_limit > 0) {
+        INFO("queue_limit: random early detection %u..%u frames instead of %u..%u", app_queue_limit / 2,
+             app_queue_limit, threshold_min, threshold_max);
+        threshold_min = app_queue_limit / 2;
+        threshold_max = app_queue_limit;
+    }
+    return __real_random_early_detection_create(threshold_min, threshold_max, drop_max_p, weight);
+}
+#endif

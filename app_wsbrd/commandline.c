@@ -326,6 +326,16 @@ static void parse_config_line(struct wsbr_ctxt *ctxt, const char *filename,
         const char *err = app_load_config(&ctxt->load, str_arg2, str_arg);
         if (err)
             FATAL(1, "%s:%d: load_%s: %s", filename, line_no, str_arg2, err);
+    } else if (sscanf(line, " queue_limit = %d %c", &app_queue_limit, &garbage) == 1) {
+        if (app_queue_limit < 0 || app_queue_limit > 65535)
+            FATAL(1, "%s:%d: queue_limit: 0 (none) to 65535 frames", filename, line_no);
+    } else if (sscanf(line, " log_level = %s %c", str_arg, &garbage) == 1) {
+        if (!strcmp(str_arg, "all"))
+            g_log_compact = false;
+        else if (!strcmp(str_arg, "info"))
+            g_log_compact = true;
+        else
+            FATAL(1, "%s:%d: log_level: all or info", filename, line_no);
     } else if (sscanf(line, " stats = %s %c", str_arg, &garbage) == 1) {
         ctxt->stats.on = str_to_val(str_arg, valid_booleans);
     } else if (sscanf(line, " stats_period_s = %d %c", &ctxt->stats.period_s, &garbage) == 1) {

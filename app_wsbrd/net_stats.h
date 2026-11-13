@@ -27,8 +27,9 @@ struct net_stats_cfg {
     int period_s;               // stats_period_s: a line this often (0: only at the end)
 };
 
-// The in-process MAC (before net_stats_start()); NULL in split programs
-void net_stats_set_mac(struct mac_api_s *mac);
+// The in-process MAC (before the interface starts; NULL in split programs).
+// With on, the MAC's per-frame confirmations are counted (NET1 mac.uc_*)
+void net_stats_set_mac(struct mac_api_s *mac, bool on);
 void net_stats_start(const struct net_stats_cfg *cfg, int8_t rcp_if_id, bool is_br, const uint8_t eui64[8]);
 
 #endif

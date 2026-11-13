@@ -30,7 +30,11 @@ enum app_load_flow {
 
 struct app_load_cfg {
     unsigned flows;                 // bit (1 << flow): load_flows = up,down,mcast,p2p
-    char nodes[1536];               // load_nodes: all | IDs and ranges "1-5,9" | a fraction "0.25"
+    // load_nodes: all | IDs and ranges "1-5,9" (no length limit in a command)
+    // | a fraction "0.25" (drawn per node from the seed and the ID)
+    int nodes_kind;                 // 0 all, 1 list, 2 fraction
+    double nodes_fraction;
+    uint64_t nodes_list[64];        // bit i: router i (IDs 0..4095)
     int max_id;                     // load_max_id: highest router ID (run.sh sets it; for p2p and fractions)
     int payload;                    // load_payload: UDP payload bytes (>= APP_LOAD_HDR)
     double interval_s;              // load_interval_s: mean interval per node and flow, step 0
@@ -56,6 +60,13 @@ struct app_load_cfg {
     int tag;                        // load_step: the step byte of packets without a ramp
 };
 
+// Device queue limit (queue_limit = N, docs/TRAFFIC_AND_REPORT.md §2.2): the
+// random early detection of the stack's queues gets thresholds N/2 and N
+// frames instead of its heap-sized defaults; 0: unchanged
+extern int app_queue_limit;
+// log_level = info: no debug traces of the stack, no "Channel changed" lines
+extern bool g_log_compact;
+
 void app_load_defaults(struct app_load_cfg *cfg);
 // One conf key without its "load_" prefix; returns NULL or an error message.
 const char *app_load_config(struct app_load_cfg *cfg, const char *key, const char *value);
@@ -72,6 +83,8 @@ bool app_load_active(void);
 // A runtime command (the conductor's "xL" message, docs/SCENARIOS.md):
 // "load set KEY=VALUE ...", "load stop". Returns NULL or an error message.
 const char *app_load_command(const char *text);
+// Every node's load commands carry a sequence: "#<seq> load ...". The node
+// answers with a line "CTL1 ok <seq>" or "CTL1 err <seq> <reason>".
 // Other runtime commands ("VERB ARGS" in an "xL" message): stats (net_stats.c),
 // tree (wsbr.c), iface (wsrouter.c)
 void app_ctl_register(const char *verb, void (*fn)(const char *args));
