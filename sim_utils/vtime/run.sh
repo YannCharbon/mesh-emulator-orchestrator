@@ -1,9 +1,11 @@
 #!/bin/bash
 # One virtual-time run of in-process nodes (docs/VIRTUAL_TIME.md, EM3 step 1).
 #
-# usage: run.sh <bindir> <workdir(holds examples/)> <outdir> <seconds>
+# usage: run.sh <bindir> <workdir(holds examples/)> <outdir> [<seconds>]
 #   bindir   a virtual-time build (wssimserver, wsbrd-inproc, wsnode-inproc)
-#   seconds  virtual seconds to simulate (wssimserver --vtime-end)
+#   seconds  virtual seconds to simulate (wssimserver --vtime-end). With
+#            SCENARIO it may be left out (or "auto"): the scenario's own upper
+#            bound (scenario.py --dry: run_s), the run ending with the scenario
 #
 # Environment (all optional):
 #   WSSIM_SEED=<n>     the run's seed (default 1)
@@ -174,7 +176,12 @@
 # included), except the instances that KILL or RESTART stopped.
 set -u
 SIMUTILS=$(cd "$(dirname "$0")/.." && pwd)   # sim_utils/
-BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3; DUR=$4
+BIN=$(realpath "$1"); WORK=$(realpath "$2"); OUT=$3; DUR=${4:-auto}
+if [ "$DUR" = auto ]; then
+	[ -n "${SCENARIO:-}" ] || { echo "run.sh: <seconds> is needed without SCENARIO" >&2; exit 2; }
+	DUR=$(python3 "$SIMUTILS/scenario.py" --dry "$SCENARIO" | python3 -c 'import json, sys; print(json.load(sys.stdin)["run_s"])') \
+		|| { python3 "$SIMUTILS/scenario.py" --check "$SCENARIO" >&2; echo "run.sh: $SCENARIO: invalid scenario (above)" >&2; exit 1; }
+fi
 [ -x "$BIN/wssimserver" ] || { echo "run.sh: no $BIN/wssimserver (bindir: a virtual-time or server-only build)" >&2; exit 1; }
 BR_CONF=$WORK/examples/wsbrd${CONF:+-$CONF}.conf
 NODE_CONF=$WORK/examples/wsnode${CONF:+-$CONF}.conf

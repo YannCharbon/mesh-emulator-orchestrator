@@ -246,6 +246,91 @@ def test_validator():
         check(errors_of(doc) == [], f'example scenario {f} is valid')
 
 
+def test_probe_validator():
+    """emu-probe: node_outage, ranked selectors, per-node conditions, plots, dry shape."""
+    F = scenario.FORMAT
+    base = [{'use': 'probe'}, {'use': 'capacity'}]
+    def errs(ph, **kw):
+        return errors_of(dict({'format': F, 'phases': base + ph}, **kw))
+    oto = {'use': 'node_outage', 'name': 'out', 'mode': 'off_then_on', 'off_s': 30,
+           'nodes': {'select': 'all', 'rank_by': 'queue.mean', 'pick': 'top_fraction', 'fraction': 0.1}}
+    check(errs([oto]) == [], 'node_outage: off_then_on with a ranked top_fraction is valid')
+    ph = [p['phase'] for p in scenario.dry({'format': F, 'phases': base + [oto]})['phases']][2:]
+    check([p['name'] for p in ph] == ['out', 'out_on'] and ph[0]['actions'][0]['do'] == 'kill'
+          and ph[0]['end']['is'] == 'all' and ph[0]['end']['max_s'] == 600
+          and ph[1]['actions'][0] == {'do': 'restart', 'nodes': {'select': 'step', 'step': 'out'}}
+          and ph[1]['end']['nodes'] == {'select': 'step', 'step': 'out'} and 'load' not in ph[1],
+          'node_outage: off_then_on expands to an off part (repaired and off_s) and an on part (select step)')
+    e = errs([{'use': 'node_outage', 'mode': 'on', 'of_step': 'x'}])
+    check(any(x['path'] == '/phases/2/of_step' for x in e), 'node_outage: of_step must be an earlier step')
+    e = errs([{'use': 'node_outage', 'name': 'a'}, {'use': 'node_outage', 'mode': 'on', 'of_step': 'a'},
+              {'use': 'node_outage', 'name': 'b', 'mode': 'on', 'of_step': 'a'}])
+    check(len(e) == 1 and 'already' in e[0]['message'], 'node_outage: a step switched back on twice is refused')
+    e = errs([oto, {'use': 'node_outage', 'mode': 'on', 'of_step': 'out'}])
+    check(any('already' in x['message'] for x in e), 'node_outage: on after off_then_on is refused')
+    e = errs([{'use': 'node_outage', 'mode': 'on'}])
+    check(any(x['path'] == '/phases/2' and 'of_step' in x['message'] for x in e), 'node_outage: mode on needs of_step')
+    e = errs([{'use': 'node_outage', 'off_s': 5, 'of_step': 'x'}])
+    check({x['path'] for x in e} >= {'/phases/2/off_s', '/phases/2/of_step'}, 'node_outage: off_s and of_step only in their mode')
+    e = errs([{'use': 'node_outage', 'nodes': {'select': 'all', 'pick': 'above', 'rank_by': 'loss'}}])
+    check(any('value' in x['message'] for x in e), 'selector: pick above needs value')
+    e = errs([{'use': 'node_outage', 'nodes': {'select': 'all', 'pick': 'random', 'rank_by': 'loss'}}])
+    check(any(x['path'] == '/phases/2/nodes' and 'rank_by goes with' in x['message'] for x in e),
+          'selector: rank_by with a pick that does not rank is refused')
+    e = errs([{'use': 'node_outage', 'nodes': {'select': 'all', 'rank_by': 'nope'}}])
+    check(any('rank_by' in x['path'] for x in e), 'selector: unknown rank_by')
+    e = errors_of({'format': F, 'phases': [{'name': 'a', 'end': {'is': 'metric', 'metric': 'mac.retries', 'over': 'worst_node',
+                                                                    'value': 5, 'max_s': 60}},
+                                           {'name': 'b', 'end': {'is': 'metric', 'metric': 'offered_pps',
+                                                                 'over': 'worst_node', 'value': 5, 'max_s': 60}},
+                                           {'name': 'c', 'end': {'is': 'metric', 'metric': 'loss', 'value': 0.1, 'max_s': 60}}]})
+    check(len(e) == 1 and e[0]['path'] == '/phases/1/end/over', 'condition: over worst_node only for per-node metrics')
+    e = errors_of({'format': F, 'phases': [{'name': 'a'}], 'plots': [{'x': 't_mid_s', 'y': ['pdr', 'nope']},
+                                                                    {'x': 'pdr', 'y': 'loss', 'steps': ['zz']}]})
+    check({x['path'] for x in e} == {'/plots/0/y', '/plots/1/steps/0'}, 'plots: unknown column and step refused')
+    legacy = {'format': F, 'phases': base + [{'use': 'node_failure'}, {'use': 'node_restart'}]}
+    q = [p['phase'] for p in scenario.dry(legacy)['phases']][2:]
+    check(errors_of(legacy) == [] and q[0]['actions'][0]['label'] == 'failed'
+          and q[1]['actions'][0]['nodes'] == {'select': 'label', 'label': 'failed'},
+          'legacy: node_failure and node_restart accepted and expanded as before')
+    d = scenario.dry({'format': F, 'phases': base + [oto]})
+    r = d['phases'][3]
+    check({'index', 'name', 'title', 'step', 'step_name', 'start', 'end', 'cap_s', 't_max_s'} <= set(r)
+          and r['step'] == 2 and r['step_name'] == 'out' and d['steps'][2]['phases'] == [2, 3]
+          and d['run_s'] >= d['virtual_s_max'] + 60, 'dry: phases with their step, plain words, caps; steps; run_s')
+    sch = scenario.schema()
+    check(set(sch['x-rank-metrics']) >= {'queue.mean', 'loss', 'mac.collisions'} and sch['x-metrics']['loss']['per_node'],
+          'schema: x-rank-metrics, x-metrics per_node, x-series-columns')
+    check(sch['$defs']['block_node_failure'].get('x-hidden') and not sch['$defs']['block_node_outage'].get('x-hidden'),
+          'schema: the legacy blocks are hidden')
+
+
+def test_series(scratch):
+    """report.py series and plots from samples and power snapshots alone."""
+    d = os.path.join(scratch, 'series')
+    os.makedirs(d)
+    with open(os.path.join(d, 'power_snap.jsonl'), 'w') as f:
+        for k in range(4):     # node 0: 1 mA, node 1: 2 mA, node 2: 4 mA (charge in µC)
+            f.write(json.dumps({'tag': f'w{k}', 't_us': k * 10_000_000,
+                                'nodes': [[0, k * 10_000, 0, 0, 0, 0, 0], [1, k * 20_000, 0, 0, 0, 0, 0],
+                                          [2, k * 40_000, 0, 0, 0, 0, 0]]}) + '\n')
+    with open(os.path.join(d, 'series_samples.jsonl'), 'w') as f:
+        for k in range(4):
+            f.write(json.dumps({'t_s': k * 10, 'counters': {'ok': 10 * k, 'interference': k, 'busy': k},
+                                'rx': {'1': [12 * k, 2 * k, 10 * k]}}) + '\n')
+    r = runlog.Run(d)
+    r.update()
+    s = report.build_series(d, r, [1, 2], 30, None, 10)
+    w = s['windows']
+    check(len(w) == 3 and near(w[1]['power.mean_ma'], 3) and w[1]['power.min_ma'] == 2 and w[1]['power.max_node'] == 2
+          and w[1]['power.br_ma'] == 1, f'series: power min/mean/max per window ({w[1]["power.mean_ma"]})')
+    check(w[2]['medium.collisions'] == 2 and near(w[2]['medium.collision_share'], 2 / 12, 1e-3),
+          f'series: collisions per window ({w[2]["medium.collisions"]})')
+    pl = report.resolve_plots([{'x': 't_mid_s', 'y': ['power.min_ma', 'power.max_ma']}], s)
+    check(pl[0]['kind'] == 'line' and pl[0]['series'][1]['points'] == [[5.0, 4.0], [15.0, 4.0], [25.0, 4.0]]
+          and pl[0]['x']['unit'] == 's' and pl[0]['y'][0]['unit'] == 'mA', 'plots: resolved with units and points')
+
+
 def main():
     # No system temporary directory: an argument, else $TMPDIR (CLAUDE.md)
     base = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('TMPDIR')
@@ -260,6 +345,8 @@ def main():
     test_runlog_incremental(scratch)
     test_restart_counters(scratch)
     test_validator()
+    test_probe_validator()
+    test_series(scratch)
     shutil.rmtree(scratch, ignore_errors=True)
     print('test_report:', f'FAILED ({len(FAILS)})' if FAILS else 'PASSED')
     return 1 if FAILS else 0

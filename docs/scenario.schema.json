@@ -2598,6 +2598,26 @@
    "additionalProperties": false,
    "required": [
     "use"
+   ],
+   "allOf": [
+    {
+     "if": {
+      "properties": {
+       "mode": {
+        "const": "on"
+       }
+      },
+      "required": [
+       "mode"
+      ]
+     },
+     "then": {
+      "required": [
+       "of_step"
+      ]
+     },
+     "x-message": "mode on needs of_step (the step whose nodes are switched back on)"
+    }
    ]
   },
   "block_node_failure": {

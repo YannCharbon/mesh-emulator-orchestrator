@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runlog  # noqa: E402
 
 from scenario_schema import (FORMAT, METRICS, SAMPLED, BLOCKS, schema, check, dry, expand,  # noqa: E402
-                             default_op)
+                             default_op, PER_NODE, RANK_METRICS, RANKED_PICKS, REPORT_WINDOW_S)
 
 RESULT_FORMAT = 'wssim-scenario-result 1'
 
@@ -46,6 +46,23 @@ class Abort(Exception):
 
 class Stop(Exception):
     """The scenario ends as it says (on_timeout: abort): not an error."""
+
+
+class Skip(Exception):
+    """The phase cannot act (no node selected): it is skipped, with its reason."""
+
+
+# The per-node value of each metric that has one (scenario_schema.PER_NODE)
+PER_NODE_KEY = {'pdr': 'pdr', 'loss': 'loss', 'rtt.mean_ms': 'rtt_mean_ms', 'rtt.p95_ms': 'rtt_p95_ms',
+                'rtt.max_ms': 'rtt_max_ms', 'queue.mean_max': 'queue_mean', 'queue.drops': 'drops',
+                'mac.retries': 'retries', 'mac.retries_per_frame': 'retries_per_frame', 'mac.give_up': 'give_up',
+                'medium.collisions': 'collisions', 'medium.collision_share': 'collision_share',
+                'power.avg_ma': 'power_ma'}
+# rank_by -> the per-node key
+RANK_KEY = {'queue.mean': 'queue_mean', 'queue.max': 'queue_max', 'rtt.mean_ms': 'rtt_mean_ms',
+            'rtt.max_ms': 'rtt_max_ms', 'mac.retries_per_frame': 'retries_per_frame', 'mac.retries': 'retries',
+            'mac.collisions': 'collisions', 'loss': 'loss'}
+DISRUPTING = ('kill', 'restart', 'leave', 'cut_links', 'degrade_links')
 
 
 def compress_ids(ids):
@@ -118,6 +135,18 @@ class Driver:
         self.disruptions = []       # every disruption, tracked until repaired or the end
         self.last_track = None
         self.restart_times = {}     # node -> virtual times it was started again
+        self.window_s = (doc.get('report') or {}).get('window_s', REPORT_WINDOW_S)
+        self.next_tick = self.window_s
+        self.snaps = []             # (t, power snapshot) of every snapshot
+        self.ctr_samples = []       # (t, counters with "_rx") of every counters() call
+        self.step_off = {}          # step name -> the nodes it switched off
+        self.skipped_steps = {}     # step index -> reason
+        self.last_sel = None
+        self.plan = dry(doc)
+        self.record['user_steps'] = [{'step': st['step'], 'name': st['name'], 'title': st['title'],
+                                      'use': st['use'], 'state': 'pending', 'phases': [], 't_start_s': None,
+                                      't_end_s': None} for st in self.plan['steps']]
+        self.record['window_s'] = self.window_s
 
     # ------------------------------------------------------------ protocol
 
@@ -178,8 +207,13 @@ class Driver:
                 nxt = min(nxt, min(p[0] for p in due))
             if self.open_disruptions():
                 nxt = min(nxt, (self.last_track or self.now) + self.poll)
+            nxt = min(nxt, self.next_tick)
             if nxt > self.now:
                 self.run_until(nxt)
+            if self.now >= self.next_tick - 1e-9:
+                self.sample('win')
+                while self.next_tick <= self.now + 1e-9:
+                    self.next_tick += self.window_s
             for p in sorted([p for p in self.pending if p[0] <= self.now + 1e-9], key=lambda x: x[0]):
                 self.pending.remove(p)
                 self.note(f'undo: {p[1]}')
@@ -210,6 +244,8 @@ class Driver:
         print(f'scenario {self.now:9.3f} s: {text}', file=self.log, flush=True)
 
     def counters(self):
+        """The conductor's totals so far, with "_rx": per receiver (heard,
+        collisions, ok) (central medium)."""
         r = self.cmd('counters')
         out = {}
         for kv in r.split()[1:]:
@@ -218,7 +254,39 @@ class Driver:
                 out[k] = int(v)
             except ValueError:
                 pass
+        rx = {}
+        r = self.cmd('rxcounters')
+        if r.startswith('ok'):
+            for x in r.split()[1:]:
+                f = x.split(':')
+                if len(f) == 4:
+                    rx[int(f[0])] = (int(f[1]), int(f[2]), int(f[3]))
+        out['_rx'] = rx
+        self.ctr_samples.append((self.now, out))
         return out
+
+    def ctr_at(self, t):
+        """The latest counters taken at or before t (None: none)."""
+        best = None
+        for tt, c in self.ctr_samples:
+            if tt <= t + 1e-9:
+                best = c
+            else:
+                break
+        return best
+
+    def sample(self, tag):
+        """A sample of every series source now: the nodes' NET1 lines (not
+        charged), the medium's counters, a power snapshot; one line in
+        series_samples.jsonl (report.json "series")."""
+        self.node('all', 'stats', ask=True)
+        self.run_until(self.now)
+        c = self.counters()
+        self._snap(f'{tag}:{self.now:.3f}')
+        with open(os.path.join(self.dir, 'series_samples.jsonl'), 'a') as f:
+            f.write(json.dumps({'t_s': round(self.now, 6), 'tag': tag,
+                                'counters': {k: v for k, v in c.items() if k != '_rx'},
+                                'rx': {str(k): v for k, v in c['_rx'].items()}}) + '\n')
 
     def power_snap(self, tag):
         if self.power:
@@ -284,11 +352,33 @@ class Driver:
             why = f'routers in the area {sel["box"]}'
         elif k == 'label':
             cand, why = list(self.labels.get(sel['label'], [])), f'the nodes labelled {sel["label"]}'
+        elif k == 'step':
+            cand, why = list(self.step_off.get(sel['step'], [])), f'the nodes step {sel["step"]} switched off'
         else:
             cand, why = [], 'nothing'
         cand = sorted(set(cand))
-        pick, count = sel.get('pick', 'all'), sel.get('count', 1)
+        pick, count = sel.get('pick', 'top' if 'rank_by' in sel else 'all'), sel.get('count', 1)
         sub = {n: len(runlog.subtree(par, n)) for n in cand}
+        self.last_sel = {'candidates': len(cand)}
+        if pick in RANKED_PICKS:
+            rb = sel['rank_by']
+            vals, win = self.rank_values(rb, sel.get('rank_window_s', 60), cand, par, ch)
+            ranked = sorted((n for n in cand if n != 0 and vals.get(n) is not None), key=lambda n: (-vals[n], n))
+            unit = RANK_METRICS[rb][0]
+            if pick == 'top':
+                cand = ranked[:count]
+                why += f', the {count} highest by {rb}'
+            elif pick == 'top_fraction':
+                cand = ranked[:max(1, int(sel['fraction'] * len(ranked)))] if ranked else []
+                why += f', the highest {sel["fraction"]} by {rb}'
+            else:
+                cand = [n for n in ranked if vals[n] >= sel['value']]
+                why += f', {rb} at least {sel["value"]} {"" if unit == "ratio" else unit}'.rstrip()
+            why += f' ({len(ranked)} ranked'
+            why += (': ' + ', '.join(f'{n}: {vals[n]:.4g}' for n in cand) + ')') if cand else ', none picked)'
+            self.last_sel.update({'rank_by': rb, 'rank_unit': unit, 'rank_window': win, 'ranked': len(ranked),
+                                  'chosen': [{'node': n, 'value': round(vals[n], 6)} for n in cand]})
+            return sorted(cand), why_prefix + why
         if pick == 'largest_subtree':
             cand = sorted(cand, key=lambda n: (-sub[n], n))[:count]
             why += ', largest subtree (' + ', '.join(f'{n}: {sub[n]} below' for n in cand) + ')'
@@ -304,7 +394,78 @@ class Driver:
         elif pick == 'first':
             cand = cand[:count]
             why += ', the first'
+        self.last_sel['chosen'] = [{'node': n, 'value': None} for n in cand]
         return cand, why_prefix + why
+
+    def rank_values(self, rb, w, cand, par, ch):
+        """{node: value} of a ranking metric for the candidates, measured over
+        the w seconds before now (packets: sent in the w seconds before the
+        last drain_s, whose echoes may still come); (values, [t_from, t_to])."""
+        if rb == 'subtree':
+            return {n: len(runlog.subtree(par, n)) for n in cand}, [self.now, self.now]
+        if rb == 'children':
+            return {n: len(ch.get(n, [])) for n in cand}, [self.now, self.now]
+        if rb in ('rtt.mean_ms', 'rtt.max_ms', 'loss'):
+            t_to = max(self.now - self.drain, 0)
+            t_from = max(t_to - w, 0)
+            pn = self.per_node(t_from, t_to, self.now, {'traffic'})
+        elif rb == 'mac.collisions':
+            t_from = max(self.now - w, 0)
+            t_to = self.now
+            pn = self.per_node(t_from, t_to, self.now, {'medium'}, self.ctr_at(t_from), self.counters())
+        else:
+            t_from = max(self.now - w, 0)
+            t_to = self.now
+            pn = self.per_node(t_from, t_to, self.now, {'queues'})
+        key = RANK_KEY[rb]
+        return ({n: pn[n][key] for n in cand if n in pn and pn[n].get(key) is not None},
+                [round(t_from, 6), round(t_to, 6)])
+
+    def per_node(self, t_from, t_to, t_eval, sets, ctr_a=None, ctr_b=None, snap_a=None, snap_b=None):
+        """Per node, the per-node values of the measurement sets over
+        [t_from, t_to) (docs/SCENARIOS.md §4.3): packets it originated,
+        retries, queues, collisions at it as a receiver, power."""
+        pn = {}
+        if 'traffic' in sets:
+            for n, a in runlog.node_packets(self.run, t_from, t_to, t_eval).items():
+                r = a['rtt_ms']
+                pn.setdefault(n, {}).update({'sent': a['sent'], 'lost': a['lost'], 'loss': a['loss'], 'pdr': a['pdr'],
+                                             'rtt_mean_ms': r.get('mean'), 'rtt_p95_ms': r.get('p95'),
+                                             'rtt_max_ms': r.get('max')})
+        if 'queues' in sets:
+            nd = runlog.net_delta(self.run, t_from, t_eval)
+            peaks = runlog.queue_peaks(self.run, t_from, t_eval)
+            for n, d in nd.items():
+                pn.setdefault(n, {}).update({'retries': d['retries'], 'retries_per_frame': d['retries_per_frame'],
+                                             'uc_frames': d['uc_frames'], 'give_up': d['give_up'],
+                                             'drops': d['red_drop'], 'queue_mean': d['mac_q_mean'] + d['al_q_mean'],
+                                             'queue_max': peaks.get(n)})
+        if 'medium' in sets and ctr_b is not None:
+            ra = (ctr_a or {}).get('_rx', {})
+            for n, (h, c, ok) in ctr_b.get('_rx', {}).items():
+                h0, c0, _ = ra.get(n, (0, 0, 0))
+                pn.setdefault(n, {}).update({'heard': h - h0, 'collisions': c - c0,
+                                             'collision_share': (c - c0) / (h - h0) if h > h0 else None})
+        if 'power' in sets and snap_a and snap_b:
+            span = (snap_b['t_us'] - snap_a['t_us']) / 1e6
+            a = {x[0]: x for x in snap_a['nodes']}
+            for x in snap_b['nodes']:
+                if x[0] in a and span > 0:
+                    pn.setdefault(x[0], {})['power_ma'] = (x[1] - a[x[0]][1]) / 1e3 / span
+        return pn
+
+    @staticmethod
+    def worst_of(pn):
+        """Per metric with a per-node value, the worst router: {metric: {node, value}}."""
+        out = {}
+        for metric, key in PER_NODE_KEY.items():
+            vals = [(v[key], n) for n, v in pn.items() if n != 0 and v.get(key) is not None]
+            if not vals:
+                continue
+            low = METRICS[metric][3] == 'low'
+            v, n = (min if low else max)(vals, key=lambda x: (x[0], -x[1]) if not low else (x[0], x[1]))
+            out[metric] = {'node': n, 'value': round(v, 6)}
+        return out
 
     # --------------------------------------------------------------- load
 
@@ -372,7 +533,7 @@ class Driver:
 
     # ------------------------------------------------------------ actions
 
-    def do_action(self, a, rec):
+    def do_action(self, a, rec, pre=None):
         do = a['do']
         out = {'do': do}
         if do == 'mark':
@@ -397,9 +558,17 @@ class Driver:
                 ga, wa = self.select(a['a'])
                 gb, wb = self.select(a['b'])
                 nodes, why = ga + gb, f'a: {wa}; b: {wb}'
+            elif pre:
+                nodes, why, info = pre
+                out.update({k: v for k, v in info.items() if k in ('chosen', 'rank_by', 'rank_unit', 'rank_window',
+                                                                   'candidates', 'ranked')})
             else:
                 nodes, why = self.select(a['nodes'])
+                out.update({k: v for k, v in (self.last_sel or {}).items() if k in ('chosen', 'candidates')})
             out.update({'nodes': nodes, 'why': why})
+            if do in ('kill', 'leave'):
+                off = self.step_off.setdefault(rec.get('step_name'), [])
+                off += [n for n in nodes if n not in off]
             if a.get('label'):
                 self.labels[a['label']] = nodes
             par, dep, ch = self.topology()
@@ -585,6 +754,7 @@ class Driver:
                     'now_max': max((d['mac_q_now'] + d['al_q_now'] for d in nd.values()), default=None),
                     'drops': sum(d['red_drop'] for d in nd.values()),
                     'retries_per_frame': runlog.retries_per_frame(nd.values()),
+                    'retries': sum(d['retries'] for d in nd.values()),
                     'give_up': sum(d['give_up'] for d in nd.values()),
                     'cca_fail_rate': sum(d['mac_cca_fail'] for d in nd.values()) / cca if cca else None,
                     'per_node': {str(k): {x: (round(y, 4) if isinstance(y, float) else y) for x, y in d.items()
@@ -610,12 +780,15 @@ class Driver:
                 m['mesh']['br_table_size'] = len(tree) if t_tree is not None else None
         if 'medium' in sets and ctr_a and ctr_b:
             span = max(ctr_b.get('t_us', 0) - ctr_a.get('t_us', 0), 1) / 1e6
-            d = {k: ctr_b.get(k, 0) - ctr_a.get(k, 0) for k in ctr_b}
+            d = {k: ctr_b.get(k, 0) - ctr_a.get(k, 0) for k in ctr_b if k != '_rx'}
             heard = sum(v for k, v in d.items() if k in ('ok', 'noise', 'interference', 'captured', 'below_lock',
                                                          'busy', 'tx_abort', 'left'))
             m['medium'] = {'span_s': span, 'frames': d.get('frames_in'), 'frames_per_s': d.get('frames_in', 0) / span,
                            'airtime_s_per_s': d.get('airtime_us', 0) / 1e6 / span,
                            'loss_share': (heard - d.get('ok', 0)) / heard if heard else None,
+                           'collisions': sum(d.get(k, 0) for k in ('interference', 'captured', 'busy')),
+                           'collision_share': (sum(d.get(k, 0) for k in ('interference', 'captured', 'busy')) / heard
+                                               if heard else None),
                            'outcomes': {k: d[k] for k in ('ok', 'noise', 'interference', 'captured', 'below_lock',
                                                           'busy', 'not_listening', 'tx_abort', 'left') if k in d}}
         if 'power' in sets and snap_a and snap_b:
@@ -632,12 +805,23 @@ class Driver:
             vals = [v['avg_ma'] for k, v in per.items() if k != '0']
             m['power'] = {'span_s': span, 'avg_ma': sum(vals) / len(vals) if vals else None,
                           'max_ma': max(vals) if vals else None, 'per_node': per}
+        pn = self.per_node(t_from, t_to, t_eval, set(sets), ctr_a, ctr_b, snap_a, snap_b)
+        if pn:
+            m['per_node'] = {str(n): {k: (round(v, 6) if isinstance(v, float) else v) for k, v in x.items()}
+                             for n, x in sorted(pn.items())}
+            m['worst'] = self.worst_of(pn)
         return m
 
-    def metric_value(self, m, name, flow, hop=None):
-        """A metric of the vocabulary from window metrics m."""
+    def metric_value(self, m, name, flow, hop=None, over='mesh'):
+        """A metric of the vocabulary from window metrics m (over worst_node:
+        the worst router's value)."""
         if name == 'capacity_pps':
             return m.get('capacity_pps')
+        if over == 'worst_node':
+            return ((m.get('worst') or {}).get(name) or {}).get('value')
+        if name == 'loss':
+            p = self.metric_value(m, 'pdr', flow, hop)
+            return None if p is None else 1 - p
         top, _, sub = name.partition('.')
         if top in ('pdr', 'rtt', 'latency', 'offered_pps', 'delivered_pps'):
             f = (m.get('flows') or {}).get(flow)
@@ -658,6 +842,7 @@ class Driver:
         if top == 'mac':
             q = m.get('queues') or {}
             return {'retries_per_frame': q.get('retries_per_frame'), 'give_up': q.get('give_up'),
+                    'retries': q.get('retries'),
                     'cca_fail_rate': q.get('cca_fail_rate')}.get(sub)
         if top == 'mesh':
             return (m.get('mesh') or {}).get(sub)
@@ -845,18 +1030,25 @@ class Driver:
     def cond_metric(self, c, ctx):
         m = ctx.get('metrics')
         if m is None:   # a trailing window, now
-            w = self.window_for(c.get('window_s', 60), c.get('min_samples', self.min_samples), cap=10)
+            w = c.get('window_s', 60)
+            if c['metric'].startswith(SAMPLED):
+                # long enough for min_samples packets at the load in force
+                w = self.window_for(w, c.get('min_samples', self.min_samples), cap=10)
             t_to = self.now - self.drain
             if t_to - w < ctx.get('t_start', 0) - 1e-9:
                 return False, f'{c["metric"]}: window of {w} s not full yet'
             sets = {METRICS[c['metric']][2]}
             if 'queues' in sets or 'mesh' in sets:
                 self.refresh(net=True)
-            ca = ctx.get('ctr_prev')
+            t_from = max(t_to - w, ctx.get('t_start', 0))
+            if c.get('over') == 'worst_node' and c['metric'] == 'power.avg_ma':
+                sets.add('power')
+            ca = self.ctr_at(t_from) if 'medium' in sets else None
             cb = self.counters() if 'medium' in sets else None
-            m = self.window_metrics(max(t_to - w, ctx.get('t_start', 0)), t_to, self.now, sets, ca, cb)
-            if cb:
-                ctx['ctr_prev'] = cb
+            snaps = (None, None)
+            if 'power' in sets and self.power:
+                snaps = (self.snap_at(t_from), self._snap(f'cond:{self.now:.3f}'))
+            m = self.window_metrics(t_from, t_to, self.now, sets, ca, cb, *snaps)
         flow = self.flow_of(c)
         op = c.get('op') or default_op(c['metric'])
         if c['metric'].startswith(SAMPLED):
@@ -870,15 +1062,20 @@ class Driver:
             f = (m.get('flows') or {}).get(flow, {})
             hops = sorted(int(h) for h in f.get('rtt_ms_by_hops' if c['metric'].startswith('rtt') else
                                                   'latency_ms_by_hops', {}))
+        over = c.get('over', 'mesh')
         for h in hops:
-            v = self.metric_value(m, c['metric'], flow, h)
+            v = self.metric_value(m, c['metric'], flow, h, over)
             thr = self.ref_value(c['relative_to'], c['metric'], h) if c.get('relative_to') else c.get('value')
             if v is None or thr is None:
                 continue
             if self.compare(v, op, thr):
-                return True, f'{c["metric"]}{"" if h is None else f" at {h} hops"} = {v:.4g} {op} {thr:.4g}'
-        v = self.metric_value(m, c['metric'], flow)
-        return False, f'{c["metric"]} = {v if v is None else round(v, 4)}'
+                who = f' (worst router: {m["worst"][c["metric"]]["node"]})' if over == 'worst_node' else ''
+                return True, f'{c["metric"]}{"" if h is None else f" at {h} hops"}{who} = {v:.4g} {op} {thr:.4g}'
+        v = self.metric_value(m, c['metric'], flow, None, over)
+        who = ''
+        if over == 'worst_node' and v is not None:
+            who = f' (worst router: {m["worst"][c["metric"]]["node"]})'
+        return False, f'{c["metric"]}{who} = {v if v is None else round(v, 4)}'
 
     def window_for(self, window_s, need, cap=4):
         """A window long enough for about need packets at the load in force
@@ -906,9 +1103,55 @@ class Driver:
 
     # ------------------------------------------------------------- phases
 
+    def user_step(self, p):
+        for us in self.record['user_steps']:
+            if us['step'] == p['x_index']:
+                return us
+        return {}
+
+    def end_step(self, p, rec, state=None):
+        """The user's step after this phase: ended when it is its last part."""
+        us = self.user_step(p)
+        if state is None and p.get('x_part', 0) < p.get('x_parts', 1) - 1:
+            return
+        if us.get('state') in ('completed', 'not_met', 'skipped'):
+            return
+        if state is None:
+            parts = [r for r in self.record['phases'] if r.get('step') == p['x_index']]
+            state = 'not_met' if any(r.get('end', {}).get('met') is False for r in parts) else 'completed'
+        us['state'] = state
+        us['t_end_s'] = round(self.now, 6)
+        if state == 'skipped':
+            self.note(f'step {p["x_index"]} {p.get("x_step_name")} skipped: {rec.get("skip_reason")}')
+        else:
+            self.note(f'step {p["x_index"]} {p.get("x_step_name")} ends ({state})')
+
+    def skip_phase(self, p, rec, reason):
+        rec['skipped'] = True
+        rec['skip_reason'] = reason
+        self.skipped_steps.setdefault(p['x_index'], reason)
+        self.note(f'phase {p["name"]} skipped: {reason}')
+        self.end_step(p, rec, 'skipped')
+
     def run_phase(self, p, prev_end):
-        rec = {'name': p['name'], 'block': p.get('x_block'), 'index': p['x_index']}
+        k = len(self.record['phases'])
+        pl = self.plan['phases'][k] if k < len(self.plan['phases']) else {}
+        rec = {'name': p['name'], 'block': p.get('x_block'), 'index': p['x_index'], 'step': p['x_index'],
+               'step_name': p.get('x_step_name'), 'title': pl.get('title'), 'part': p.get('x_part', 0),
+               'parts': p.get('x_parts', 1)}
         self.record['phases'].append(rec)
+        us = self.user_step(p)
+        us.setdefault('phases', []).append(p['name'])
+        if p['x_index'] in self.skipped_steps:
+            rec['skipped'] = True
+            rec['skip_reason'] = f'an earlier part of the step was skipped ({self.skipped_steps[p["x_index"]]})'
+            rec['start'] = {'t_s': round(self.now, 6), 'met': False, 'detail': rec['skip_reason']}
+            return
+        if us.get('state') == 'pending':
+            us['state'] = 'running'
+            us['t_start_s'] = round(self.now, 6)
+            self.note(f'step {p["x_index"]} {p.get("x_step_name")} starts')
+            self.write_result('running')
         # start
         start = p.get('start')
         if isinstance(start, dict) and start.get('is', 'immediately') != 'immediately':
@@ -921,7 +1164,7 @@ class Driver:
                 rec['start']['on_timeout'] = how
                 self.note(f'phase {p["name"]}: start condition not met after {start.get("timeout_s", 3600)} s ({detail}): {how}')
                 if how == 'skip':
-                    rec['skipped'] = True
+                    self.skip_phase(p, rec, f'start condition not met after {start.get("timeout_s", 3600)} s')
                     return
                 if how == 'abort':
                     rec['aborted'] = True
@@ -947,12 +1190,23 @@ class Driver:
             self.refresh(net=True, tree=True)
         snap0 = self._snap(f'{p["name"]}:start')
         ctr0 = self.counters() if 'medium' in sets else None
+        # The nodes of the actions that switch nodes off or on, chosen now (a
+        # ranking measures the window before the step): none, the step is
+        # skipped before its load changes
+        pre = {}
+        for j, a in enumerate(p.get('actions') or []):
+            if a.get('do') in DISRUPTING and a.get('nodes'):
+                nodes, why = self.select(a['nodes'])
+                if not nodes:
+                    self.skip_phase(p, rec, f'{a["do"]}: no node selected ({why})')
+                    return
+                pre[j] = (nodes, why, dict(self.last_sel or {}))
         # The load first, then the actions: a failure happens under the load
         load = p.get('load', 'keep')
         if 'repeat' not in p and load != 'keep':
             self.apply_load(load, p['name'])
-        for a in p.get('actions') or []:
-            self.do_action(a, rec)
+        for j, a in enumerate(p.get('actions') or []):
+            self.do_action(a, rec, pre.get(j))
         if 'repeat' in p:
             self.run_iterations(p, rec, sets, load)
         else:
@@ -978,16 +1232,47 @@ class Driver:
             self.results[p['name']] = {'metrics': m, 'flow': self.flow_of(None),
                                        'offered_pps': fl.get('offered_pps') or (self.load and self.load['rate_pps'])}
         self.note(f'phase {p["name"]} ends ({rec.get("end", {}).get("detail", "")})')
+        self.end_step(p, rec)
+        self.write_result('running')
+
+    def write_result(self, status):
+        """scenario_result.json as it stands (status "running" until the end)."""
+        self.record['status'] = status
+        self.record['end_t_s'] = self.now
+        self.record['labels'] = self.labels
+        self.record['step_off'] = {str(k): v for k, v in self.step_off.items()}
+        try:
+            self.record['summary'] = summarize(self.record)
+        except Exception as e:      # noqa: BLE001
+            self.record['summary'] = {'status': status, 'error': f'summary: {e}'}
+        tmp = os.path.join(self.dir, 'scenario_result.json.tmp')
+        with open(tmp, 'w') as f:
+            json.dump(self.record, f, indent=1, default=str)
+        os.replace(tmp, os.path.join(self.dir, 'scenario_result.json'))
 
     def _snap(self, tag):
         if not self.power:
             return None
         path = os.path.join(self.dir, 'power_snap.jsonl')
-        n = sum(1 for _ in open(path)) if os.path.exists(path) else 0
+        size = os.path.getsize(path) if os.path.exists(path) else 0
         self.power_snap(tag)
         with open(path) as f:
-            lines = f.readlines()
-        return json.loads(lines[n]) if len(lines) > n else None
+            f.seek(size)
+            line = f.readline()
+        if not line:
+            return None
+        snap = json.loads(line)
+        self.snaps.append((self.now, snap))
+        return snap
+
+    def snap_at(self, t):
+        best = None
+        for tt, sn in self.snaps:
+            if tt <= t + 1e-9:
+                best = sn
+            else:
+                break
+        return best
 
     def measure_window(self, p, i, sets, settle):
         """One measured window at the load in force: (metrics, t_start)."""
@@ -1156,6 +1441,8 @@ class Driver:
         says, on_timeout: abort), 1 on any error: the result is written in
         every case, with the status and, on an error, its traceback."""
         self.record['start_wall'] = time.time()
+        with open(os.path.join(self.dir, 'scenario_plan.json'), 'w') as f:
+            json.dump(self.plan, f, indent=1)
         status, code = 'completed', 0
         try:
             r = self.rf.readline()     # the first pause: "at 0"
@@ -1182,15 +1469,11 @@ class Driver:
                 self.finalize(d, at_end=True)
         except Exception as e:      # noqa: BLE001 (the result is still written)
             print(f'scenario: closing the disruptions: {e}', file=self.log)
-        self.record['status'] = status
-        self.record['end_t_s'] = self.now
-        self.record['labels'] = self.labels
-        try:
-            self.record['summary'] = summarize(self.record)
-        except Exception as e:      # noqa: BLE001
-            self.record['summary'] = {'status': status, 'error': f'summary: {e}'}
-        with open(os.path.join(self.dir, 'scenario_result.json'), 'w') as f:
-            json.dump(self.record, f, indent=1, default=str)
+        for us in self.record['user_steps']:
+            if us['state'] == 'running':
+                us['state'] = 'error' if code else 'not_met'
+                us['t_end_s'] = round(self.now, 6)
+        self.write_result(status)
         if not self.ended:
             try:
                 self.sock.sendall(b'quit\n')
@@ -1217,11 +1500,22 @@ def summarize(rec):
     for ph in rec['phases']:
         row = {'name': ph['name'], 'start_s': ph.get('start', {}).get('t_s'), 'end_s': ph.get('end', {}).get('t_s'),
                'start_detail': ph.get('start', {}).get('detail'), 'start_timeout': ph.get('start', {}).get('timeout'),
-               'end_detail': ph.get('end', {}).get('detail'), 'skipped': ph.get('skipped', False)}
+               'end_detail': ph.get('end', {}).get('detail'), 'skipped': ph.get('skipped', False),
+               'skip_reason': ph.get('skip_reason'), 'step': ph.get('step'), 'step_name': ph.get('step_name'),
+               'title': ph.get('title')}
         m = ph.get('metrics') or {}
+        row['retries'] = (m.get('queues') or {}).get('retries')
+        row['retries_per_frame'] = _fmt((m.get('queues') or {}).get('retries_per_frame'), 4)
+        row['collisions'] = (m.get('medium') or {}).get('collisions')
+        row['worst'] = m.get('worst')
+        chosen = [x for a in ph.get('actions') or [] for x in (a.get('chosen') or [])]
+        if chosen:
+            row['chosen'] = chosen
+            row['rank_by'] = next((a.get('rank_by') for a in ph['actions'] if a.get('rank_by')), None)
         f = (m.get('flows') or {}).get('up') or next(iter((m.get('flows') or {}).values()), None)
         if f:
             row['pdr'] = _fmt(f.get('pdr'), 4)
+            row['loss'] = None if f.get('pdr') is None else _fmt(1 - f['pdr'], 4)
             row['rtt_ms'] = {k: _fmt(f['rtt_ms'].get(k)) for k in ('n', 'mean', 'p95', 'max')} if f['rtt_ms']['n'] else None
             row['rtt_ms_by_hops'] = {h: {'n': s['n'], 'mean': _fmt(s.get('mean')), 'p95': _fmt(s.get('p95'))}
                                      for h, s in f['rtt_ms_by_hops'].items()}

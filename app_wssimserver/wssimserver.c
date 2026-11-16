@@ -2495,6 +2495,21 @@ static int ctl_command(struct ctxt *ctxt, char *line, struct nsim_welcome *welco
         ctl_answer("%s", outc);
         return 0;
     }
+    if (!strcmp(cmd, "rxcounters")) {
+        // "ok ID:HEARD:COLLISIONS:OK ...": per receiver, totals so far
+        // (central medium; "ok" alone otherwise)
+        char *buf = NULL;
+        size_t sz = 0;
+        FILE *f = open_memstream(&buf, &sz);
+        FATAL_ON(!f, 1, "open_memstream: %m");
+        fputs("ok", f);
+        if (med_central())
+            med_rx_counters(f);
+        fclose(f);
+        ctl_answer("%s", buf);
+        free(buf);
+        return 0;
+    }
     if (!strcmp(cmd, "power")) {
         FILE *f;
         a = ctl_word(&rest);

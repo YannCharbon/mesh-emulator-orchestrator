@@ -446,7 +446,8 @@ def net_delta(run, t_from, t_to, nodes=None):
         d['al_q_now'] = _g(b, 'al', 'q')
         ok = sum(d['uc_retry_hist'])
         # retries per unicast frame delivered (bin 8 counts 8 or more)
-        d['retries_per_frame'] = (sum(i * x for i, x in enumerate(d['uc_retry_hist'])) / ok) if ok else None
+        d['retries'] = sum(i * x for i, x in enumerate(d['uc_retry_hist']))
+        d['retries_per_frame'] = (d['retries'] / ok) if ok else None
         d['parent'] = _g(b, 'rpl', 'parent') if b.get('rpl', {}).get('parent') is not None else None
         d['dag_rank'] = b.get('rpl', {}).get('dag_rank')
         d['rank'] = b.get('rpl', {}).get('rank')
@@ -486,6 +487,56 @@ def _net_delta1(a, b):
     for k in ('dis', 'dio', 'dao'):
         d['ctl_' + k] = g(b, 'ctl', k) - g(a, 'ctl', k)
     return d
+
+
+def queue_peaks(run, t_from, t_to):
+    """Per node, the highest queue depth (MAC plus adaptation layer) seen in
+    (t_from, t_to]: the largest q_win_max of its NET1 samples there (each
+    line's peak since the previous line), else the depth at those samples."""
+    out = {}
+    for nid, node in run.nodes.items():
+        best = None
+        for smp in node.net:
+            if smp['t'] <= t_from + 1e-9:
+                continue
+            if smp['t'] > t_to + 1e-9:
+                break
+            v = smp.get('q_win_max')
+            if v is None:
+                v = _g(smp, 'mac', 'q') + _g(smp, 'al', 'q')
+            best = v if best is None else max(best, v)
+        if best is not None:
+            out[nid] = best
+    return out
+
+
+def node_packets(run, t_from, t_to, t_eval):
+    """Per originating node, its packets sent in [t_from, t_to) (every flow it
+    originates, send errors left out): sent, lost (not echoed for a request,
+    not delivered for a one-way packet, by t_eval), loss, pdr, and the RTT
+    statistics (ms) of its echoed packets."""
+    acc = {}
+    for key, v in run.tx.items():
+        flow, src, seq = key
+        t_tx, rc = v[0], v[4]
+        typ = v[5] if len(v) > 5 else (2 if flow == 3 else 0)
+        if not (t_from <= t_tx < t_to) or rc < 0 or flow == 3:
+            continue
+        a = acc.setdefault(src, {'sent': 0, 'lost': 0, '_rtt': []})
+        a['sent'] += 1
+        if typ == 0:
+            e = run.echo.get(key)
+            if e and e[0] <= t_eval:
+                a['_rtt'].append((e[0] - t_tx) * 1e3)
+            else:
+                a['lost'] += 1
+        elif not any(r[1] <= t_eval for r in run.rx.get(key, [])):
+            a['lost'] += 1
+    for a in acc.values():
+        a['loss'] = a['lost'] / a['sent'] if a['sent'] else None
+        a['pdr'] = 1 - a['loss'] if a['loss'] is not None else None
+        a['rtt_ms'] = stats(a.pop('_rtt'))
+    return acc
 
 
 def retries_per_frame(deltas):

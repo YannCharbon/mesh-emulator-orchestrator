@@ -47,6 +47,7 @@ static struct {
     uint32_t mac_q, al_q;
     uint64_t mac_q_since, al_q_since;
     double mac_q_int, al_q_int;         // depth x µs
+    uint32_t q_win_max;                 // highest MAC + adaptation-layer depth since the last line
     // Unicast frames the MAC confirmed to the stack (one per frame): success
     // by retries, or given up by reason; broadcast frames confirmed
     uint32_t uc_hist[RETRY_BINS], uc_no_ack, uc_cca, uc_other, bc_done;
@@ -128,6 +129,8 @@ void __wrap_sw_mac_stats_update(struct protocol_interface_rf_mac_setup *setup, i
             ns.mac_q_int += (double)ns.mac_q * (now - ns.mac_q_since);
             ns.mac_q_since = now;
             ns.mac_q = update_val;
+            if (ns.mac_q + ns.al_q > ns.q_win_max)
+                ns.q_win_max = ns.mac_q + ns.al_q;
         }
     }
     __real_sw_mac_stats_update(setup, type, update_val);
@@ -141,6 +144,8 @@ void __wrap_protocol_stats_update(int type, uint16_t update_val)
             ns.al_q_int += (double)ns.al_q * (now - ns.al_q_since);
             ns.al_q_since = now;
             ns.al_q = update_val;
+            if (ns.mac_q + ns.al_q > ns.q_win_max)
+                ns.q_win_max = ns.mac_q + ns.al_q;
         } else if (type == STATS_IP_ROUTE_UP) {
             ns.routed++;
         }
@@ -265,6 +270,9 @@ static void print_line(bool final)
         ns.ws.sent_PAS, ns.ws.sent_PA, ns.ws.sent_PCS, ns.ws.sent_PC, ns.ws.Neighbour_add, ns.ws.Neighbour_remove);
     put(b, len, &n, "\"ctl\":{\"dis\":%u,\"dio\":%u,\"dao\":%u},",
         ctl_count[C_DIS], ctl_count[C_DIO], ctl_count[C_DAO]);
+    // The highest depth since the previous line (then reset): a window's peak
+    put(b, len, &n, "\"q_win_max\":%u,", ns.q_win_max > ns.mac_q + ns.al_q ? ns.q_win_max : ns.mac_q + ns.al_q);
+    ns.q_win_max = ns.mac_q + ns.al_q;
     if (n < len - 1)
         n += app_load_counters_json(b + n, len - n);
     if (n > len - 2)

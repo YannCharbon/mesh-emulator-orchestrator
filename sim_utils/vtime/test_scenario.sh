@@ -93,6 +93,83 @@ EOF
 OK=$?
 [ "${KEEP:-0}" = 1 ] || rm -rf "$OUT/run"
 
+# emu-probe: "Switch nodes off" (off_then_on, ranked top_fraction and top; pick
+# above with no node: skipped, and the step that would switch them back on),
+# a worst-router retries condition, the loss metric, the report's series and
+# plots, and no <seconds>: the scenario's own bound
+cat > "$OUT/probe.json" <<'EOF2'
+{"format": "wssim-scenario 1", "name": "probe test", "settings": {"poll_s": 5},
+ "phases": [
+  {"use": "formed", "fraction": 0.9, "stable_s": 20, "timeout_s": 900},
+  {"name": "load", "load": {"flows": ["up"], "rate_pps": 1}, "measure": {"sets": ["traffic", "queues", "mesh", "power", "medium"]},
+   "end": {"is": "metric", "metric": "mac.retries", "over": "worst_node", "value": 1, "window_s": 30, "max_s": 120}},
+  {"name": "lossy", "end": {"is": "metric", "metric": "loss", "op": "<=", "value": 0.5, "window_s": 30, "min_samples": 10, "max_s": 120}},
+  {"use": "node_outage", "name": "out", "mode": "off_then_on", "off_s": 20, "max_s": 300, "capacity_phase": "",
+   "nodes": {"select": "all", "rank_by": "mac.retries", "pick": "top_fraction", "fraction": 0.1, "rank_window_s": 60}},
+  {"use": "node_outage", "name": "none", "capacity_phase": "", "nodes": {"select": "all", "rank_by": "loss", "pick": "above", "value": 2}},
+  {"use": "node_outage", "name": "back", "mode": "on", "of_step": "none", "capacity_phase": ""},
+  {"use": "node_outage", "name": "q", "capacity_phase": "", "max_s": 60, "nodes": {"select": "hop", "hop": 1, "rank_by": "queue.mean", "count": 1}},
+  {"name": "tail", "end": {"after_s": 20}}
+ ],
+ "report": {"window_s": 10},
+ "plots": [{"x": "offered_pps", "y": "rtt.p95_ms", "points": "steps"}, {"x": "t_mid_s", "y": ["power.min_ma", "power.mean_ma", "power.max_ma"]}]
+}
+EOF2
+rm -rf "$OUT/probe"
+T1=$SECONDS
+WSSIM_SEED=${WSSIM_SEED:-1} TUN=none COMPACT=1 POWER="$(realpath "$2")/examples/power/efr32fg25-soc.ini" SCENARIO="$OUT/probe.json" \
+    "$HERE/run.sh" "$1" "$2" "$OUT/probe" > "$OUT/probe.out" 2>&1
+echo "test_scenario: probe run status $?, $((SECONDS - T1)) s wall time"
+python3 - "$OUT/probe" "$HERE/../scenario.py" "$OUT/probe.json" <<'EOF2' || OK=1
+import json, os, subprocess, sys
+d = sys.argv[1]
+r = json.load(open(os.path.join(d, 'scenario_result.json')))
+rep = json.load(open(os.path.join(d, 'report.json')))
+plan = json.load(open(os.path.join(d, 'scenario_plan.json')))
+ph = {p['name']: p for p in r['phases']}
+st = {s['name']: s for s in r['user_steps']}
+fails = []
+def check(cond, what):
+    print(('ok   ' if cond else 'FAIL ') + what)
+    if not cond:
+        fails.append(what)
+check(r['status'] == 'completed', f'probe: scenario completed ({r["status"]})')
+info = open(os.path.join(d, 'run_info.txt')).read()
+check(f'vtime_end={plan["run_s"]} ' in info, f'probe: no <seconds>: the run\'s end is the plan\'s run_s ({plan["run_s"]})')
+check(ph['load']['end']['met'] and 'worst router' in ph['load']['end']['detail'],
+      f'probe: worst-router retries condition ({ph["load"]["end"]["detail"]})')
+check(ph['lossy']['end']['met'] and ph['lossy']['end']['detail'].startswith('loss'), f'probe: loss condition ({ph["lossy"]["end"]["detail"]})')
+a = ph['out']['actions'][0]
+check(a['do'] == 'kill' and a['rank_by'] == 'mac.retries' and len(a['chosen']) >= 1 and a['chosen'][0]['value'] is not None
+      and a['rank_window'][1] - a['rank_window'][0] == 60, f'probe: top_fraction by retries chose {a["chosen"]}, window {a["rank_window"]}')
+check(ph['out_on']['actions'][0]['nodes'] == a['nodes'] and ph['out_on']['end']['met'] and st['out']['state'] == 'completed',
+      f'probe: off_then_on switched them back on ({ph["out_on"]["end"]["detail"]}), step {st["out"]["state"]}')
+check(ph['out']['end']['t_s'] - ph['out']['start']['t_s'] >= 20, 'probe: off for at least off_s')
+check(ph['none'].get('skipped') and 'no node selected' in ph['none']['skip_reason'] and st['none']['state'] == 'skipped'
+      and st['back']['state'] == 'skipped', f'probe: pick above with none: skipped ({ph["none"].get("skip_reason")}), its "on" step too')
+q = ph['q']['actions'][0]
+check(len(q['chosen']) == 1 and q['rank_by'] == 'queue.mean', f'probe: top 1 by queue.mean ({q["chosen"]})')
+check(all(p.get('step') is not None and p.get('step_name') and p.get('title') for p in r['phases']), 'probe: phases carry step, step_name, title')
+log = open(os.path.join(d, 'scenario.log')).read()
+check('step 3 out starts' in log and 'step 4 none skipped:' in log and 'step 3 out ends (completed)' in log, 'probe: step lines in scenario.log')
+s = rep['series']
+w = [x for x in s['windows'] if x['offered_pps']]
+check(len(s['windows']) > 30 and w and all(x['power.mean_ma'] for x in w) and any(x['medium.collisions'] is not None for x in w)
+      and any(x['mac.retries'] for x in w), f'report: series.windows ({len(s["windows"])} rows, power, retries, collisions)')
+check(len(s['steps']) >= 4 and set(s['columns']) >= {'power.mean_ma', 'rtt.p95_ms'}, f'report: series.steps ({len(s["steps"])})')
+check(len(rep['plots']) == 2 and rep['plots'][0]['kind'] == 'scatter' and rep['plots'][0]['series'][0]['points']
+      and len(rep['plots'][1]['series']) == 3, 'report: two plots resolved')
+t = {x['node']: x for x in rep['nodes']['table']}
+check(all(x['collisions'] is not None and x['retries'] is not None for x in t.values()) and rep['network']['loss'] is not None
+      and any(x['sent'] for x in t.values()), 'report: per-node retries, collisions, loss')
+m = ph['load']['metrics']
+check(m['worst']['mac.retries']['node'] != 0 and m['per_node'] and m['medium']['collisions'] is not None and m['queues']['retries'],
+      'probe: phase metrics with per_node and worst')
+print('test_scenario probe:', 'FAILED (%d)' % len(fails) if fails else 'PASSED')
+sys.exit(1 if fails else 0)
+EOF2
+[ "${KEEP:-0}" = 1 ] || rm -rf "$OUT/probe" "$OUT/probe.json" "$OUT/probe.out"
+
 # Failures must fail the run: a node command a node refuses, an error inside
 # the driver, the driver killed; and a scenario the validator must refuse.
 check_fail() {  # check_fail <name> <status> <expected status prefix>

@@ -8,7 +8,7 @@ Ready-made **building blocks** expand to phases, so a full study is a few short 
 
 ```bash
 SCENARIO=sim_utils/scenarios/capacity_interference.json POWER=examples/power/efr32fg25-soc.ini TUN=none \
-  sim_utils/vtime/run.sh build-vt $(pwd) runs/sc 8000        # 8000: a cap; the scenario ends the run
+  sim_utils/vtime/run.sh build-vt $(pwd) runs/sc     # no duration: the scenario's own bound (§10); it ends the run
 python3 sim_utils/scenario.py --check  FILE    # errors as JSON {path, message}
 python3 sim_utils/scenario.py --dry    FILE    # expanded phases, upper bound of the virtual duration
 python3 sim_utils/scenario.py --schema         # JSON Schema (titles, descriptions, units, defaults, enums)
@@ -66,11 +66,13 @@ Pieces:
   "name": "Per-hop RTT, capacity, interference, recovery",
   "description": "...",
   "settings": {"poll_s": 5, "drain_s": 10, "load": {...}},
-  "phases": [ PHASE or BLOCK, ... ]
+  "report": {"window_s": 10},
+  "phases": [ PHASE or BLOCK, ... ],
+  "plots": [ PLOT, ... ]
 }
 ```
 
-Only `format` and `phases` are required. The JSON Schema (`--schema`, committed as `docs/scenario.schema.json`) carries every rule a form needs: per field a title, a one-line description, its unit (`x-unit`), its default and, for closed vocabularies, its enumeration; where the default depends on the network or on other fields, an `x-default` object with the rule in words (`text`) and, when a form can compute it, its parts: `value` (a constant that applies only in a given case), `rule` `per_router` (`interval_s`, `max_pps`: one packet per router every `interval_s`, at most `max_pps`), `times_baseline` (`factor` × the rate of the phase named by `field`), `setting` (the scenario setting named `setting`), `by_kind` (`map`: the condition kind's default) or `worse_than` (`up` for the metrics in `up_metrics`, else `down`); mutually exclusive fields as `oneOf`/`not` (`rate_pps`, `interval_s` and `rate_of`; `after_s` or a condition; `value` or `relative_to`; `end` or `repeat`), the fields each kind requires as `if`/`then` (a `metric` condition needs `metric`, a `node_event` needs `event` and `nodes`, `kill` needs `nodes`, ...), each composite rule with a plain-words `x-message`, and the metrics' units and directions (`x-metrics`). Fields starting with `x_` are ignored (free for an editor's own data).
+Only `format` and `phases` are required. Each entry of `phases` is a **step** of the user's plan (a block or a hand-written phase); its `name` (for a block, default the block's) is how later steps refer to it. `report.window_s` (10 s) is the length of a row of the report's time series: the driver samples every node's counters, the medium's counters and the power at that period (requests that are not charged in the power ledger), and `report.py` makes one row per window ([TRAFFIC_AND_REPORT.md](TRAFFIC_AND_REPORT.md) §5.6). `plots` are graphs of those series (§9.1). The JSON Schema (`--schema`, committed as `docs/scenario.schema.json`) carries every rule a form needs: per field a title, a one-line description, its unit (`x-unit`), its default and, for closed vocabularies, its enumeration; where the default depends on the network or on other fields, an `x-default` object with the rule in words (`text`) and, when a form can compute it, its parts: `value` (a constant that applies only in a given case), `rule` `per_router` (`interval_s`, `max_pps`: one packet per router every `interval_s`, at most `max_pps`), `times_baseline` (`factor` × the rate of the phase named by `field`), `setting` (the scenario setting named `setting`), `by_kind` (`map`: the condition kind's default) or `worse_than` (`up` for the metrics in `up_metrics`, else `down`); mutually exclusive fields as `oneOf`/`not` (`rate_pps`, `interval_s` and `rate_of`; `after_s` or a condition; `value` or `relative_to`; `end` or `repeat`), the fields each kind requires as `if`/`then` (a `metric` condition needs `metric`, a `node_event` needs `event` and `nodes`, `kill` needs `nodes`, ...), each composite rule with a plain-words `x-message`, and the metrics' units and directions (`x-metrics`). Fields starting with `x_` are ignored (free for an editor's own data).
 
 | Settings | Default | Meaning |
 | --- | --- | --- |
@@ -129,6 +131,14 @@ A fixed-duration phase measures the packets sent from `start + settle_s` to `end
 | `power.avg_ma` | mA | power: mean over the routers of their average current |
 | `medium.frames_per_s`, `medium.airtime_s_per_s`, `medium.loss_share` | frames/s, s/s, ratio | medium |
 
+| `loss` | ratio | traffic: 1 − `pdr` of the flow (decided with `min_samples` packets, as `pdr`) |
+| `mac.retries` | retries | queues: MAC retransmissions of the unicast frames delivered (the sum of the retry histogram, bin 8 counting 8) |
+| `medium.collisions`, `medium.collision_share` | frames, ratio | medium: receptions lost to a collision (outcomes `interference`, `captured`, `busy`: another frame or an external interferer overlapping), and their share of the frames heard by listening receivers; central medium only |
+
+**Per node** (`x-metrics.*.per_node`; for `over: "worst_node"`, `metrics.worst` and `metrics.per_node` of each phase): `pdr`, `loss`, `rtt.mean_ms`, `rtt.p95_ms`, `rtt.max_ms` (the packets the router originated), `queue.mean_max` (its mean depth), `queue.drops`, `mac.retries`, `mac.retries_per_frame`, `mac.give_up`, `medium.collisions`, `medium.collision_share` (at the router as a receiver), `power.avg_ma`. A router without packets in the window has no `pdr`, `loss` or RTT; a single lost packet gives it a loss of 1, so prefer a window with several packets per router.
+
+Since emu-probe a trailing window is made longer for `min_samples` only for the sampled metrics (`pdr`, `loss`, `rtt`, `latency`); the others use `window_s` as given. The window's `medium` counters are those of the driver's sample at or before its start (before: the previous poll's).
+
 A capacity search also gives `capacity_pps` (for `rate_of` and `relative_to`). Without `op`, a metric condition holds when the value is **worse than** its threshold: `>=` for delays, queues, retries, give-ups, orphans, power and the medium's figures; `<` for `pdr`, `delivered_pps` and `mesh.joined_fraction`.
 
 ### 4.4 Iterations (capacity search)
@@ -149,7 +159,7 @@ A baseline measured before a disruption is not the network's after it: the `capa
 | `formed` | `fraction` (1), `milestone` (`ready`), `stable_s` (0), `nodes` | That share of the running routers (or of `nodes`) has reached the milestone in its current instance and is in the border router's routing table now, and no parent changed anywhere for `stable_s` |
 | `node_event` | `event`, `nodes`, `milestone` (`operational`) | Every selected node had the event since the reference time: `joined` (the milestone), `parent_changed`, `parent_lost`, `restarted` |
 | `repaired` | `e2e` (false) | The last disruption's repair as tracked (§6.2): every repairable router it cut off has a route to the border router again (a parent chain that avoids the failed nodes); with `e2e`, also in the border router's table and an echo received for a packet sent after the disruption |
-| `metric` | `metric`, `op` (worse than, §4.3), `value` or `relative_to` (not both), `per_hop`, `flow`, `window_s` (60), `min_samples` | The metric (§4.3) compared with `value`, or with `relative_to` = `{"phase", "metric" (the same), "factor" (1)}`: an earlier phase's value × factor. `per_hop`: true if it holds at any hop count, each against the same hop count of the earlier phase. `flow`: `up` if running, else the first |
+| `metric` | `metric`, `op` (worse than, §4.3), `value` or `relative_to` (not both), `per_hop`, `flow`, `window_s` (60), `min_samples`, `over` (`mesh`) | The metric (§4.3) compared with `value`, or with `relative_to` = `{"phase", "metric" (the same), "factor" (1)}`: an earlier phase's value × factor. `per_hop`: true if it holds at any hop count, each against the same hop count of the earlier phase. `flow`: `up` if running, else the first. `over: "worst_node"`: the value of the worst router (highest, or lowest for `pdr`), the border router not counted; only for the metrics with a per-node value (§4.3), with `value` (not `relative_to` or `per_hop`); the detail names the router |
 | `all`, `any` | `of` | All, or any, of a list of conditions |
 
 The milestones are those of `analyze.py`: `operational` (Wi-SUN join done) and `ready` (`ARM_NWK_BOOTSTRAP_READY`; not repeated when an interface comes back up in the same program).
@@ -168,6 +178,8 @@ The milestones are those of `analyze.py`: `operational` (Wi-SUN join done) and `
 | `interferer_remove` | `name` | That interferer (or `all`) stops now |
 | `mark` | `text` | A line in the logs and the result |
 
+`kill` and `leave` record the nodes they switched off under the step's name (`select: "step"`). `restart` of nodes that are off starts them (a fresh instance). An action that switches nodes off or on (`kill`, `restart`, `leave`, `cut_links`, `degrade_links`) chooses its nodes at the step's start, before the step's load is set; **when none is chosen, the phase is skipped** (`skipped`, `skip_reason`), with the later parts of the same step, and the step's state is `skipped`.
+
 `label` names the nodes an action picked, for later selections (`{"select": "label"}`), e.g. to restart the router that was killed. `for_s` schedules the undo at that virtual time, whatever phase is running then.
 
 ### 6.1 Node selectors (`select`)
@@ -181,9 +193,24 @@ Resolved from the live topology when the action runs: the driver asks every rout
 | `hop`, `br_children` | `hop` | The routers at that depth (`br_children`: 1) |
 | `ancestor` | `of`, `hop` | The node at that depth on the path of node `of` |
 | `storey`, `area` | `storey`, `box` [x0, y0, x1, y1] (m) | By position (`--positions`: the FLOOR column, else Z / 3.5 m) |
-| `label` | `label` | The nodes an earlier action picked |
+| `step` | `step` | The nodes an earlier step switched off (`kill`, `leave`, the "Switch nodes off" block) |
+| `label` | `label` | Legacy (hidden in the builder): the nodes an earlier action labelled |
 
-Then `pick`: `all` (default), `largest_subtree` or `most_children` (the worst case; `count` of them), `random` (`count`, drawn from the seed), `fraction` (drawn from the seed), `first`. The result records the nodes picked and why ("routers at hop 1, largest subtree (66: 24 below)").
+Then `pick`: `all` (default; `top` when `rank_by` is given), `top` (the `count` highest by `rank_by`), `top_fraction` (the highest `fraction` of the ranked candidates, rounded down, at least one), `above` (every candidate whose `rank_by` value is at least `value`, in its unit), `largest_subtree` or `most_children` (the worst case; `count` of them), `random` (`count`, drawn from the seed), `fraction` (drawn from the seed), `first`. The result records the nodes picked and why ("routers at hop 1, largest subtree (66: 24 below)").
+
+**Ranking** (`rank_by`, with `top`, `top_fraction`, `above`): the candidates, the border router excepted, ordered by a value measured over `rank_window_s` (60) before the step starts, highest first (ties: the lower ID):
+
+| `rank_by` | Unit | Value |
+| --- | --- | --- |
+| `queue.mean` | frames | Mean depth of the node's MAC plus adaptation-layer queues over the window (NET1 counters) |
+| `queue.max` | frames | Highest depth seen in the window: the largest `q_win_max` of the node's NET1 samples in it (each sample's peak since the previous one; samples every `report.window_s`) |
+| `rtt.mean_ms`, `rtt.max_ms` | ms | RTT of the packets the node originated, sent in the window ending `drain_s` before the step |
+| `loss` | ratio | Share of those packets lost (not echoed, or not delivered for a one-way packet) |
+| `mac.retries`, `mac.retries_per_frame` | retries | MAC retransmissions of the node's unicast frames delivered in the window, and per frame |
+| `mac.collisions` | frames | Receptions lost to a collision at the node in the window (the conductor's per-receiver counters, `rxcounters`; central medium) |
+| `subtree`, `children` | nodes | Routers below the node, or whose parent it is, when the step starts |
+
+A node without a value (no packet sent, no sample) is not ranked. The action's record gives `chosen` (`[{node, value}]`, in ranking order), `rank_by`, `rank_unit`, `rank_window` (`[t_from_s, t_to_s]`), `candidates` and `ranked` (how many had a value). The resolution of the window's start is `report.window_s` (the samples), its end exact.
 
 ### 6.2 Disruptions and mesh metrics
 
@@ -207,11 +234,16 @@ The resolution of these times is `poll_s`. The `repaired` condition reads the la
 | Key | Content |
 | --- | --- |
 | `status` | `completed`; `aborted: <reason>` (`on_timeout: "abort"`); `error: <reason>` (the run failed; `traceback` for an unexpected error) |
-| `phases[]` | `name`, `block`, `index`; `start` (`t_s`, `met`, `detail`: why it started, `timeout`, `on_timeout`, `condition`); `actions[]` (`do`, `nodes`, `why`, `affected`, `marginal`, `isolated`, `links`, `result`); `metrics` (per set: `flows` as [TRAFFIC_AND_REPORT.md](TRAFFIC_AND_REPORT.md) §5.1, `queues` with `per_node`, `mesh`, `power` with `per_node`, `medium`); `load`; `end` (`t_s`, `met`, `detail`, `timeout`); `iterations[]` (one per window: `iteration`, `step_tag`, `rate_pps` (nominal), `offered_pps` and `delivered_pps` (measured), `samples`, `interval_s`, `t_s`, `met`, `detail`, `direction`, `confirmation` (0: the step's first window), `metrics`); `capacity` (`capacity_pps` (measured), `capacity_nominal_pps`, `delivered_pps`, `saturated_rate_pps`, `saturated_offered_pps`, `reached`, `searched`, `confirm`, `min_samples`, `baseline`, `detail`); `disruptions[]` (§6.2); `skipped`, `aborted` |
+| `phases[]` | `name`, `block`, `index`, `step`, `step_name`, `title`, `part`, `parts`; `skipped`, `skip_reason`; `start` (`t_s`, `met`, `detail`: why it started, `timeout`, `on_timeout`, `condition`); `actions[]` (`do`, `nodes`, `why`, `affected`, `marginal`, `isolated`, `links`, `result`, `chosen`, `rank_by`, `rank_unit`, `rank_window`, `candidates`, `ranked`); `metrics` (per set: `flows` as [TRAFFIC_AND_REPORT.md](TRAFFIC_AND_REPORT.md) §5.1, `queues` with `per_node` and `retries`, `mesh`, `power` with `per_node`, `medium` with `collisions` and `collision_share`; `per_node`: per node ID `sent`, `lost`, `loss`, `pdr`, `rtt_mean_ms`, `rtt_p95_ms`, `rtt_max_ms`, `retries`, `retries_per_frame`, `uc_frames`, `give_up`, `drops`, `queue_mean`, `queue_max`, `heard`, `collisions`, `collision_share`, `power_ma`, as the sets measured give them; `worst`: per per-node metric `{node, value}`, the border router not counted); `load`; `end` (`t_s`, `met`, `detail`, `timeout`); `iterations[]` (one per window: `iteration`, `step_tag`, `rate_pps` (nominal), `offered_pps` and `delivered_pps` (measured), `samples`, `interval_s`, `t_s`, `met`, `detail`, `direction`, `confirmation` (0: the step's first window), `metrics`); `capacity` (`capacity_pps` (measured), `capacity_nominal_pps`, `delivered_pps`, `saturated_rate_pps`, `saturated_offered_pps`, `reached`, `searched`, `confirm`, `min_samples`, `baseline`, `detail`); `disruptions[]` (§6.2); `skipped`, `aborted` |
 | `steps` | Per load setting (`tag`): `phase`, `iteration`, `t_s`, `rate_pps`, `interval_s`, `flows`, `members`, `payload_b` |
 | `events[]` | `t_s`, `text`: everything the driver did, also in `scenario.log` and `simserver.log` |
 | `labels` | Label → nodes |
-| `summary` | Per phase: start and end times and why, PDR, RTT (`n`, `mean`, `p95`, `max`) overall and per hop count, offered rate, capacity, disruptions, power |
+| `step_off` | Step name → the nodes it switched off |
+| `user_steps[]` | Per step of the file: `step`, `name`, `title`, `use`, `state` (`pending`, `running`, `completed`, `not_met`: a part ended without its end condition (at its cap), `skipped`, `error`), `phases` (names), `t_start_s`, `t_end_s` |
+| `window_s` | The report window (sampling period) |
+| `summary` | Per phase: `step`, `step_name`, `title`, start and end times and why, `skipped`, `skip_reason`, PDR, `loss`, RTT (`n`, `mean`, `p95`, `max`) overall and per hop count, offered rate, capacity, disruptions, power, `retries`, `retries_per_frame`, `collisions`, `worst`, `chosen` and `rank_by` |
+
+`scenario_result.json` is written at every step start and phase end with `status: "running"`, then at the end; `scenario_plan.json` (the dry output) at the start. `series_samples.jsonl`: one line per sample (`t_s`, `tag`, `counters`: the conductor's totals, `rx`: per receiver `[heard, collisions, ok]`), at every `report.window_s`.
 
 With `POWER`, `power_snap.jsonl` holds one line per snapshot (`tag`, `t_us`, per node `[id, charge_uc, mcu_uc, listen_uc, receive_uc, tx_uc, other_uc]`), at every phase's and iteration's bounds.
 
@@ -233,11 +265,12 @@ One command per line on a UNIX stream socket, one answer line each. The first li
 | `intf add <SPEC>` | `ok <name>` | A new interferer from now; a bad SPEC is answered `err <reason>` (the server goes on); the slot of a removed interferer is reused |
 | `intf remove <name\|all>` | `ok <n>` | |
 | `counters` | `ok t_us=.. wakes=.. frames_in=.. frames_out=.. airtime_us=.. ok=.. noise=.. ...` | Totals so far |
+| `rxcounters` | `ok <id>:<heard>:<collisions>:<ok> ...` | Per receiver, totals so far: frames heard while listening, lost to a collision (`interference`, `captured`, `busy`), received; nodes that heard nothing are left out; `ok` alone without the central medium |
 | `power snap <file> <tag>` | `ok` | Appends a snapshot line |
 | `log <text>` | `ok` | `scenario: <text>` in `simserver.log` |
 | `quit` | `bye` | Ends the run (a closed connection without it fails the run) |
 
-`run.sh` with `SCENARIO`: checks the file, starts the server with `--vtime-control` (socket `<SOCK>.ctl`), the programs with `load_control = true` and `stats = true`, then the driver; the driver ends the run (`<seconds>` is a cap). `programs.txt` holds every program's command line, for restarts. A node the scenario stopped does not fail the run.
+`run.sh` with `SCENARIO`: checks the file, starts the server with `--vtime-control` (socket `<SOCK>.ctl`), the programs with `load_control = true` and `stats = true`, then the driver; the driver ends the run (`<seconds>` is a cap, and may be left out: the plan's `run_s`). `programs.txt` holds every program's command line, for restarts. A node the scenario stopped does not fail the run.
 
 ## 9. Building blocks (`use`)
 
@@ -248,8 +281,9 @@ One command per line on a UNIX stream socket, one answer line each. The first li
 | `capacity` | `baseline` (`probe`), `start_rate_pps` (2 × the baseline's), `mul` (1.5), `max_steps` (12), `window_s` (60), `settle_s` (15), `confirm` (2), `rtt_metric` (`rtt.p95_ms`), `rtt_factor` (2), `max_rtt_ms`, `min_pdr` (0.95), `flows`, `payload_b` (64) | Iterations until the RTT reaches `rtt_factor` × the baseline's, the largest RTT `max_rtt_ms`, or the delivery falls below `min_pdr` |
 | `interference` | `spec` (required), `interferer_name` (`jam`), `capacity_phase` (`capacity`), `load_fraction` (0.8), `reference_s` (0: none), `duration_s` (300), `settle_s` (30) | Interferer added; that share of the capacity. With `reference_s`, first a phase `<name>_reference` at the same load without the interferer, measured for `reference_s` after `settle_s` (two phases) |
 | `recovery` | `interferer_name` (`all`; empty: none removed), `baseline` (`probe`), `within` (1.2), `max_s` (600) | Interferer removed, same load; ends when the RTT p95 over 60 s is within that factor of the baseline's. After a loaded interference, give the interference's reference (`<name>_reference`) as `baseline`: the light-load probe's RTT is not reached again at that load |
-| `node_failure` | `nodes` (hop 1, largest subtree), `label` (`failed`), `capacity_phase` (`capacity`; empty: keep the load), `load_fraction` (0.5), `max_s` (600), `e2e` (true) | Kill; ends when repaired |
-| `node_restart` | `label` (`failed`), `capacity_phase` (`capacity`; empty: keep the load), `load_fraction` (0.5), `max_s` (600) | Restart those nodes under that share of the capacity; ends when they are ready (RPL) in their new instance and in the border router's routing table |
+| `node_outage` ("Switch nodes off") | `mode` (`off`, `off_then_on`, `on`), `nodes` (hop 1, largest subtree; modes `off`, `off_then_on`), `off_s` (`off_then_on`), `of_step` (`on`, required), `capacity_phase` (`capacity`; empty: keep the load), `load_fraction` (0.5), `max_s` (600, each part), `e2e` (true) | `off`: switch the nodes off; ends when repaired. `off_then_on`: the same (and at least `off_s`; cap max(`max_s`, `off_s`)), then the phase `<name>_on` switches them back on and ends when they are ready in their new instance and in the border router's routing table. `on`: switch back on the nodes of the earlier step `of_step`; ends when they are back |
+| `node_failure` (legacy, hidden) | `nodes` (hop 1, largest subtree), `label` (`failed`), `capacity_phase` (`capacity`; empty: keep the load), `load_fraction` (0.5), `max_s` (600), `e2e` (true) | Kill; ends when repaired. Use `node_outage` |
+| `node_restart` (legacy, hidden) | `label` (`failed`), `capacity_phase` (`capacity`; empty: keep the load), `load_fraction` (0.5), `max_s` (600) | Restart those nodes under that share of the capacity; ends when they are ready (RPL) in their new instance and in the border router's routing table. Use `node_outage` with `mode: "on"` |
 | `capacity_check` | `capacity_phase` (`capacity`), `start_fraction` (0.5), `baseline` (`self`: its own probe, `<name>_probe`, of `probe_s` 300 s first; or an earlier phase), `mul`, `max_steps` (8), `window_s`, `settle_s`, `confirm`, `rtt_factor`, `min_pdr`, `flows`, `payload_b` | A capacity search from a share of an earlier capacity, against a baseline of the network as it is now (two phases with `baseline: "self"`) |
 
 A block's `name` defaults to the block's; give one to use a block twice. The owner's study, `sim_utils/scenarios/capacity_interference.json`, is five entries (six phases):
@@ -262,11 +296,29 @@ A block's `name` defaults to the block's; give one to use a block twice. The own
 {"use": "recovery", "baseline": "interference_reference", "max_s": 300}
 ```
 
-Examples: `capacity_interference.json` (above), `node_failure.json` (formed, probe, capacity, the busiest hop-1 router killed under 50 % of the capacity, capacity after the repair, the router restarted under 50 % of the capacity until it is back in the border router's routing table), `link_cut_layers.json` (hand-written phases: a steady load from 300 s, every link of a random hop-2 router cut for 120 s, then until the delivery is back to 99 %).
+Examples: `capacity_interference.json` (above), `node_failure.json` (formed, probe, capacity, the busiest hop-1 router switched off under 50 % of the capacity (step `failure`), capacity after the repair, the router switched back on under 50 % of the capacity until it is back in the border router's routing table (step `restart`, `mode: "on"`, `of_step: "failure"`)), `link_cut_layers.json` (hand-written phases: a steady load from 300 s, every link of a random hop-2 router cut for 120 s, then until the delivery is back to 99 %). Each template has default plots (§9.1). The figures of §11 were made with `node_failure` and `node_restart`, which expand exactly as the new blocks there.
+
+### 9.1 Plots
+
+`plots[]`: `x` (a column), `y` (a column or a list, drawn together), `points` (`windows`: a point per report window; `steps`: a point per step, a capacity search giving one per load level), `steps` (only these step names), `kind` (`line` for windows, `scatter` for steps), `title` (default: the y titles against the x title). The columns are those of the report's series, with unit, title and description in the schema's `x-series-columns`: `t_start_s`, `t_end_s`, `t_mid_s`, `step_index`, `offered_pps`, `delivered_pps`, `pdr`, `loss`, `rtt.min_ms`, `rtt.mean_ms`, `rtt.p95_ms`, `rtt.max_ms`, `latency.mean_ms`, `latency.p95_ms`, `mac.retries`, `mac.retries_per_frame`, `medium.collisions`, `medium.collision_share`, `queue.mean_max`, `power.min_ma`, `power.mean_ma`, `power.max_ma`, `power.max_node`, `power.br_ma`, `mesh.joined_fraction`. `report.json` carries them resolved ([TRAFFIC_AND_REPORT.md](TRAFFIC_AND_REPORT.md) §5.7).
 
 ## 10. Validation
 
-`scenario.py --check FILE` prints `{"ok": bool, "errors": [{"path": "/phases/2/load_fraction", "message": "must be more than 0"}]}` and exits 1 on errors. One round reports everything: the schema's rules (types, enumerations, bounds with their units, unknown fields, the fields each kind requires, mutually exclusive fields) and the meaning (unique names; `relative_to` and `rate_of` naming an earlier phase, `capacity_pps` a phase with `repeat`; labels defined before use; `repaired` only after a disruption; interferer `SPEC`s checked key by key with the server's ranges). Paths are JSON Pointers into the file as written: an error inside a block points at the block's own parameter (`/phases/3/capacity_phase`), or at the block's entry with the field named. `--dry FILE` prints the expanded phases (with their block and entry) and `virtual_s_max`, an upper bound of the virtual duration (every wait and cap at its maximum, capacity windows at their longest).
+The meaning also covers the steps: `select: "step"` naming an earlier step that switched nodes off; for `node_outage`, `of_step` naming an earlier step whose nodes are still off (not switched back on, not `off_then_on`), `nodes` not given with mode `on`, `off_s` only with `off_then_on`, `of_step` only with `on`; `rank_by` only with `top`, `top_fraction` or `above`; `over: "worst_node"` only for per-node metrics; plot `steps` naming steps of the file.
+
+`scenario.py --check FILE` prints `{"ok": bool, "errors": [{"path": "/phases/2/load_fraction", "message": "must be more than 0"}]}` and exits 1 on errors. One round reports everything: the schema's rules (types, enumerations, bounds with their units, unknown fields, the fields each kind requires, mutually exclusive fields) and the meaning (unique names; `relative_to` and `rate_of` naming an earlier phase, `capacity_pps` a phase with `repeat`; labels defined before use; `repaired` only after a disruption; interferer `SPEC`s checked key by key with the server's ranges). Paths are JSON Pointers into the file as written: an error inside a block points at the block's own parameter (`/phases/3/capacity_phase`), or at the block's entry with the field named. `--dry FILE` prints the plan, for a visual timeline:
+
+```json
+{"ok": true,
+ "steps": [{"step": 3, "name": "out", "use": "node_outage", "title": "Switch nodes off", "phases": [3, 4], "cap_s": 1200, "t_max_s": 8520}],
+ "phases": [{"index": 3, "name": "out", "title": "Switch off every router, the highest 0.1 of them by mac.retries over the last 60 s",
+             "step": 3, "step_name": "out", "block": "node_outage", "part": 0, "parts": 2,
+             "start": "right after the previous phase", "end": "when the mesh is repaired end to end and after 20 s, at most 600 s",
+             "wait_max_s": 0, "run_max_s": 600, "cap_s": 600, "t_max_s": 7920, "entry": 3, "phase": {...}}],
+ "virtual_s_max": 9750, "run_s": 9810}
+```
+
+`steps[]` follow the file's entries: `step` (index into `phases` of the file), `name`, `use` (the block, null for a hand-written phase), `title` (the block's title, else the name), `phases` (indices into the expanded `phases`), `cap_s`, `t_max_s`. `phases[]`: `index`, `name`, `title` (what it does, in plain words), `step`, `step_name`, `block`, `part`/`parts` (its rank in the block), `start` and `end` (plain words), `wait_max_s` (longest wait for its start: the timeout), `run_max_s` (its fixed duration or cap; for a capacity search, every window at its longest), `cap_s` (both), `t_max_s` (the latest virtual time it can end), `entry` (= `step`, kept for older readers), `phase` (the expanded phase). `virtual_s_max` is the upper bound of the virtual duration (every wait and cap at its maximum; a `formed` start counts its whole timeout) and `run_s` = `virtual_s_max` + 60 s rounded up: `run.sh` uses it as the run's end when `<seconds>` is not given (or `auto`); the driver ends the run when the scenario ends.
 
 ## 11. Demonstrations
 
@@ -312,6 +364,8 @@ The resolution of the repair times is the poll period, 5 s. The runs: `SCENARIO=
 ## 12. Limits
 
 - Decisions and repair times have the resolution of `poll_s` (5 s by default); a phase's bounds and iterations are exact.
+- Since emu-probe the driver samples every `report.window_s` (10 s): more `NET1` lines (about 0.9 kB per node per sample) and more pauses. Conditions that read samples (parent changes, queue windows) see these too, so a scenario run before and after the change can differ slightly; runs stay reproducible from their seed.
+- Per-node collisions count receptions at the node, whoever sent the frame (broadcasts included); the sender's side is not counted.
 - Scale: each poll asks every node for a `NET1` line (about 0.9 kB) and the border router for its table; on a 1000-node network that is about 1 MB of log per poll. The driver's reader takes about 0.3 µs per log line it skips and 8 µs per `NET1` line it parses (measured on dag_simple logs): a 1000-node poll costs the driver about 10 ms plus the lines the nodes wrote since the last pause, which `COMPACT=1` makes about 10 times fewer ([TRAFFIC_AND_REPORT.md](TRAFFIC_AND_REPORT.md) §2.1). These are estimates: a 1000-node scenario was not run.
 - An interferer added at run time applies to frames and sniffs that start after it; one that the medium has already computed (a frame on air) keeps its earlier levels. The medium-log line has the interferer column for the whole run when the run has a control socket and the central medium.
 - `kill` with `POWER`: the node is then charged as asleep with its radio off, not as unpowered; a restarted node continues the same ledger. `--power` stays refused with the static `--vtime-kill`/`--vtime-start` options.

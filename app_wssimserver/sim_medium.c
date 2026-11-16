@@ -1080,12 +1080,24 @@ static double med_ext_now(int node, uint16_t chan, uint64_t now)
     return fsk + noise;
 }
 
+// Per receiver: frames heard while listening (every outcome but
+// not_listening), lost to a collision (interference, captured, busy), and
+// received (ok): the scenario's per-node collisions (control "rxcounters")
+static uint64_t rx_heard[SIM_MAX_NODES], rx_coll[SIM_MAX_NODES], rx_ok[SIM_MAX_NODES];
+
 static void med_log(uint64_t t_end, int src, int dst, uint32_t id, int outcome, float dbm, double sinr,
                     const struct chan_sample *cs, double ext_mw)
 {
     char var[64];
 
     med.outcomes[outcome]++;
+    if (dst >= 0 && dst < SIM_MAX_NODES && outcome != MED_NOT_LISTENING) {
+        rx_heard[dst]++;
+        if (outcome == MED_OK)
+            rx_ok[dst]++;
+        else if (outcome == MED_INTERFERENCE || outcome == MED_CAPTURED || outcome == MED_BUSY)
+            rx_coll[dst]++;
+    }
     if (!med.log)
         return;
     chan_log_columns(var, sizeof(var), cs);
@@ -2513,6 +2525,14 @@ void med_finish(void)
         free(f->msg);
         free(f);
     }
+}
+
+void med_rx_counters(FILE *f)
+{
+    for (int i = 0; i < SIM_MAX_NODES; i++)
+        if (rx_heard[i])
+            fprintf(f, " %d:%llu:%llu:%llu", i, (unsigned long long)rx_heard[i], (unsigned long long)rx_coll[i],
+                    (unsigned long long)rx_ok[i]);
 }
 
 int med_outcomes_str(char *buf, int len)

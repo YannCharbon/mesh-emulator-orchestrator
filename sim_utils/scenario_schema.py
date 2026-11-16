@@ -667,6 +667,8 @@ BLOCKS = {
                                     'in the border router\'s routing table and got an echo for a packet sent after '
                                     'the outage (when it takes part in an echoed flow)', default=True),
         },
+        'rules': [when('mode', 'on', {'required': ['of_step']}, 'mode on needs of_step (the step whose nodes are '
+                       'switched back on)')],
         'expand': _node_outage,
         'map': {'0/actions/0/nodes': 'nodes', '0/load/rate_of': 'capacity_phase'},
     },
@@ -758,6 +760,8 @@ def block_schema():
         kw = {}
         if b.get('legacy'):
             kw = {'x-hidden': True, 'x-legacy': f'kept for older files; the builder uses {b["legacy"]}'}
+        if b.get('rules'):
+            kw['allOf'] = b['rules']
         alts.append(obj(b['title'], b['doc'], props, ['use'] + b.get('required', []), **kw))
     return alts
 
@@ -1265,7 +1269,7 @@ def _sel_words(sel):
     w = f' over the last {sel.get("rank_window_s", 60):g} s' if rb not in (None, 'subtree', 'children') else ''
     extra = {'top': f', the {sel.get("count", 1)} highest by {rb}{w}',
              'top_fraction': f', the highest {sel.get("fraction")} of them by {rb}{w}',
-             'above': f', those with {rb} at least {sel.get("value")} {unit}{w}'.rstrip(),
+             'above': f', those with {rb} at least {sel.get("value")} {"" if unit == "ratio" else unit}{w}',
              'largest_subtree': f', the {sel.get("count", 1)} with the largest subtree',
              'most_children': f', the {sel.get("count", 1)} with the most children',
              'random': f', {sel.get("count", 1)} drawn at random', 'fraction': f', a share {sel.get("fraction")} '

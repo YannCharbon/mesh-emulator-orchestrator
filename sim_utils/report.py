@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run report of a virtual-time run (docs/TRAFFIC_AND_REPORT.md §5).
 
-usage: report.py <run dir> [--json OUT] [--top N] [--pdr-min R] [--latency-factor F] [--tail S] [--quiet]
+usage: report.py <run dir> [--json OUT] [--top N] [--pdr-min R] [--latency-factor F] [--tail S] [--window S] [--quiet]
        report.py --aggregate <run dir>... [--json OUT]
 
 Reads the run directory once (every log streamed once, sim_utils/runlog.py)
@@ -22,6 +22,8 @@ Options:
   --latency-factor F  ... or when its RTT p95 (one-way p95 without echoes) is
                       F x the first step's (default 3)
   --tail S            packets sent in the last S s of the run are not counted (default 20)
+  --window S          length of a row of the time series (report.json "series"; default: the
+                      scenario's report.window_s, else 10)
   --quiet             no summary on stdout
 
 Standard library only.
@@ -30,6 +32,7 @@ import json, os, re, statistics, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runlog  # noqa: E402
+from scenario_schema import SERIES_COLUMNS, REPORT_WINDOW_S  # noqa: E402
 
 FORMAT = 'wssim-report 1'
 OUTCOMES = ['ok', 'noise', 'interference', 'captured', 'below_lock', 'busy', 'not_listening', 'tx_abort', 'left']
@@ -177,7 +180,176 @@ def steps_of(run, info, scen):
     return out
 
 
-def report(d, top=5, pdr_min=0.99, lat_factor=3.0, tail=20.0):
+def read_jsonl(path):
+    out = []
+    try:
+        for line in open(path):
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+    except OSError:
+        pass
+    return out
+
+
+def _at(samples, t):
+    """The latest sample (t, x) at or before t: x, or None."""
+    best = None
+    for tt, x in samples:
+        if tt <= t + 1e-6:
+            best = x
+        else:
+            break
+    return best
+
+
+COLL = ('interference', 'captured', 'busy')
+
+
+class Series:
+    """The rows of report.json "series" (docs/TRAFFIC_AND_REPORT.md §5.6):
+    the main flow's packets, the NET1 samples, the medium's counters and the
+    power snapshots, over any interval."""
+
+    def __init__(self, d, run, routers, end_s):
+        self.run, self.routers, self.end_s = run, set(routers), end_s
+        smp = read_jsonl(os.path.join(d, 'series_samples.jsonl'))
+        self.ctr = sorted((x['t_s'], x) for x in smp)
+        snaps = read_jsonl(os.path.join(d, 'power_snap.jsonl'))
+        self.snaps = sorted(((x['t_us'] / 1e6, x) for x in snaps), key=lambda kv: kv[0])
+        flows = {k[0] for k in run.tx}
+        self.flow = 'up' if 1 in flows or not flows else runlog.FLOW_NAMES.get(min(flows), str(min(flows)))
+
+    def row(self, a, b):
+        r = {k: None for k in SERIES_COLUMNS}
+        r.update(t_start_s=round(a, 3), t_end_s=round(b, 3), t_mid_s=round((a + b) / 2, 3))
+        f = runlog.packet_metrics(self.run, a, b, self.end_s, flows=[self.flow]).get(self.flow)
+        if f and f['sent']:
+            r['offered_pps'] = r4(f['offered_pps'])
+            r['delivered_pps'] = r4(f['delivered_pps'])
+            r['pdr'] = r4(f['pdr'])
+            r['loss'] = r4(1 - f['pdr']) if f['pdr'] is not None else None
+            for k in ('min', 'mean', 'p95', 'max'):
+                r[f'rtt.{k}_ms'] = r4(f['rtt_ms'].get(k), 2)
+            for k in ('mean', 'p95'):
+                r[f'latency.{k}_ms'] = r4(f['latency_ms'].get(k), 2)
+        nd = runlog.net_delta(self.run, a, b)
+        if nd:
+            r['mac.retries'] = sum(x['retries'] for x in nd.values())
+            r['mac.retries_per_frame'] = r4(runlog.retries_per_frame(nd.values()))
+            r['queue.mean_max'] = r4(max(x['mac_q_mean'] + x['al_q_mean'] for x in nd.values()))
+            par = {n: x['parent'] for n, x in nd.items() if n in self.routers}
+            dep = runlog.depths(par)
+            if par:
+                r['mesh.joined_fraction'] = r4(sum(1 for n in par if dep.get(n) is not None) / len(par))
+        ca, cb = _at(self.ctr, a), _at(self.ctr, b)
+        if cb and cb is not ca and cb['t_s'] > a:
+            c0 = (ca or {}).get('counters', {})
+            c1 = cb['counters']
+            heard = sum(c1.get(k, 0) - c0.get(k, 0) for k in OUTCOMES if k != 'not_listening')
+            coll = sum(c1.get(k, 0) - c0.get(k, 0) for k in COLL)
+            r['medium.collisions'] = coll
+            r['medium.collision_share'] = r4(coll / heard) if heard else None
+        sa, sb = _at(self.snaps, a), _at(self.snaps, b)
+        if sb and sb is not sa and sb['t_us'] / 1e6 > a:
+            span = (sb['t_us'] - (sa['t_us'] if sa else 0)) / 1e6
+            old = {x[0]: x[1] for x in (sa['nodes'] if sa else [])}
+            per = {x[0]: (x[1] - old.get(x[0], 0)) / 1e3 / span for x in sb['nodes']} if span > 0 else {}
+            rt = [(v, n) for n, v in per.items() if n != 0]
+            if rt:
+                r['power.min_ma'] = r4(min(rt)[0])
+                r['power.mean_ma'] = r4(sum(v for v, _ in rt) / len(rt))
+                mx = max(rt, key=lambda x: (x[0], -x[1]))
+                r['power.max_ma'], r['power.max_node'] = r4(mx[0]), mx[1]
+            if 0 in per:
+                r['power.br_ma'] = r4(per[0])
+        return r
+
+
+def build_series(d, run, routers, end_s, scen, window_s):
+    sr = Series(d, run, routers, end_s)
+    phases = (scen or {}).get('phases') or []
+
+    def step_at(t):
+        for ph in phases:
+            a = (ph.get('start') or {}).get('t_s')
+            b = (ph.get('end') or {}).get('t_s')
+            if a is not None and b is not None and a <= t < b and not ph.get('skipped'):
+                return ph
+        return None
+    windows = []
+    k = 0
+    while k * window_s < end_s - 1e-9:
+        a, b = k * window_s, min((k + 1) * window_s, end_s)
+        r = sr.row(a, b)
+        ph = step_at((a + b) / 2)
+        r['step_index'] = ph.get('step', ph.get('index')) if ph else None
+        r['step_name'] = ph.get('step_name', ph.get('name')) if ph else None
+        r['phase'] = ph['name'] if ph else None
+        windows.append(r)
+        k += 1
+    steps = []
+    for ph in phases:
+        if ph.get('skipped'):
+            continue
+        base = {'step_index': ph.get('step', ph.get('index')), 'step_name': ph.get('step_name', ph['name']),
+                'phase': ph['name']}
+        if ph.get('iterations'):
+            levels = {}
+            for it in ph['iterations']:
+                m = it.get('metrics') or {}
+                lv = levels.setdefault(it['step_tag'], {'a': m.get('t_from_s', it['t_s']), 'b': m.get('t_to_s'),
+                                                        'rate': it['rate_pps'], 'iteration': it['iteration']})
+                lv['b'] = m.get('t_to_s', lv['b'])
+            for tag, lv in levels.items():
+                if lv['b'] is None or lv['b'] <= lv['a']:
+                    continue
+                r = sr.row(lv['a'], lv['b'])
+                r.update(base, label=f'{ph["name"]} at {lv["rate"]:.4g} packets/s', iteration=lv['iteration'],
+                         rate_pps=r4(lv['rate']), kind='level')
+                steps.append(r)
+            continue
+        m = ph.get('metrics') or {}
+        a = m.get('t_from_s', (ph.get('start') or {}).get('t_s'))
+        b = (ph.get('end') or {}).get('t_s')
+        if a is None or b is None or b <= a:
+            continue
+        r = sr.row(a, b)
+        r.update(base, label=ph['name'], iteration=None, rate_pps=r4(((ph.get('load') or {}).get('rate_pps'))),
+                 kind='phase')
+        steps.append(r)
+    cols = {k: {'unit': v[0], 'title': v[1], 'description': v[2]} for k, v in SERIES_COLUMNS.items()}
+    return {'window_s': window_s, 'flow': sr.flow, 'columns': cols, 'windows': windows, 'steps': steps}
+
+
+def resolve_plots(plots, series):
+    out = []
+    cols = series['columns']
+    for pl in plots or []:
+        ys = pl['y'] if isinstance(pl['y'], list) else [pl['y']]
+        pts = pl.get('points', 'windows')
+        rows = series.get(pts) or []
+        if pl.get('steps'):
+            rows = [r for r in rows if r.get('step_name') in pl['steps']]
+        kind = pl.get('kind', 'line' if pts == 'windows' else 'scatter')
+        ser = []
+        for y in ys:
+            p = [(r[pl['x']], r[y], r.get('label') or r.get('step_name')) for r in rows
+                 if r.get(pl['x']) is not None and r.get(y) is not None]
+            if kind == 'line':
+                p.sort(key=lambda x: x[0])
+            ser.append({'column': y, 'title': cols[y]['title'], 'unit': cols[y]['unit'],
+                        'points': [[x, v] for x, v, _ in p], 'labels': [lb for _, _, lb in p]})
+        title = pl.get('title') or (', '.join(cols[y]['title'] for y in ys) + ' against ' + cols[pl['x']]['title'])
+        out.append({'title': title, 'x': {'column': pl['x'], 'title': cols[pl['x']]['title'],
+                                         'unit': cols[pl['x']]['unit']},
+                    'y': [{'column': y, 'title': cols[y]['title'], 'unit': cols[y]['unit']} for y in ys],
+                    'points': pts, 'kind': kind, 'steps': pl.get('steps'), 'series': ser})
+    return out
+
+
+def report(d, top=5, pdr_min=0.99, lat_factor=3.0, tail=20.0, window_s=None):
     info, info_txt = read_info(d)
     run = runlog.Run(d)
     run.update()
@@ -285,6 +457,9 @@ def report(d, top=5, pdr_min=0.99, lat_factor=3.0, tail=20.0):
     # ---- bottlenecks: counters over the load period (or the whole run)
     a = t_first if t_first is not None else 0
     nd = runlog.net_delta(run, a, end_s)
+    npk = runlog.node_packets(run, a, t_last if t_first is not None else end_s, end_s)
+    ctr = sorted((x['t_s'], x) for x in read_jsonl(os.path.join(d, 'series_samples.jsonl')))
+    rx0, rx1 = (_at(ctr, a) or {}).get('rx', {}), (ctr[-1][1].get('rx', {}) if ctr else None)
     table = []
     for n, x in sorted(nd.items()):
         row = {'node': n, 'hops': dep.get(n) if n else 0, 'children': len(ch.get(n, [])),
@@ -297,7 +472,14 @@ def report(d, top=5, pdr_min=0.99, lat_factor=3.0, tail=20.0):
                'sock_tx_fail': x['sock_tx_fail'], 'retry_attempts': x['mac_retry_attempts'],
                'cca_attempts': x['mac_cca_att'], 'cca_fail': x['mac_cca_fail'], 'rx': x['mac_rx'],
                'parent_changes': x['parent_changes'], 'parent_tx_fail': x['parent_tx_fail'],
-               'no_route': x['no_route'], 'control_messages': {k: x['ctl_' + k] for k in ('dis', 'dio', 'dao')}}
+               'no_route': x['no_route'], 'control_messages': {k: x['ctl_' + k] for k in ('dis', 'dio', 'dao')},
+               'retries': x['retries'], 'heard': None, 'collisions': None, 'collision_share': None,
+               'sent': npk.get(n, {}).get('sent'), 'lost': npk.get(n, {}).get('lost'),
+               'loss': r4(npk.get(n, {}).get('loss'))}
+        if rx1 is not None:
+            h1, c1, _ = rx1.get(str(n), (0, 0, 0))
+            h0, c0, _ = rx0.get(str(n), (0, 0, 0))
+            row.update(heard=h1 - h0, collisions=c1 - c0, collision_share=r4((c1 - c0) / (h1 - h0)) if h1 > h0 else None)
         row['score'] = r4(x['mac_q_mean'] + x['al_q_mean'] + 0.1 * x['red_drop'] / max(1, (end_s - a) / 60)
                           + 0.01 * x['give_up'])
         table.append(row)
@@ -331,13 +513,31 @@ def report(d, top=5, pdr_min=0.99, lat_factor=3.0, tail=20.0):
                       'retries_per_frame': r4(runlog.retries_per_frame(nd.values())),
                       'give_up': sum(r['give_up'] for r in table), 'sock_tx_fail': sum(r['sock_tx_fail'] for r in table),
                       'queue_drops': sum(r['queue_drops'] for r in table),
+                      'retries': sum(r['retries'] for r in table),
+                      'collisions': sum(r['collisions'] for r in table) if rx1 is not None else None,
+                      'loss': r4(sum(r['lost'] or 0 for r in table) / sum(r['sent'] or 0 for r in table))
+                      if sum(r['sent'] or 0 for r in table) else None,
                       'parent_changes': sum(r['parent_changes'] for r in table),
                       'control_messages': {k: sum(r['control_messages'][k] for r in table) for k in ('dis', 'dio', 'dao')}}
     rep['medium'] = srv
     rep['power'] = power(d)
     if scen:
         rep['scenario'] = {'name': scen.get('scenario'), 'status': scen.get('status'), 'summary': scen.get('summary'),
-                           'phases': scen.get('phases'), 'events': scen.get('events'), 'labels': scen.get('labels')}
+                           'phases': scen.get('phases'), 'events': scen.get('events'), 'labels': scen.get('labels'),
+                           'user_steps': scen.get('user_steps')}
+    # ---- time series and plots
+    doc = {}
+    try:
+        doc = json.load(open(os.path.join(d, 'scenario.json')))
+    except (OSError, ValueError):
+        pass
+    if window_s is None:
+        window_s = (doc.get('report') or {}).get('window_s', REPORT_WINDOW_S)
+    rep['series'] = None
+    rep['plots'] = []
+    if traffic is not None or scen or os.path.exists(os.path.join(d, 'power_snap.jsonl')):
+        rep['series'] = build_series(d, run, routers, end_s, scen, window_s)
+        rep['plots'] = resolve_plots(doc.get('plots'), rep['series'])
     return rep
 
 
@@ -502,7 +702,7 @@ def aggregate(dirs):
 
 
 def main(argv):
-    args, opts = [], {'--top': '5', '--pdr-min': '0.99', '--latency-factor': '3', '--tail': '20'}
+    args, opts = [], {'--top': '5', '--pdr-min': '0.99', '--latency-factor': '3', '--tail': '20', '--window': None}
     it = iter(argv)
     quiet = agg = False
     out = None
@@ -532,7 +732,7 @@ def main(argv):
             print(js)
         return 0
     rep = report(args[0], int(opts['--top']), float(opts['--pdr-min']), float(opts['--latency-factor']),
-                 float(opts['--tail']))
+                 float(opts['--tail']), float(opts['--window']) if opts.get('--window') else None)
     out = out or os.path.join(args[0], 'report.json')
     with open(out, 'w') as f:
         json.dump(rep, f, indent=1)

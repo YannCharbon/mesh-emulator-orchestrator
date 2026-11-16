@@ -111,6 +111,7 @@ LOAD1 echo <flow> <seq> <src> <dst> <len> <step> <t_tx_us> <t_peer_rx_us> <t_rx_
 | `rpl.parent_tx_fail`, `local_repair`, `global_repair`, `etx_parent` | RPL counters, ETX of the parent |
 | `ws.routing_cost`, `rsl_in_dbm`, `rsl_out_dbm`, `join_state` | Wi-SUN state (routers) |
 | `ws.pas_tx`, `pa_tx`, `pcs_tx`, `pc_tx`, `nbr_add`, `nbr_remove` | Wi-SUN discovery messages sent, neighbours added and removed |
+| `q_win_max` | Highest MAC plus adaptation-layer queue depth since the previous `NET1` line (then reset): a window's peak (frames) |
 | `ctl.dis`, `ctl.dio`, `ctl.dao` | RPL control messages sent: every trickle DIO, the DIS of the bootstrap and of the parent search, every DAO (unicast DIOs answering a DIS are not counted) |
 | `app.<flow>` | `tx`, `tx_err`, `skip`, `rx`, `rx_bytes`, `echo_tx`, `echo_rx`; `app.sock`: the socket's `tx_done`, `tx_fail`, `no_route` events |
 
@@ -120,7 +121,7 @@ In the split programs (`wsbrd`, `wsnode` with `wshwsim`) the MAC runs in `wshwsi
 
 ## 5. `report.json` (format `wssim-report 1`)
 
-`python3 sim_utils/report.py <run dir> [--json OUT] [--top N] [--pdr-min R] [--latency-factor F] [--tail S] [--quiet]`, run by `run.sh` at the end (§2.1). It streams every log once: 4.4 s for a 150-node, 1955-s run with 1.7 GB of logs. Times are virtual seconds since the start of the run unless the name says otherwise; `null` when a value does not exist.
+`python3 sim_utils/report.py <run dir> [--json OUT] [--top N] [--pdr-min R] [--latency-factor F] [--tail S] [--window S] [--quiet]`, run by `run.sh` at the end (§2.1). It streams every log once: 4.4 s for a 150-node, 1955-s run with 1.7 GB of logs. Times are virtual seconds since the start of the run unless the name says otherwise; `null` when a value does not exist.
 
 | Key | Content |
 | --- | --- |
@@ -129,11 +130,13 @@ In the split programs (`wsbrd`, `wsnode` with `wshwsim`) the MAC runs in `wshwsi
 | `topology` | At the end: `nodes[]` with `node`, `parent`, `hops`, `rank`, `dag_rank`, `children`, `subtree` (routers below), `rssi_to_parent_dbm` (from `topology.txt` when the link is given there), `rsl_in_dbm`/`rsl_out_dbm` (the stack's averages), `in_br_table`, `position` (`[x, y, z, floor]` with `--positions`); `hops_histogram`, `unreachable`, `max_hops`, `max_children`, `br_table_size`, `br_table_t_s`, `source` (routers' `NET1` parents, else the border router's table) |
 | `join` | `nodes[]`: per router the first time of each milestone (`parent`, `auth_ok`, `operational`, `ready`, as `analyze.py`) and its number of `instances`; `ready`, `of`, `ready_median_s`, `last_ready_s`, `operational` |
 | `traffic` | `null` without load. `window_s` (first send to the end minus `tail_s`), `flows.<flow>` (§5.1, the whole load period: its tables by hop count mix every load step), `skipped`; with a ramp or a scenario `steps[]` (§5.2), `saturation` (§5.3) and `light_load` (the first step's flows with their tables by hop count: the RTT per hop without load); `queue_warning` (§6.1) |
-| `nodes` | `table[]`: per node over the load period: `hops`, `children`, `subtree`, `mac_q_mean`, `al_q_mean` (mean depths, frames), `mac_q_peak`, `al_q_peak`, `queue_drops`, `mac_tx`, `uc_frames` (unicast frames confirmed), `uc_retry_hist`, `retries_per_frame` (per unicast frame delivered), `give_up`, `give_up_by_reason`, `sock_tx_fail` (the load socket's TX failures), `retry_attempts`, `cca_attempts`, `cca_fail`, `rx`, `parent_changes`, `parent_tx_fail`, `no_route`, `control_messages`, `score`, `reasons[]`; `top_bottlenecks[]` (`node`, `score`, `reasons`); `score` (its definition) |
-| `network` | Totals: `mac_frames`, `mac_unicast_frames`, `retries_per_frame`, `give_up`, `sock_tx_fail`, `queue_drops`, `parent_changes`, `control_messages` |
+| `nodes` | `table[]`: per node over the load period: `hops`, `children`, `subtree`, `mac_q_mean`, `al_q_mean` (mean depths, frames), `mac_q_peak`, `al_q_peak`, `queue_drops`, `mac_tx`, `uc_frames` (unicast frames confirmed), `uc_retry_hist`, `retries_per_frame` (per unicast frame delivered), `give_up`, `give_up_by_reason`, `sock_tx_fail` (the load socket's TX failures), `retry_attempts`, `cca_attempts`, `cca_fail`, `rx`, `parent_changes`, `parent_tx_fail`, `no_route`, `control_messages`, `score`, `reasons[]`; `retries` (MAC retransmissions of its unicast frames delivered), `heard`, `collisions`, `collision_share` (receptions while listening, and those lost to a collision, at the node as a receiver, from the scenario's samples: `null` without a scenario or without the central medium), `sent`, `lost`, `loss` (the packets it originated in the load period, send errors left out; lost: not echoed, or not delivered for one-way packets); `top_bottlenecks[]` (`node`, `score`, `reasons`); `score` (its definition) |
+| `network` | Totals: `mac_frames`, `mac_unicast_frames`, `retries_per_frame`, `retries`, `give_up`, `sock_tx_fail`, `queue_drops`, `parent_changes`, `control_messages`, `collisions` (null without samples), `loss` (lost / sent over the routers' packets) |
 | `medium` | From `simserver.log`: `outcomes` (per receiver: `ok`, `noise`, `interference`, ...; [MEDIUM.md](MEDIUM.md) §7), `loss_share` (lost / heard while listening), `collision_share` ((interference + captured + busy) / heard), `frames_sent`, `frames_delivered`, `wakes`, `reached_s`, `wall_s`, `preset`, `cca_queries`, `cca_with_frame`, `end_reason` |
 | `power` | `null` without `POWER`. `nodes[]`: `node`, `avg_current_ma`, `charge_uc`, `energy_mj`, `time_share` (MCU active, radio listen, receive, TX), `charge_share` (per MCU and radio state), `battery_life_years` (with `POWER_CELL`); `totals`: `routers_mean_ma`, `routers_max_ma`, `network_charge_c`; `run_time_s`, `profiles` |
-| `scenario` | With `SCENARIO`: `name`, `status`, `summary`, `phases`, `events`, `labels` ([SCENARIOS.md](SCENARIOS.md) §7) |
+| `scenario` | With `SCENARIO`: `name`, `status`, `summary`, `phases`, `events`, `labels`, `user_steps` ([SCENARIOS.md](SCENARIOS.md) §7) |
+| `series` | Time series for graphs (§5.6); `null` for a run without load, scenario or power snapshots |
+| `plots` | The scenario's plots, resolved (§5.7); `[]` without |
 
 ### 5.1 A flow's figures
 
@@ -156,6 +159,32 @@ The per-node counters are the change between the node's NET1 samples at the star
 ### 5.5 Several runs
 
 `report.py --aggregate <run>... [--json OUT]` (format `wssim-report-aggregate 1`): per figure the `n`, `median`, `min` and `max` over the runs (their `report.json`, made if missing): join times, `max_hops`, retries per frame, queue drops, per flow `pdr`, `rtt_mean_ms`, `rtt_p95_ms`, `rtt_mean_ms_by_hops`, the ramp's capacity, the scenarios' capacities, the routers' mean current.
+
+### 5.6 Series
+
+`series`: `window_s` (`--window`, else the scenario's `report.window_s`, else 10), `flow` (the main flow: `up` if the run has it, else the lowest flow), `columns` (per column: `unit`, `title`, `description`; the same as the scenario schema's `x-series-columns`), `windows[]` (one row per window from 0 to the end of the run) and `steps[]` (one row per scenario phase that ran, measured from its measured start (after `settle_s`) to its end; a capacity search gives one row per load level, from its first window's start to its last window's end). Every row has every column (null when not measured):
+
+| Column | Unit | Meaning |
+| --- | --- | --- |
+| `t_start_s`, `t_end_s`, `t_mid_s` | s | The interval (virtual time) |
+| `step_index` | | The scenario step (index into the file's `phases`) running at the window's middle, or the row's step |
+| `offered_pps`, `delivered_pps` | packets/s | Main flow, packets sent in the interval, whole network |
+| `pdr`, `loss` | ratio | Main flow: delivered (echoed) / sent, and 1 − pdr |
+| `rtt.min_ms`, `rtt.mean_ms`, `rtt.p95_ms`, `rtt.max_ms` | ms | Main flow's RTT |
+| `latency.mean_ms`, `latency.p95_ms` | ms | Main flow's one-way delay |
+| `mac.retries`, `mac.retries_per_frame` | retries | MAC retransmissions of unicast frames delivered, all nodes, and per frame (NET1 samples at the bounds) |
+| `medium.collisions`, `medium.collision_share` | frames, ratio | Receptions lost to a collision, all receivers, and their share of the frames heard (scenario samples; central medium) |
+| `queue.mean_max` | frames | Highest mean queue depth of a node |
+| `power.min_ma`, `power.mean_ma`, `power.max_ma` | mA | Routers' average current in the interval: lowest, mean, highest (power snapshots; needs `POWER` and a scenario) |
+| `power.max_node` | | The router with the highest current |
+| `power.br_ma` | mA | The border router's average current |
+| `mesh.joined_fraction` | ratio | Routers with a route to the border router at the end (their latest NET1 parent) |
+
+Besides the columns, a row has `step_name` and `phase` (strings, null outside a step), and a `steps[]` row also `label` (the phase, and the rate of a load level), `iteration` (a capacity level's first window), `rate_pps` (nominal), `kind` (`phase` or `level`). The sources are sampled by the scenario driver every `window_s` (`series_samples.jsonl`, `power_snap.jsonl`, `NET1` lines asked without charge): a run without a scenario has the packet columns, and the NET1 ones at the resolution of `STATS_PERIOD`, but no medium or power columns. The bounds of a step row use the latest samples at or before them: the driver samples at every phase bound with power (snapshots) and at every window.
+
+### 5.7 Plots
+
+`plots[]`, from the scenario's `plots` ([SCENARIOS.md](SCENARIOS.md) §9.1): `title`, `x` and `y[]` (`{column, title, unit}`), `points` (`windows` or `steps`), `kind` (`line`: points sorted by x; `scatter`), `steps` (the filter, or null), `series[]`: per y column `{column, title, unit, points: [[x, y], ...], labels: [...]}` (a label per point: the step row's label or the window's step name). Rows where x or y is null are left out.
 
 ## 6. Demonstration (dag_simple, 15 nodes, load ramp)
 
