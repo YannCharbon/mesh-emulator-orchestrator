@@ -161,6 +161,28 @@ def test_runlog_incremental(scratch):
           'runlog: a restarted instance')
 
 
+def test_restart_counters(scratch):
+    """A node restarted during the interval: its counters start again from 0 in the new instance (node4.r1.log). The
+    change over [10, 60] s is the first instance's from 10 s to its last sample (40 s) plus the second's from 0 to 60 s:
+    never negative."""
+    d = os.path.join(scratch, 'restart')
+    os.makedirs(d)
+    open(os.path.join(d, 't0'), 'w').write(f'{T0}\n')
+    open(os.path.join(d, 'node4.log'), 'w').write(
+        net1(4, 10_000_000, 0, q_int_al=1_000_000, tx=100) + net1(4, 40_000_000, 0, q_int_al=31_000_000, tx=400, final=True))
+    open(os.path.join(d, 'node4.r1.log'), 'w').write(
+        line(45_000_000, 'ns_port_sim: started at 45.000000 s of virtual time')
+        + net1(4, 50_000_000, 0, tx=0) + net1(4, 60_000_000, 0, q_int_al=10_000_000, tx=50))
+    r = runlog.Run(d)
+    r.update()
+    nd = runlog.net_delta(r, 10, 60)[4]
+    check(nd['mac_tx'] == 300 + 50, f'restart: frames of both instances, 350 ({nd["mac_tx"]})')
+    check(nd['uc_frames'] == 350 and nd['instances'] == 2, f'restart: unicast frames 350 over 2 instances ({nd["uc_frames"]})')
+    check(near(nd['al_q_mean'], (30 + 10) / 50, 1e-6), f'restart: mean queue over the interval 0.8 ({nd["al_q_mean"]})')
+    nd = runlog.net_delta(r, 50, 60)[4]
+    check(nd['mac_tx'] == 50 and nd['instances'] == 1, f'restart: an interval in the second instance only, 50 ({nd["mac_tx"]})')
+
+
 def errors_of(doc):
     return scenario.check(doc)
 
@@ -211,6 +233,7 @@ def main():
     os.makedirs(scratch)
     test_report(scratch)
     test_runlog_incremental(scratch)
+    test_restart_counters(scratch)
     test_validator()
     shutil.rmtree(scratch, ignore_errors=True)
     print('test_report:', f'FAILED ({len(FAILS)})' if FAILS else 'PASSED')

@@ -151,6 +151,8 @@ Per flow, a step is **saturated** when its delivery ratio is below `--pdr-min` (
 
 `score` = the node's mean queue depth over the load period (adaptation layer plus MAC, frames) + 0.1 × its queue drops per minute + 0.01 × its unicast frames given up. `reasons` lists what applies: a mean queue of 0.5 frames or more, queue drops, 0.3 or more retries per unicast frame, unicast frames given up by the MAC, more than 5 % channel-access failures, the routers below it, and for node 0 that every packet of the network goes through it.
 
+The per-node counters are the change between the node's NET1 samples at the start and the end of the period. A node restarted during the period (`node<i>.r<k>.log`, a scenario's `restart` or a `RESTART` of `run.sh`) starts its counters again from 0: its change is the sum over its instances, each from its own reference (its sample at the start of the period for the instance then running, 0 for a later one) to its last sample; its peaks are the highest of its instances'. The network totals add these per-node changes.
+
 ### 5.5 Several runs
 
 `report.py --aggregate <run>... [--json OUT]` (format `wssim-report-aggregate 1`): per figure the `n`, `median`, `min` and `max` over the runs (their `report.json`, made if missing): join times, `max_hops`, retries per frame, queue drops, per flow `pdr`, `rtt_mean_ms`, `rtt_p95_ms`, `rtt_mean_ms_by_hops`, the ramp's capacity, the scenarios' capacities, the routers' mean current.
