@@ -14,5 +14,10 @@
     {"name": "after", "start": {"is": "elapsed", "s": 0},
      "measure": {"sets": ["traffic", "queues", "mesh"]},
      "end": {"is": "all", "of": [{"is": "elapsed", "s": 120}, {"is": "metric", "metric": "pdr", "op": ">=", "value": 0.99, "window_s": 60}], "max_s": 400}}
+  ],
+  "plots": [
+    {"title": "Delivery ratio over time", "x": "t_mid_s", "y": "pdr"},
+    {"title": "RTT over time (mean, p95)", "x": "t_mid_s", "y": ["rtt.mean_ms", "rtt.p95_ms"]},
+    {"title": "MAC retries and collisions over time", "x": "t_mid_s", "y": ["mac.retries", "medium.collisions"]}
   ]
 }

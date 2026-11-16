@@ -52,8 +52,86 @@ METRICS = {
                                'medium', 'high'),
     'medium.loss_share': ('ratio', 'Frames lost at receivers that were listening, over those heard (central medium)',
                           'medium', 'high'),
+    'loss': ('ratio', 'Share of the application packets lost in the window: 1 - pdr (the flow\'s packets sent and '
+             'not delivered, or not echoed for an echoed flow)', 'traffic', 'high'),
+    'mac.retries': ('retries', 'MAC retransmissions of the unicast frames delivered in the window (the sum over the '
+                    'frames of their retries), all nodes', 'queues', 'high'),
+    'medium.collisions': ('frames', 'Frame receptions lost to a collision in the window: another frame or an '
+                          'external interferer overlapping it (outcomes interference, captured, busy), all receivers '
+                          '(central medium)', 'medium', 'high'),
+    'medium.collision_share': ('ratio', 'Frame receptions lost to a collision over the frames heard by listening '
+                               'receivers (central medium)', 'medium', 'high'),
 }
-SAMPLED = ('pdr', 'rtt.', 'latency.')     # metrics that need min_samples packets
+# The metrics that also exist per node, for "over": "worst_node" (the border
+# router is not counted): name -> what the per-node value is
+PER_NODE = {
+    'pdr': 'the delivery ratio of the packets the router originated',
+    'loss': 'the share of the packets the router originated that were lost',
+    'rtt.mean_ms': 'the mean RTT of the packets the router originated',
+    'rtt.p95_ms': 'the 95th percentile RTT of the packets the router originated',
+    'rtt.max_ms': 'the largest RTT of the packets the router originated',
+    'queue.mean_max': 'the router\'s mean queue depth (MAC and adaptation layer)',
+    'queue.drops': 'the packets the router\'s full queue dropped',
+    'mac.retries': 'the MAC retransmissions of the router\'s unicast frames delivered',
+    'mac.retries_per_frame': 'the router\'s MAC retries per unicast frame delivered',
+    'mac.give_up': 'the unicast frames the router\'s MAC gave up',
+    'medium.collisions': 'the frame receptions lost to a collision at the router',
+    'medium.collision_share': 'the frame receptions lost to a collision at the router over those it heard',
+    'power.avg_ma': 'the router\'s average current',
+}
+# Node ranking for selectors (rank_by): name -> (unit, description). The
+# highest values are picked; the border router is never ranked.
+RANK_METRICS = {
+    'queue.mean': ('frames', 'Mean queue depth of the node (MAC plus adaptation layer) over the ranking window'),
+    'queue.max': ('frames', 'Highest queue depth of the node (MAC plus adaptation layer) seen in the ranking window '
+                  '(sampled every report window, 10 s by default)'),
+    'rtt.mean_ms': ('ms', 'Mean round-trip time of the packets the node originated in the ranking window'),
+    'rtt.max_ms': ('ms', 'Largest round-trip time of the packets the node originated in the ranking window'),
+    'mac.retries_per_frame': ('retries', 'MAC retries per unicast frame the node delivered in the ranking window'),
+    'mac.retries': ('retries', 'MAC retransmissions of the unicast frames the node delivered in the ranking window'),
+    'mac.collisions': ('frames', 'Frame receptions lost to a collision at the node in the ranking window (another '
+                       'frame or an external interferer overlapping it; central medium)'),
+    'loss': ('ratio', 'Share of the packets the node originated in the ranking window that were lost'),
+    'subtree': ('nodes', 'Routers below the node in the RPL tree when the step starts'),
+    'children': ('nodes', 'Routers whose preferred parent is the node when the step starts'),
+}
+SAMPLED = ('pdr', 'rtt.', 'latency.', 'loss')     # metrics that need min_samples packets
+# The columns of report.json "series" (windows and steps), for plots: name ->
+# (unit, title, description). Every column is a number (null when not measured).
+SERIES_COLUMNS = {
+    't_start_s': ('s', 'Start', 'Start of the window or step (virtual time)'),
+    't_end_s': ('s', 'End', 'End of the window or step (virtual time)'),
+    't_mid_s': ('s', 'Time', 'Middle of the window or step (virtual time)'),
+    'step_index': ('', 'Step', 'Index of the scenario step running (the entry of "phases"); null outside one'),
+    'offered_pps': ('packets/s', 'Offered load', 'Packets sent per second by the main flow (up if running, else '
+                    'the first), whole network'),
+    'delivered_pps': ('packets/s', 'Delivered load', 'Packets delivered (echoed) per second, main flow'),
+    'pdr': ('ratio', 'Delivery ratio', 'Packets delivered (echoed) over packets sent, main flow'),
+    'loss': ('ratio', 'Loss', '1 - delivery ratio, main flow'),
+    'rtt.min_ms': ('ms', 'RTT min', 'Smallest round-trip time, main flow'),
+    'rtt.mean_ms': ('ms', 'RTT mean', 'Mean round-trip time, main flow'),
+    'rtt.p95_ms': ('ms', 'RTT p95', '95th percentile of the round-trip time, main flow'),
+    'rtt.max_ms': ('ms', 'RTT max', 'Largest round-trip time, main flow'),
+    'latency.mean_ms': ('ms', 'Delay mean', 'Mean one-way delay, main flow'),
+    'latency.p95_ms': ('ms', 'Delay p95', '95th percentile of the one-way delay, main flow'),
+    'mac.retries': ('retries', 'MAC retries', 'MAC retransmissions of the unicast frames delivered, all nodes'),
+    'mac.retries_per_frame': ('retries', 'Retries per frame', 'MAC retries per unicast frame delivered, all nodes'),
+    'medium.collisions': ('frames', 'Collisions', 'Frame receptions lost to a collision, all receivers (central '
+                          'medium)'),
+    'medium.collision_share': ('ratio', 'Collision share', 'Receptions lost to a collision over frames heard'),
+    'queue.mean_max': ('frames', 'Highest mean queue', 'Highest mean queue depth of a node (MAC plus adaptation '
+                       'layer)'),
+    'power.min_ma': ('mA', 'Power min', 'Lowest average current of a router (needs POWER)'),
+    'power.mean_ma': ('mA', 'Power mean', 'Mean over the routers of their average current (needs POWER)'),
+    'power.max_ma': ('mA', 'Power max', 'Highest average current of a router (needs POWER)'),
+    'power.max_node': ('', 'Power max node', 'The router with the highest average current'),
+    'power.br_ma': ('mA', 'Border router power', 'Average current of the border router (needs POWER)'),
+    'mesh.joined_fraction': ('ratio', 'Joined', 'Share of the running routers with a route to the border router '
+                             'at the end of the window or step'),
+}
+PLOT_POINTS = ['windows', 'steps']
+PLOT_KINDS = ['line', 'scatter']
+REPORT_WINDOW_S = 10
 MEASURE_SETS = {
     'traffic': 'Delivery, RTT and one-way delay overall and per hop count, offered and delivered throughput',
     'queues': 'Per node: queue depths, drops, MAC retries and give-ups, channel-access failures',
@@ -66,8 +144,10 @@ CONDITION_KINDS = ['immediately', 'time', 'elapsed', 'formed', 'node_event', 're
 NODE_EVENTS = ['joined', 'parent_changed', 'parent_lost', 'restarted']
 DISRUPTIONS = ['kill', 'leave', 'cut_links', 'partition', 'degrade_links']
 ACTIONS = DISRUPTIONS + ['restart', 'interferer_add', 'interferer_remove', 'mark']
-SELECTS = ['id', 'ids', 'all', 'hop', 'br_children', 'ancestor', 'storey', 'area', 'label']
-PICKS = ['all', 'largest_subtree', 'most_children', 'random', 'fraction', 'first']
+SELECTS = ['id', 'ids', 'all', 'hop', 'br_children', 'ancestor', 'storey', 'area', 'step', 'label']
+PICKS = ['all', 'top', 'top_fraction', 'above', 'largest_subtree', 'most_children', 'random', 'fraction', 'first']
+RANKED_PICKS = ['top', 'top_fraction', 'above']
+OUTAGE_MODES = ['off', 'off_then_on', 'on']
 OPS = ['>=', '>', '<=', '<', '==']
 INTERFERER_KEYS = ['chan', 'level', 'at', 'pos', 'eirp', 'pattern', 'hop', 'kind', 'rate', 'pre', 'adj', 'name',
                    'from', 'until']
@@ -107,11 +187,13 @@ def exclusive(fields, message):
             'x-message': message}
 
 
-SELECTOR = obj('Nodes', 'Which nodes an action acts on, resolved from the topology when the action runs', {
-    'select': S('string', 'Selection', 'id: one node; ids: a list; all: every router; hop: the routers at a hop '
+SELECTOR = obj('Nodes', 'Which nodes an action acts on, resolved from the topology when the action runs: the '
+               'candidates (select), then optionally ranked by a measured value (rank_by) and picked', {
+    'select': S('string', 'Candidates', 'id: one node; ids: a list; all: every router; hop: the routers at a hop '
                 'count; br_children: the border router\'s children (hop 1); ancestor: the node at a hop count on the '
-                'path of a given node; storey or area: by position (needs a positions file); label: the nodes an '
-                'earlier action picked', enum=SELECTS),
+                'path of a given node; storey or area: by position (needs a positions file); step: the nodes an '
+                'earlier "Switch nodes off" step switched off', enum=SELECTS, **{'x-hidden-values': ['label']}),
+    'step': S('string', 'Step', 'For select step: the name of an earlier step that switched nodes off'),
     'id': S('integer', 'Node ID', 'For select id (0: the border router)', minimum=0, maximum=4095),
     'ids': S('array', 'Node IDs', 'For select ids', items={'type': 'integer', 'minimum': 0, 'maximum': 4095},
              minItems=1),
@@ -121,14 +203,30 @@ SELECTOR = obj('Nodes', 'Which nodes an action acts on, resolved from the topolo
     'storey': S('integer', 'Storey', 'For select storey: the FLOOR of the positions file (else Z / 3.5 m)'),
     'box': S('array', 'Area', 'For select area: [x0, y0, x1, y1]', 'm', items={'type': 'number'},
              minItems=4, maxItems=4),
-    'label': S('string', 'Label', 'For select label: the label of an earlier action'),
-    'pick': S('string', 'Pick', 'Among the candidates: all; largest_subtree or most_children (the worst case); '
-              'random (drawn from the seed); fraction; first (lowest ID)', enum=PICKS, default='all'),
-    'count': S('integer', 'Count', 'How many to pick (largest_subtree, most_children, random, first)', 'nodes',
+    'label': S('string', 'Label', 'Legacy (select label): the label of an earlier action; use select step',
+               **{'x-hidden': True}),
+    'rank_by': S('string', 'Rank by', 'Rank the candidates by this value, highest first (the border router is '
+                 'never ranked; a node without a value, e.g. no packet sent, is not ranked). Goes with pick top, '
+                 'top_fraction or above', enum=list(RANK_METRICS)),
+    'rank_window_s': S('number', 'Ranking window', 'For rank_by: the value is measured over this long before the '
+                       'step starts', 's', minimum=1, default=60),
+    'pick': S('string', 'Pick', 'Among the candidates: all; top: the count highest by rank_by; top_fraction: the '
+              'highest fraction of them (at least 1); above: every one whose rank_by value is at least value (none: '
+              'the step is skipped); largest_subtree or most_children (the worst case); random (drawn from the '
+              'seed); fraction (drawn from the seed); first (lowest ID)', enum=PICKS,
+              **{'x-default': {'rule': 'if_field', 'field': 'rank_by', 'then': 'top', 'else': 'all',
+                               'text': 'top when rank_by is given, else all'}}),
+    'count': S('integer', 'Count', 'How many to pick (top, largest_subtree, most_children, random, first)', 'nodes',
                minimum=1, default=1),
-    'fraction': S('number', 'Fraction', 'For pick fraction: the share of the candidates, drawn from the seed',
-                  'ratio', minimum=0, maximum=1),
+    'fraction': S('number', 'Fraction', 'For pick top_fraction: the highest share of the candidates (at least one '
+                  'node); for pick fraction: the share drawn from the seed', 'ratio', minimum=0, maximum=1),
+    'value': S('number', 'Threshold', 'For pick above: the rank_by value a node must reach, in that metric\'s unit '
+               '(x-rank-metrics)', **{'x-unit-from': 'rank_by'}),
 }, ['select'], allOf=[
+    when('select', 'step', {'required': ['step']}, 'select step needs step (the name of an earlier step)'),
+    when('pick', 'top', {'required': ['rank_by']}, 'pick top needs rank_by'),
+    when('pick', 'top_fraction', {'required': ['rank_by', 'fraction']}, 'pick top_fraction needs rank_by and fraction'),
+    when('pick', 'above', {'required': ['rank_by', 'value']}, 'pick above needs rank_by and value'),
     when('select', 'id', {'required': ['id']}, 'select id needs id'),
     when('select', 'ids', {'required': ['ids']}, 'select ids needs ids'),
     when('select', 'hop', {'required': ['hop']}, 'select hop needs hop'),
@@ -180,6 +278,9 @@ COND_PROPS = {
                  'count, each against the same hop count of relative_to', default=False),
     'flow': S('string', 'Flow', 'For traffic metrics: the flow (default: up, else the first one running)',
               enum=FLOWS, **{'x-default': {'value': 'up', 'text': 'up, else the first flow running'}}),
+    'over': S('string', 'Over', 'For metric: mesh: the value of the whole network; worst_node: the value of the '
+              'worst router (the border router not counted), for the metrics that exist per node (x-metrics '
+              'per_node)', enum=['mesh', 'worst_node'], default='mesh'),
     'window_s': S('number', 'Window', 'For metric: the trailing window of packets sent', 's', minimum=1, default=60),
     'min_samples': S('integer', 'Samples', 'For pdr, rtt and latency metrics: at least this many packets in the '
                      'window, else the condition is not decided yet (default: settings.min_samples)', 'packets',
@@ -378,6 +479,41 @@ def _capacity_check(p):
     return out
 
 
+def _outage_load(p):
+    if not p.get('capacity_phase', 'capacity'):
+        return {}
+    return {'load': {'rate_of': {'phase': p.get('capacity_phase', 'capacity'), 'metric': 'capacity_pps',
+                                 'factor': p.get('load_fraction', 0.5)}}}
+
+
+def _outage_name(p):
+    return p.get('name') or ('node_outage_on' if p.get('mode') == 'on' else 'node_outage')
+
+
+def _outage_back(name, nodes, max_s):
+    """A phase that switches back on the nodes of step `nodes` and ends when they are back."""
+    sel = {'select': 'step', 'step': nodes}
+    return {'name': name, 'actions': [{'do': 'restart', 'nodes': sel}], 'measure': {'sets': ALL_SETS},
+            'end': {'is': 'formed', 'milestone': 'ready', 'fraction': 1, 'nodes': sel, 'max_s': max_s}}
+
+
+def _node_outage(p):
+    name = _outage_name(p)
+    mode = p.get('mode', 'off')
+    max_s = p.get('max_s', 600)
+    if mode == 'on':
+        return [dict(_outage_back(name, p['of_step'], max_s), **_outage_load(p))]
+    end = {'is': 'repaired', 'e2e': p.get('e2e', True), 'max_s': max_s}
+    if mode == 'off_then_on' and p.get('off_s'):
+        end = {'is': 'all', 'of': [{'is': 'repaired', 'e2e': p.get('e2e', True)}, {'is': 'elapsed', 's': p['off_s']}],
+               'max_s': max(max_s, p['off_s'])}
+    off = dict({'name': name, 'actions': [{'do': 'kill', 'nodes': p.get('nodes', SEL_HOP1_WORST), 'label': name}],
+                'measure': {'sets': ALL_SETS}, 'end': end}, **_outage_load(p))
+    if mode == 'off':
+        return [off]
+    return [off, _outage_back(name + '_on', name, max_s)]
+
+
 P = {   # parameters shared by the blocks
     'flows': LOAD['properties']['flows'],
     'payload_b': LOAD['properties']['payload_b'],
@@ -496,8 +632,47 @@ BLOCKS = {
                     'max_s': p.get('max_s', 600)}}],
         'map': {'0/end/relative_to': 'baseline'},
     },
+    'node_outage': {
+        'title': 'Switch nodes off',
+        'doc': 'Switch nodes off (power off) under a share of the capacity and measure until the mesh is repaired; '
+               'optionally switch them back on afterwards and measure until they are back in the border router\'s '
+               'routing table; or switch back on the nodes an earlier step switched off',
+        'name_default': {'rule': 'by_field', 'field': 'mode',
+                         'map': {'off': 'node_outage', 'off_then_on': 'node_outage', 'on': 'node_outage_on'},
+                         'text': 'node_outage (node_outage_on for mode on)'},
+        'params': {
+            'mode': S('string', 'What to do', 'off: switch the nodes off and keep them off; the step ends when the '
+                      'mesh is repaired. off_then_on: switch them off, wait until the mesh is repaired (and at least '
+                      'off_s), then switch them back on; the step ends when they are back in the border router\'s '
+                      'routing table. on: switch back on the nodes an earlier step (of_step) switched off; the step '
+                      'ends when they are back', enum=OUTAGE_MODES, default='off'),
+            'nodes': {'$ref': '#/$defs/selector', 'title': 'Nodes to switch off',
+                      'description': 'For modes off and off_then_on: which nodes (the border router can be named '
+                                     'with select id 0, but is never picked by a ranking)',
+                      'x-default': {'value': SEL_HOP1_WORST,
+                                    'text': 'the hop-1 router with the largest subtree'}},
+            'off_s': S('number', 'Off for at least', 'For mode off_then_on: keep them off at least this long, even '
+                       'if the mesh is repaired sooner', 's', minimum=0,
+                       **{'x-default': {'text': 'until the mesh is repaired (or the cap)'}}),
+            'of_step': S('string', 'Step that switched them off', 'For mode on: the name of an earlier "Switch nodes '
+                         'off" step (mode off) whose nodes are switched back on'),
+            'capacity_phase': S('string', 'Capacity phase', 'The load is a share of the capacity this earlier '
+                                'capacity search found ("": keep the load in force)', default='capacity'),
+            'load_fraction': S('number', 'Load', 'Share of that capacity offered during the step', 'ratio',
+                               exclusiveMinimum=0, maximum=2, default=0.5),
+            'max_s': S('number', 'Cap', 'Each part (off, back on) ends after this long at most, flagged as not met',
+                       's', minimum=1, default=600),
+            'e2e': dict(COND_PROPS['e2e'], title='Repaired end to end',
+                        description='The mesh counts as repaired only when every router cut off has a route, is '
+                                    'in the border router\'s routing table and got an echo for a packet sent after '
+                                    'the outage (when it takes part in an echoed flow)', default=True),
+        },
+        'expand': _node_outage,
+        'map': {'0/actions/0/nodes': 'nodes', '0/load/rate_of': 'capacity_phase'},
+    },
     'node_failure': {
         'title': 'Node failure',
+        'legacy': 'node_outage with mode off',
         'doc': 'Power off nodes (default: the hop-1 router with the largest subtree) under a share of the capacity, '
                'and measure until the mesh is repaired',
         'params': {
@@ -522,6 +697,7 @@ BLOCKS = {
     },
     'node_restart': {
         'title': 'Node restart',
+        'legacy': 'node_outage with mode on',
         'doc': 'Start the failed nodes again (fresh instances) under a share of the capacity, and measure until they '
                'are ready again and in the border router\'s routing table',
         'params': {
@@ -575,11 +751,42 @@ def block_schema():
     alts = []
     for name, b in BLOCKS.items():
         props = {'use': S('string', 'Block', b['doc'], enum=[name]),
-                 'name': S('string', 'Name', 'Phase name (default: the block\'s)',
-                           **{'x-default': {'value': name, 'text': 'the block\'s name'}})}
+                 'name': S('string', 'Name', 'Name of the step, unique; later steps refer to it (default: the '
+                           'block\'s)', **{'x-default': b.get('name_default',
+                                                              {'value': name, 'text': 'the block\'s name'})})}
         props.update(b['params'])
-        alts.append(obj(b['title'], b['doc'], props, ['use'] + b.get('required', [])))
+        kw = {}
+        if b.get('legacy'):
+            kw = {'x-hidden': True, 'x-legacy': f'kept for older files; the builder uses {b["legacy"]}'}
+        alts.append(obj(b['title'], b['doc'], props, ['use'] + b.get('required', []), **kw))
     return alts
+
+
+NUMERIC_COLUMNS = list(SERIES_COLUMNS)
+PLOT = obj('Plot', 'A graph drawn in the run\'s report from report.json "series": one column against another', {
+    'title': S('string', 'Title', 'Shown above the graph',
+               **{'x-default': {'text': 'the y columns\' titles against the x column\'s'}}),
+    'x': S('string', 'X axis', 'A column of the series (x-series-columns)', enum=NUMERIC_COLUMNS),
+    'y': {'title': 'Y axis', 'description': 'A column, or several columns drawn together (e.g. power.min_ma, '
+          'power.mean_ma, power.max_ma)',
+          'oneOf': [{'type': 'string', 'enum': NUMERIC_COLUMNS},
+                    {'type': 'array', 'items': {'type': 'string', 'enum': NUMERIC_COLUMNS}, 'minItems': 1}],
+          'x-message': 'y is a column name or a list of column names'},
+    'points': S('string', 'Points', 'windows: one point per report window (report.window_s, 10 s by default); '
+                'steps: one point per scenario step (a capacity search: one per load level)', enum=PLOT_POINTS,
+                default='windows'),
+    'steps': S('array', 'Steps', 'Only the points of these steps (names); default: every step',
+               items={'type': 'string'}, minItems=1),
+    'kind': S('string', 'Kind', 'line: points joined in x order; scatter: points only', enum=PLOT_KINDS,
+              **{'x-default': {'rule': 'by_field', 'field': 'points', 'map': {'windows': 'line', 'steps': 'scatter'},
+                               'text': 'line for windows, scatter for steps'}}),
+}, ['x', 'y'])
+
+REPORT = obj('Report', 'How the run\'s report is made', {
+    'window_s': S('number', 'Report window', 'Length of a row of the time series (report.json series.windows); '
+                  'the driver also samples the counters and power at this period', 's', minimum=1,
+                  default=REPORT_WINDOW_S),
+}, [])
 
 
 def _refs(x, top=True):
@@ -608,13 +815,19 @@ def schema():
             'name': S('string', 'Name', 'Short name of the scenario'),
             'description': S('string', 'Description', 'What it measures'),
             'settings': SETTINGS,
-            'phases': S('array', 'Phases', 'In order', minItems=1,
+            'report': REPORT,
+            'phases': S('array', 'Steps', 'In order: building blocks or hand-written phases', minItems=1,
                         items={'oneOf': [{'$ref': '#/$defs/phase'}] + [{'$ref': f'#/$defs/block_{n}'} for n in BLOCKS],
                                'x-discriminator': 'use'}),
+            'plots': S('array', 'Plots', 'Graphs of the report, from its time series', items={'$ref': '#/$defs/plot'}),
         },
-        '$defs': dict({'condition': CONDITION, 'phase': PHASE},
+        '$defs': dict({'condition': CONDITION, 'phase': PHASE, 'plot': PLOT},
                       **{f'block_{n}': a for n, a in zip(BLOCKS, block_schema())}),
-        'x-metrics': {k: {'unit': v[0], 'description': v[1], 'set': v[2], 'worse': v[3]} for k, v in METRICS.items()},
+        'x-metrics': {k: {'unit': v[0], 'description': v[1], 'set': v[2], 'worse': v[3],
+                          'per_node': PER_NODE.get(k)} for k, v in METRICS.items()},
+        'x-rank-metrics': {k: {'unit': v[0], 'description': v[1]} for k, v in RANK_METRICS.items()},
+        'x-series-columns': {k: {'unit': v[0], 'title': v[1], 'description': v[2]}
+                             for k, v in SERIES_COLUMNS.items()},
     }
     sch['$defs'] = {k: _refs(v, False) for k, v in sch['$defs'].items()}
     sch['properties'] = _refs(sch['properties'], False)
@@ -724,7 +937,8 @@ class Validator:
 
 def expand(doc):
     """The phases, blocks expanded. Each phase gets x_index (its entry in the
-    file) and, from a block, x_block and x_part (its rank in the block)."""
+    file: the user's step), x_step_name (the step's name) and, from a block,
+    x_block and x_part (its rank in the block)."""
     out = []
     for i, p in enumerate(doc.get('phases', []) if isinstance(doc, dict) else []):
         if isinstance(p, dict) and p.get('use') in BLOCKS:
@@ -735,14 +949,23 @@ def expand(doc):
             for k, q in enumerate(qs):
                 q['x_block'] = p['use']
                 q['x_index'] = i
+                q['x_step_name'] = step_name(p)
                 q['x_part'] = k
                 q['x_parts'] = len(qs)
                 out.append(q)
         elif isinstance(p, dict):
             q = copy.deepcopy(p)
             q['x_index'] = i
+            q['x_step_name'] = p.get('name')
             out.append(q)
     return out
+
+
+def step_name(p):
+    """The name of a user's step (a block entry or a phase)."""
+    if p.get('use') == 'node_outage':
+        return _outage_name(p)
+    return p.get('name') or p.get('use')
 
 
 _NUM = r'-?\d+(\.\d+)?'
@@ -835,8 +1058,11 @@ def _cond_kinds(c):
 
 def _semantic(doc, errs):
     earlier, labels = {}, set()
+    off_steps = set()           # steps that switched nodes off (kill, leave)
     names = set()
     disrupted = False
+
+    in_outage = False
 
     def cond(c, path, here=None):
         if not isinstance(c, dict):
@@ -850,21 +1076,37 @@ def _semantic(doc, errs):
                 errs.append({'path': path + '/relative_to/phase', 'message': f'"{rel.get("phase")}" is not an earlier phase'})
             elif rel.get('metric') == 'capacity_pps' and 'repeat' not in earlier.get(rel['phase'], {}):
                 errs.append({'path': path + '/relative_to/metric', 'message': f'"{rel["phase"]}" is not a capacity search'})
+        if c.get('over') == 'worst_node' and c.get('is') == 'metric' and c.get('metric') not in PER_NODE:
+            errs.append({'path': path + '/over', 'message': f'{c.get("metric")} has no per-node value (per node: '
+                                                            f'{", ".join(PER_NODE)})'})
+        if c.get('over') == 'worst_node' and c.get('per_hop'):
+            errs.append({'path': path + '/per_hop', 'message': 'per_hop does not go with over worst_node'})
+        if c.get('over') == 'worst_node' and c.get('relative_to'):
+            errs.append({'path': path + '/relative_to', 'message': 'over worst_node takes a value, not relative_to'})
         if c.get('per_hop') and not str(c.get('metric', '')).startswith(('rtt.', 'latency.')):
             errs.append({'path': path + '/per_hop', 'message': 'only for rtt and latency metrics'})
         if c.get('is') == 'repaired' and not disrupted:
             errs.append({'path': path, 'message': 'repaired needs a disruption before it (kill, leave, cut_links, '
                                                   'partition or degrade_links in this phase or an earlier one)'})
         if 'nodes' in c:
-            sel(c['nodes'], path + '/nodes')
+            sel(c['nodes'], path + '/nodes', in_outage)
 
-    def sel(s, path):
-        if isinstance(s, dict) and s.get('select') == 'label' and s.get('label') not in labels:
+    def sel(s, path, in_outage=False):
+        if not isinstance(s, dict):
+            return
+        if s.get('select') == 'label' and s.get('label') not in labels:
             errs.append({'path': path + '/label', 'message': f'no earlier action has the label "{s.get("label")}"'})
+        if s.get('select') == 'step' and not in_outage and s.get('step') not in off_steps:
+            errs.append({'path': path + '/step', 'message': f'"{s.get("step")}" is not an earlier step that '
+                                                            'switched nodes off'})
+        if 'rank_by' in s and s.get('pick', 'top') not in RANKED_PICKS:
+            errs.append({'path': path + '/pick', 'message': f'rank_by goes with pick top, top_fraction or above, '
+                                                            f'not {s.get("pick")}'})
 
     for p in expand(doc):
         path = f'/phases/{p["x_index"]}' + (f'#{p["x_part"]}' if p.get('x_block') else '')
         name = p.get('name')
+        in_outage = p.get('x_block') == 'node_outage'
         if name in names:
             errs.append({'path': path + '/name', 'message': f'the name "{name}" is used twice'})
         names.add(name)
@@ -889,9 +1131,11 @@ def _semantic(doc, errs):
                     errs.append({'path': ap + '/spec', 'message': m})
             for f in ('nodes', 'peers', 'a', 'b'):
                 if f in a:
-                    sel(a[f], f'{ap}/{f}')
+                    sel(a[f], f'{ap}/{f}', p.get('x_block') == 'node_outage')
             if a.get('label'):
                 labels.add(a['label'])
+            if a.get('do') in ('kill', 'leave'):
+                off_steps.add(p.get('x_step_name'))
             if a.get('do') in DISRUPTIONS:
                 disrupted = True
         if isinstance(p.get('end'), dict):
@@ -899,6 +1143,58 @@ def _semantic(doc, errs):
         if isinstance(p.get('repeat'), dict):
             cond(p['repeat'].get('until'), path + '/repeat/until', here=None)
         earlier[name] = p
+
+
+def _step_checks(doc, errs):
+    """Checks on the user's steps as written: the "Switch nodes off" blocks
+    (which step they switch back on) and the plots."""
+    phases = doc.get('phases') if isinstance(doc.get('phases'), list) else []
+    steps = []                  # (name, entry) of the steps so far
+    off = {}                    # step name -> 'off' (still off) or 'on' (switched back on)
+    for i, p in enumerate(phases):
+        if not isinstance(p, dict):
+            continue
+        name = step_name(p) if p.get('use') in BLOCKS else p.get('name')
+        if p.get('use') == 'node_outage':
+            mode = p.get('mode', 'off')
+            if mode == 'on':
+                if 'nodes' in p:
+                    errs.append({'path': f'/phases/{i}/nodes', 'message': 'mode on switches back on the nodes of '
+                                 'of_step: nodes is not used'})
+                ref = p.get('of_step')
+                if isinstance(ref, str):
+                    if ref not in off:
+                        errs.append({'path': f'/phases/{i}/of_step', 'message': f'"{ref}" is not an earlier step '
+                                     'that switched nodes off'})
+                    elif off[ref] == 'on':
+                        errs.append({'path': f'/phases/{i}/of_step', 'message': f'the nodes of "{ref}" are already '
+                                     'switched back on'})
+                    else:
+                        off[ref] = 'on'
+            else:
+                if 'of_step' in p:
+                    errs.append({'path': f'/phases/{i}/of_step', 'message': 'of_step is only for mode on'})
+                off[name] = 'on' if mode == 'off_then_on' else 'off'
+            if 'off_s' in p and mode != 'off_then_on':
+                errs.append({'path': f'/phases/{i}/off_s', 'message': 'off_s is only for mode off_then_on'})
+        elif p.get('use') == 'node_failure':
+            off[name] = 'off'
+        elif p.get('use') is None:
+            if any(isinstance(a, dict) and a.get('do') in ('kill', 'leave') for a in p.get('actions') or []):
+                off[name] = 'off'
+            if any(isinstance(a, dict) and a.get('do') == 'restart' and isinstance(a.get('nodes'), dict)
+                   and a['nodes'].get('select') == 'step' and a['nodes'].get('step') in off
+                   for a in p.get('actions') or []):
+                for a in p['actions']:
+                    if isinstance(a, dict) and isinstance(a.get('nodes'), dict) and a['nodes'].get('step') in off:
+                        off[a['nodes']['step']] = 'on'
+        steps.append(name)
+    for j, pl in enumerate(doc.get('plots') or []):
+        if isinstance(pl, dict):
+            for k, st in enumerate(pl.get('steps') or []):
+                if st not in steps:
+                    errs.append({'path': f'/plots/{j}/steps/{k}', 'message': f'"{st}" is not a step of this '
+                                 f'scenario (steps: {", ".join(str(x) for x in steps)})'})
 
 
 def _map_block_errors(doc, errs):
@@ -940,6 +1236,10 @@ def check(doc):
         if not errs:
             sem.append({'path': '', 'message': f'could not be checked further ({type(e).__name__}: {e})'})
     errs += _map_block_errors(doc, sem)
+    try:
+        _step_checks(doc, errs)
+    except (TypeError, AttributeError, KeyError, ValueError):
+        pass
     seen, out = set(), []
     for e in errs:
         key = (e['path'], e['message'])
@@ -949,11 +1249,121 @@ def check(doc):
     return out
 
 
+def _sel_words(sel):
+    if not isinstance(sel, dict):
+        return 'the nodes'
+    k = sel.get('select', 'all')
+    base = {'id': f'node {sel.get("id")}', 'ids': f'nodes {sel.get("ids")}', 'all': 'every router',
+            'hop': f'the routers at hop {sel.get("hop")}', 'br_children': 'the border router\'s children',
+            'ancestor': f'the hop-{sel.get("hop")} router on the path of node {sel.get("of")}',
+            'storey': f'the routers on storey {sel.get("storey")}', 'area': f'the routers in the area {sel.get("box")}',
+            'step': f'the nodes step {sel.get("step")} switched off',
+            'label': f'the nodes labelled {sel.get("label")}'}.get(k, k)
+    pick = sel.get('pick', 'top' if 'rank_by' in sel else 'all')
+    rb = sel.get('rank_by')
+    unit = RANK_METRICS.get(rb, ('',))[0]
+    w = f' over the last {sel.get("rank_window_s", 60):g} s' if rb not in (None, 'subtree', 'children') else ''
+    extra = {'top': f', the {sel.get("count", 1)} highest by {rb}{w}',
+             'top_fraction': f', the highest {sel.get("fraction")} of them by {rb}{w}',
+             'above': f', those with {rb} at least {sel.get("value")} {unit}{w}'.rstrip(),
+             'largest_subtree': f', the {sel.get("count", 1)} with the largest subtree',
+             'most_children': f', the {sel.get("count", 1)} with the most children',
+             'random': f', {sel.get("count", 1)} drawn at random', 'fraction': f', a share {sel.get("fraction")} '
+             'drawn at random', 'first': f', the {sel.get("count", 1)} lowest IDs'}.get(pick, '')
+    return base + extra
+
+
+def cond_words(c, start=True):
+    """A condition in plain words."""
+    if not isinstance(c, dict):
+        return 'right after the previous phase' if start else 'after 60 s'
+    if 'after_s' in c and 'is' not in c:
+        return f'after {c["after_s"]:g} s'
+    k = c.get('is', 'immediately')
+    if k == 'immediately':
+        return 'right after the previous phase' if start else 'at once'
+    if k == 'time':
+        return f'at {c.get("t_s")} s of virtual time'
+    if k == 'elapsed':
+        return f'{c.get("s")} s after the previous phase' if start else f'after {c.get("s")} s'
+    if k == 'formed':
+        who = _sel_words(c['nodes']) if c.get('nodes') else f'{100 * c.get("fraction", 1):g} % of the routers'
+        txt = f'when {who} are {c.get("milestone", "ready")} and in the border router\'s table'
+        if c.get('stable_s'):
+            txt += f', parents stable for {c["stable_s"]:g} s'
+        return txt
+    if k == 'node_event':
+        return f'when {_sel_words(c.get("nodes"))} had the event {c.get("event")}'
+    if k == 'repaired':
+        return 'when the mesh is repaired' + (' end to end' if c.get('e2e') else '')
+    if k == 'metric':
+        m = c.get('metric')
+        unit = METRICS.get(m, ('',))[0]
+        op = c.get('op') or default_op(m)
+        if 'relative_to' in c:
+            r = c['relative_to']
+            thr = f'{r.get("factor", 1):g} x {r.get("metric", m)} of {r.get("phase")}'
+        else:
+            thr = f'{c.get("value")} {"" if unit == "ratio" else unit}'.strip()
+        who = 'of the worst router' if c.get('over') == 'worst_node' else ''
+        return f'when {m} {who} over {c.get("window_s", 60):g} s {op} {thr}'.replace('  ', ' ')
+    if k in ('all', 'any'):
+        return 'when ' + (' and ' if k == 'all' else ' or ').join(cond_words(x, start)[5:] if
+                                                                   cond_words(x, start).startswith('when ')
+                                                                   else cond_words(x, start)
+                                                                   for x in c.get('of', []))
+    return k
+
+
+def phase_title(p):
+    """What a phase does, in plain words."""
+    b = p.get('x_block')
+    acts = []
+    for a in p.get('actions') or []:
+        do = a.get('do')
+        if do == 'kill':
+            acts.append(f'switch off {_sel_words(a.get("nodes"))}')
+        elif do == 'restart':
+            acts.append(f'switch {_sel_words(a.get("nodes"))} back on')
+        elif do == 'interferer_add':
+            acts.append(f'add the interferer {a.get("name") or ""} ({a.get("spec")})'.replace('  ', ' '))
+        elif do == 'interferer_remove':
+            acts.append(f'remove the interferer {a.get("name")}')
+        elif do in ('leave', 'cut_links', 'degrade_links'):
+            acts.append(f'{do.replace("_", " ")}: {_sel_words(a.get("nodes"))}')
+        elif do:
+            acts.append(do)
+    if b == 'formed':
+        return 'Wait for the network to form'
+    if b == 'probe' or (b == 'capacity_check' and p['name'].endswith('_probe')):
+        return 'Light load: RTT, delay and delivery per hop count (baseline)'
+    if 'repeat' in p:
+        return 'Capacity search: raise the load step by step until saturation'
+    if b == 'interference' and not acts:
+        return 'Reference at the same load, without the interferer'
+    load = p.get('load')
+    txt = '; '.join(acts)
+    if isinstance(load, dict) and 'rate_of' in load:
+        r = load['rate_of']
+        txt += (', ' if txt else '') + f'load {100 * r.get("factor", 1):g} % of the {r.get("metric")} of ' \
+                                       f'{r.get("phase")}'
+    elif load == 'off':
+        txt += (', ' if txt else '') + 'load off'
+    elif isinstance(load, dict):
+        txt += (', ' if txt else '') + 'new load'
+    return (txt[:1].upper() + txt[1:]) if txt else 'Measure'
+
+
+DRY_MARGIN_S = 60
+
+
 def dry(doc):
-    """The expanded phases and an upper bound of the virtual duration."""
+    """The expanded phases and an upper bound of the virtual duration
+    (docs/SCENARIOS.md §10): per phase its step, title, start and end in plain
+    words, its cap and its latest end; per step its phases; the total."""
     st = doc.get('settings', {})
-    total, rows = 0.0, []
-    for p in expand(doc):
+    total, rows, steps = 0.0, [], []
+    for k, p in enumerate(expand(doc)):
         start = p.get('start')
         wait = 0.0
         if isinstance(start, dict) and start.get('is') not in (None, 'immediately'):
@@ -964,10 +1374,24 @@ def dry(doc):
             r = p['repeat']
             # a window can grow to 4 x window_s for its samples
             body = r.get('max', 12) * (r.get('settle_s', 15) + 4 * r.get('window_s', 60) + st.get('drain_s', 10))
+            end_words = (f'when {cond_words(r.get("until"), False)[5:]} on {r.get("confirm", 2)} windows in a row, '
+                         f'or after {r.get("max", 12)} windows')
         else:
             e = p.get('end', {'after_s': 60})
             body = e['after_s'] if 'after_s' in e else e.get('max_s', 600)
+            end_words = cond_words(e, False) + ('' if 'after_s' in e else f', at most {body:g} s')
         total += wait + body
-        rows.append({'name': p['name'], 'block': p.get('x_block'), 'entry': p['x_index'], 'wait_max_s': wait,
-                     'run_max_s': body, 'phase': {k: v for k, v in p.items() if not k.startswith('x_')}})
-    return {'ok': True, 'phases': rows, 'virtual_s_max': total}
+        rows.append({'index': k, 'name': p['name'], 'title': phase_title(p), 'step': p['x_index'],
+                     'step_name': p.get('x_step_name'), 'block': p.get('x_block'), 'part': p.get('x_part', 0),
+                     'parts': p.get('x_parts', 1), 'start': cond_words(start, True), 'end': end_words,
+                     'wait_max_s': wait, 'run_max_s': body, 'cap_s': wait + body, 't_max_s': total,
+                     'entry': p['x_index'], 'phase': {q: v for q, v in p.items() if not q.startswith('x_')}})
+        if not steps or steps[-1]['step'] != p['x_index']:
+            b = BLOCKS.get(p.get('x_block'), {})
+            steps.append({'step': p['x_index'], 'name': p.get('x_step_name'), 'use': p.get('x_block'),
+                          'title': b.get('title', p['name']), 'phases': [], 'cap_s': 0.0})
+        steps[-1]['phases'].append(k)
+        steps[-1]['cap_s'] += wait + body
+        steps[-1]['t_max_s'] = total
+    return {'ok': True, 'steps': steps, 'phases': rows, 'virtual_s_max': total,
+            'run_s': int(math.ceil(total + DRY_MARGIN_S))}

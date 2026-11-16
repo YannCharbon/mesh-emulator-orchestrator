@@ -6,8 +6,13 @@
     {"use": "formed", "stable_s": 60},
     {"use": "probe", "duration_s": 300},
     {"use": "capacity", "max_rtt_ms": 5000},
-    {"use": "node_failure", "load_fraction": 0.5, "max_s": 600},
+    {"use": "node_outage", "name": "failure", "mode": "off", "load_fraction": 0.5, "max_s": 600},
     {"use": "capacity_check", "start_fraction": 0.5},
-    {"use": "node_restart", "load_fraction": 0.5, "max_s": 600}
+    {"use": "node_outage", "name": "restart", "mode": "on", "of_step": "failure", "load_fraction": 0.5, "max_s": 600}
+  ],
+  "plots": [
+    {"title": "RTT p95 against the offered load", "x": "offered_pps", "y": "rtt.p95_ms", "points": "steps"},
+    {"title": "Routers' mean current against the offered load", "x": "offered_pps", "y": "power.mean_ma", "points": "steps"},
+    {"title": "Routers' current over time (min, mean, max)", "x": "t_mid_s", "y": ["power.min_ma", "power.mean_ma", "power.max_ma"]}
   ]
 }

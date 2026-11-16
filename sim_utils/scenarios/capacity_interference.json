@@ -8,5 +8,10 @@
     {"use": "capacity", "max_rtt_ms": 5000, "window_s": 60},
     {"use": "interference", "spec": "chan=0-17,level=-75,kind=fsk,pattern=ge:40ms:60ms", "load_fraction": 0.8, "reference_s": 120, "duration_s": 240},
     {"use": "recovery", "baseline": "interference_reference", "max_s": 300}
+  ],
+  "plots": [
+    {"title": "RTT p95 against the offered load", "x": "offered_pps", "y": "rtt.p95_ms", "points": "steps"},
+    {"title": "Routers' mean current against the offered load", "x": "offered_pps", "y": "power.mean_ma", "points": "steps"},
+    {"title": "Routers' current over time (min, mean, max)", "x": "t_mid_s", "y": ["power.min_ma", "power.mean_ma", "power.max_ma"]}
   ]
 }
