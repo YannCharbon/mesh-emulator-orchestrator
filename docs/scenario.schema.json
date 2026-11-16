@@ -55,6 +55,14 @@
      "minimum": 1,
      "default": 100
     },
+    "min_node_samples": {
+     "type": "integer",
+     "title": "Samples per router",
+     "description": "Packets a router needs in a window before its own delivery, loss or RTT counts (for the worst router and for rankings)",
+     "x-unit": "packets",
+     "minimum": 1,
+     "default": 5
+    },
     "parent_min_dbm": {
      "type": "number",
      "title": "Parent threshold",
@@ -208,7 +216,7 @@
     "window_s": {
      "type": "number",
      "title": "Report window",
-     "description": "Length of a row of the time series (report.json series.windows); the driver also samples the counters and power at this period",
+     "description": "The report's time series have one row per window of this length; counters and power are sampled at this period",
      "x-unit": "s",
      "minimum": 1,
      "default": 10
@@ -447,12 +455,16 @@
     "over": {
      "type": "string",
      "title": "Over",
-     "description": "For metric: mesh: the value of the whole network; worst_node: the value of the worst router (the border router not counted), for the metrics that exist per node (x-metrics per_node)",
+     "description": "For a metric: the value of the whole network, or that of the worst router (the border router not counted; only for the metrics that exist per router)",
      "enum": [
       "mesh",
       "worst_node"
      ],
-     "default": "mesh"
+     "default": "mesh",
+     "x-enum-titles": {
+      "mesh": "Whole network",
+      "worst_node": "Worst router"
+     }
     },
     "window_s": {
      "type": "number",
@@ -812,12 +824,16 @@
       "over": {
        "type": "string",
        "title": "Over",
-       "description": "For metric: mesh: the value of the whole network; worst_node: the value of the worst router (the border router not counted), for the metrics that exist per node (x-metrics per_node)",
+       "description": "For a metric: the value of the whole network, or that of the worst router (the border router not counted; only for the metrics that exist per router)",
        "enum": [
         "mesh",
         "worst_node"
        ],
-       "default": "mesh"
+       "default": "mesh",
+       "x-enum-titles": {
+        "mesh": "Whole network",
+        "worst_node": "Worst router"
+       }
       },
       "window_s": {
        "type": "number",
@@ -1390,7 +1406,7 @@
       "sets": {
        "type": "array",
        "title": "Measurements",
-       "description": "Any of: traffic: Delivery, RTT and one-way delay overall and per hop count, offered and delivered throughput; queues: Per node: queue depths, drops, MAC retries and give-ups, channel-access failures; mesh: Topology: parents, depths, orphans, parent changes, RPL control messages; power: Per node: charge and average current in the phase, by state (needs POWER); medium: Frames, airtime and reception outcomes of the radio medium",
+       "description": "Any of: traffic: Delivery, RTT and one-way delay overall and per hop count, offered and delivered throughput; queues: Per node: queue depths, drops, MAC retries and give-ups, channel-access failures; mesh: Topology: parents, depths, orphans, parent changes, RPL control messages; power: Per node: charge and average current in the phase, by state (needs power recording); medium: Frames, airtime and reception outcomes of the radio medium",
        "items": {
         "type": "string",
         "enum": [
@@ -1596,12 +1612,16 @@
       "over": {
        "type": "string",
        "title": "Over",
-       "description": "For metric: mesh: the value of the whole network; worst_node: the value of the worst router (the border router not counted), for the metrics that exist per node (x-metrics per_node)",
+       "description": "For a metric: the value of the whole network, or that of the worst router (the border router not counted; only for the metrics that exist per router)",
        "enum": [
         "mesh",
         "worst_node"
        ],
-       "default": "mesh"
+       "default": "mesh",
+       "x-enum-titles": {
+        "mesh": "Whole network",
+        "worst_node": "Worst router"
+       }
       },
       "window_s": {
        "type": "number",
@@ -1919,7 +1939,7 @@
   "plot": {
    "type": "object",
    "title": "Plot",
-   "description": "A graph drawn in the run's report from report.json \"series\": one column against another",
+   "description": "A graph of the run's report: one measured quantity against another, per report window or per step",
    "properties": {
     "title": {
      "type": "string",
@@ -1932,7 +1952,7 @@
     "x": {
      "type": "string",
      "title": "X axis",
-     "description": "A column of the series (x-series-columns)",
+     "description": "The quantity along the horizontal axis",
      "enum": [
       "t_start_s",
       "t_end_s",
@@ -1959,11 +1979,65 @@
       "power.max_node",
       "power.br_ma",
       "mesh.joined_fraction"
-     ]
+     ],
+     "x-enum-titles": {
+      "t_start_s": "Start",
+      "t_end_s": "End",
+      "t_mid_s": "Time",
+      "step_index": "Step",
+      "offered_pps": "Offered load",
+      "delivered_pps": "Delivered load",
+      "pdr": "Delivery ratio",
+      "loss": "Loss",
+      "rtt.min_ms": "RTT min",
+      "rtt.mean_ms": "RTT mean",
+      "rtt.p95_ms": "RTT p95",
+      "rtt.max_ms": "RTT max",
+      "latency.mean_ms": "Delay mean",
+      "latency.p95_ms": "Delay p95",
+      "mac.retries": "MAC retries",
+      "mac.retries_per_frame": "Retries per frame",
+      "medium.collisions": "Collisions",
+      "medium.collision_share": "Collision share",
+      "queue.mean_max": "Highest mean queue",
+      "power.min_ma": "Power min",
+      "power.mean_ma": "Power mean",
+      "power.max_ma": "Power max",
+      "power.max_node": "Power max node",
+      "power.br_ma": "Border router power",
+      "mesh.joined_fraction": "Joined"
+     }
     },
     "y": {
      "title": "Y axis",
-     "description": "A column, or several columns drawn together (e.g. power.min_ma, power.mean_ma, power.max_ma)",
+     "description": "One quantity, or several drawn together (for instance the lowest, mean and highest router current)",
+     "x-enum-titles": {
+      "t_start_s": "Start",
+      "t_end_s": "End",
+      "t_mid_s": "Time",
+      "step_index": "Step",
+      "offered_pps": "Offered load",
+      "delivered_pps": "Delivered load",
+      "pdr": "Delivery ratio",
+      "loss": "Loss",
+      "rtt.min_ms": "RTT min",
+      "rtt.mean_ms": "RTT mean",
+      "rtt.p95_ms": "RTT p95",
+      "rtt.max_ms": "RTT max",
+      "latency.mean_ms": "Delay mean",
+      "latency.p95_ms": "Delay p95",
+      "mac.retries": "MAC retries",
+      "mac.retries_per_frame": "Retries per frame",
+      "medium.collisions": "Collisions",
+      "medium.collision_share": "Collision share",
+      "queue.mean_max": "Highest mean queue",
+      "power.min_ma": "Power min",
+      "power.mean_ma": "Power mean",
+      "power.max_ma": "Power max",
+      "power.max_node": "Power max node",
+      "power.br_ma": "Border router power",
+      "mesh.joined_fraction": "Joined"
+     },
      "oneOf": [
       {
        "type": "string",
@@ -2030,22 +2104,26 @@
        "minItems": 1
       }
      ],
-     "x-message": "y is a column name or a list of column names"
+     "x-message": "Choose one or more quantities for the vertical axis"
     },
     "points": {
      "type": "string",
      "title": "Points",
-     "description": "windows: one point per report window (report.window_s, 10 s by default); steps: one point per scenario step (a capacity search: one per load level)",
+     "description": "One point per report window (10 s by default), or one per step (a capacity search gives one per load level)",
      "enum": [
       "windows",
       "steps"
      ],
-     "default": "windows"
+     "default": "windows",
+     "x-enum-titles": {
+      "windows": "Over time (each report window)",
+      "steps": "Per step"
+     }
     },
     "steps": {
      "type": "array",
      "title": "Steps",
-     "description": "Only the points of these steps (names); default: every step",
+     "description": "Only the points of these steps; default: every step",
      "items": {
       "type": "string"
      },
@@ -2054,7 +2132,7 @@
     "kind": {
      "type": "string",
      "title": "Kind",
-     "description": "line: points joined in x order; scatter: points only",
+     "description": "Points joined by a line (in order along the horizontal axis), or points only",
      "enum": [
       "line",
       "scatter"
@@ -2066,7 +2144,11 @@
        "windows": "line",
        "steps": "scatter"
       },
-      "text": "line for windows, scatter for steps"
+      "text": "a line over time, points per step"
+     },
+     "x-enum-titles": {
+      "line": "Line",
+      "scatter": "Points"
      }
     }
    },
@@ -2529,18 +2611,23 @@
     "mode": {
      "type": "string",
      "title": "What to do",
-     "description": "off: switch the nodes off and keep them off; the step ends when the mesh is repaired. off_then_on: switch them off, wait until the mesh is repaired (and at least off_s), then switch them back on; the step ends when they are back in the border router's routing table. on: switch back on the nodes an earlier step (of_step) switched off; the step ends when they are back",
+     "description": "Switch the nodes off and keep them off (the step ends when the mesh is repaired); switch them off, then back on once the mesh is repaired (the step ends when they are back in the border router's routing table); or switch back on the nodes an earlier step switched off (the step ends when they are back)",
      "enum": [
       "off",
       "off_then_on",
       "on"
      ],
-     "default": "off"
+     "default": "off",
+     "x-enum-titles": {
+      "off": "Switch off",
+      "off_then_on": "Switch off, then back on",
+      "on": "Switch back on (nodes of an earlier step)"
+     }
     },
     "nodes": {
      "$ref": "#/$defs/selector",
      "title": "Nodes to switch off",
-     "description": "For modes off and off_then_on: which nodes (the border router can be named with select id 0, but is never picked by a ranking)",
+     "description": "Which nodes to switch off (routers only: the border router cannot be switched off here)",
      "x-default": {
       "value": {
        "select": "hop",
@@ -2553,7 +2640,7 @@
     "off_s": {
      "type": "number",
      "title": "Off for at least",
-     "description": "For mode off_then_on: keep them off at least this long, even if the mesh is repaired sooner",
+     "description": "When they are switched back on: keep them off at least this long, even if the mesh is repaired sooner",
      "x-unit": "s",
      "minimum": 0,
      "x-default": {
@@ -2563,7 +2650,7 @@
     "of_step": {
      "type": "string",
      "title": "Step that switched them off",
-     "description": "For mode on: the name of an earlier \"Switch nodes off\" step (mode off) whose nodes are switched back on"
+     "description": "The earlier step whose nodes are switched back on (a step that switched nodes off and kept them off)"
     },
     "capacity_phase": {
      "type": "string",
@@ -2583,7 +2670,7 @@
     "max_s": {
      "type": "number",
      "title": "Cap",
-     "description": "Each part (off, back on) ends after this long at most, flagged as not met",
+     "description": "Each part (off, back on) ends after this long at most, flagged as not met; when they are kept off at least a given time, the off part may last that time if it is longer",
      "x-unit": "s",
      "minimum": 1,
      "default": 600
@@ -2616,7 +2703,7 @@
        "of_step"
       ]
      },
-     "x-message": "mode on needs of_step (the step whose nodes are switched back on)"
+     "x-message": "Choose the earlier step whose nodes are switched back on"
     }
    ]
   },
@@ -2896,7 +2983,7 @@
     "select": {
      "type": "string",
      "title": "Candidates",
-     "description": "id: one node; ids: a list; all: every router; hop: the routers at a hop count; br_children: the border router's children (hop 1); ancestor: the node at a hop count on the path of a given node; storey or area: by position (needs a positions file); step: the nodes an earlier \"Switch nodes off\" step switched off",
+     "description": "The nodes considered: given by ID, every router, the routers at a hop count, the border router's children, the router at a hop count on the path of a given node, by storey or area (needs a positions file), or the nodes an earlier step switched off",
      "enum": [
       "id",
       "ids",
@@ -2911,12 +2998,24 @@
      ],
      "x-hidden-values": [
       "label"
-     ]
+     ],
+     "x-enum-titles": {
+      "id": "One node",
+      "ids": "Several nodes",
+      "all": "Every router",
+      "hop": "Routers at a hop count",
+      "br_children": "Border router's children",
+      "ancestor": "Router on the path of a node",
+      "storey": "Routers on a storey",
+      "area": "Routers in an area",
+      "step": "Nodes switched off by an earlier step",
+      "label": "Labelled nodes (older files)"
+     }
     },
     "step": {
      "type": "string",
      "title": "Step",
-     "description": "For select step: the name of an earlier step that switched nodes off"
+     "description": "The name of an earlier step that switched nodes off"
     },
     "id": {
      "type": "integer",
@@ -2976,7 +3075,7 @@
     "rank_by": {
      "type": "string",
      "title": "Rank by",
-     "description": "Rank the candidates by this value, highest first (the border router is never ranked; a node without a value, e.g. no packet sent, is not ranked). Goes with pick top, top_fraction or above",
+     "description": "Order the candidates by this measured value, highest first. The border router is never ranked, and a node without a value (too few packets, no sample) is not ranked",
      "enum": [
       "queue.mean",
       "queue.max",
@@ -2984,16 +3083,32 @@
       "rtt.max_ms",
       "mac.retries_per_frame",
       "mac.retries",
-      "mac.collisions",
+      "medium.collisions",
       "loss",
       "subtree",
-      "children"
-     ]
+      "children",
+      "mac.collisions"
+     ],
+     "x-hidden-values": [
+      "mac.collisions"
+     ],
+     "x-enum-titles": {
+      "queue.mean": "Mean queue",
+      "queue.max": "Queue peak",
+      "rtt.mean_ms": "Mean RTT",
+      "rtt.max_ms": "Largest RTT",
+      "mac.retries_per_frame": "MAC retries per frame",
+      "mac.retries": "MAC retries",
+      "medium.collisions": "Collisions",
+      "loss": "Loss",
+      "subtree": "Subtree size",
+      "children": "Number of children"
+     }
     },
     "rank_window_s": {
      "type": "number",
      "title": "Ranking window",
-     "description": "For rank_by: the value is measured over this long before the step starts",
+     "description": "The ranking value is measured over this long before the step starts",
      "x-unit": "s",
      "minimum": 1,
      "default": 60
@@ -3001,7 +3116,7 @@
     "pick": {
      "type": "string",
      "title": "Pick",
-     "description": "Among the candidates: all; top: the count highest by rank_by; top_fraction: the highest fraction of them (at least 1); above: every one whose rank_by value is at least value (none: the step is skipped); largest_subtree or most_children (the worst case); random (drawn from the seed); fraction (drawn from the seed); first (lowest ID)",
+     "description": "Which of the candidates: all of them; the highest by the ranking (a number of them, a share of them, or all those at or above a threshold; when none is at or above it, the step is skipped); the routers with the largest subtree or the most children; drawn at random; the lowest IDs",
      "enum": [
       "all",
       "top",
@@ -3018,21 +3133,32 @@
       "field": "rank_by",
       "then": "top",
       "else": "all",
-      "text": "top when rank_by is given, else all"
+      "text": "the highest when a ranking is given, else all"
+     },
+     "x-enum-titles": {
+      "all": "All of them",
+      "top": "The highest (a number)",
+      "top_fraction": "The highest (a share)",
+      "above": "All at or above a threshold",
+      "largest_subtree": "Largest subtree",
+      "most_children": "Most children",
+      "random": "Drawn at random (a number)",
+      "fraction": "Drawn at random (a share)",
+      "first": "Lowest IDs"
      }
     },
     "count": {
      "type": "integer",
      "title": "Count",
-     "description": "How many to pick (top, largest_subtree, most_children, random, first)",
+     "description": "How many nodes to pick",
      "x-unit": "nodes",
      "minimum": 1,
      "default": 1
     },
     "fraction": {
      "type": "number",
-     "title": "Fraction",
-     "description": "For pick top_fraction: the highest share of the candidates (at least one node); for pick fraction: the share drawn from the seed",
+     "title": "Share",
+     "description": "The share of the candidates: the highest ones by the ranking (at least one node), or drawn at random",
      "x-unit": "ratio",
      "minimum": 0,
      "maximum": 1
@@ -3040,7 +3166,7 @@
     "value": {
      "type": "number",
      "title": "Threshold",
-     "description": "For pick above: the rank_by value a node must reach, in that metric's unit (x-rank-metrics)",
+     "description": "The ranking value a node must reach, in the unit of the ranking",
      "x-unit-from": "rank_by"
     }
    },
@@ -3065,7 +3191,7 @@
        "step"
       ]
      },
-     "x-message": "select step needs step (the name of an earlier step)"
+     "x-message": "Choose the earlier step whose nodes are meant"
     },
     {
      "if": {
@@ -3083,7 +3209,7 @@
        "rank_by"
       ]
      },
-     "x-message": "pick top needs rank_by"
+     "x-message": "Picking the highest needs a ranking (rank by)"
     },
     {
      "if": {
@@ -3102,7 +3228,7 @@
        "fraction"
       ]
      },
-     "x-message": "pick top_fraction needs rank_by and fraction"
+     "x-message": "Picking the highest share needs a ranking (rank by) and the share"
     },
     {
      "if": {
@@ -3121,7 +3247,7 @@
        "value"
       ]
      },
-     "x-message": "pick above needs rank_by and value"
+     "x-message": "Picking those at or above a threshold needs a ranking (rank by) and the threshold"
     },
     {
      "if": {
@@ -3482,7 +3608,7 @@
   },
   "power.avg_ma": {
    "unit": "mA",
-   "description": "Mean over the routers of their average current in the window (needs POWER)",
+   "description": "Mean over the routers of their average current in the window (needs power recording)",
    "set": "power",
    "worse": "high",
    "per_node": "the router's average current"
@@ -3510,7 +3636,7 @@
   },
   "loss": {
    "unit": "ratio",
-   "description": "Share of the application packets lost in the window: 1 - pdr (the flow's packets sent and not delivered, or not echoed for an echoed flow)",
+   "description": "Share of the application packets lost in the window (sent and not delivered, or not echoed when the flow is echoed): one minus the delivery ratio",
    "set": "traffic",
    "worse": "high",
    "per_node": "the share of the packets the router originated that were lost"
@@ -3524,14 +3650,14 @@
   },
   "medium.collisions": {
    "unit": "frames",
-   "description": "Frame receptions lost to a collision in the window: another frame or an external interferer overlapping it (outcomes interference, captured, busy), all receivers (central medium)",
+   "description": "Frames lost at a receiver because another frame or an external interferer overlapped them, all receivers, in the window",
    "set": "medium",
    "worse": "high",
    "per_node": "the frame receptions lost to a collision at the router"
   },
   "medium.collision_share": {
    "unit": "ratio",
-   "description": "Frame receptions lost to a collision over the frames heard by listening receivers (central medium)",
+   "description": "Share of the frames heard by listening receivers that were lost to a collision",
    "set": "medium",
    "worse": "high",
    "per_node": "the frame receptions lost to a collision at the router over those it heard"
@@ -3540,42 +3666,52 @@
  "x-rank-metrics": {
   "queue.mean": {
    "unit": "frames",
+   "title": "Mean queue",
    "description": "Mean queue depth of the node (MAC plus adaptation layer) over the ranking window"
   },
   "queue.max": {
    "unit": "frames",
-   "description": "Highest queue depth of the node (MAC plus adaptation layer) seen in the ranking window (sampled every report window, 10 s by default)"
+   "title": "Queue peak",
+   "description": "Exact peak of the node's queue depth (MAC plus adaptation layer), reported at every report window: the ranking window may start up to one window early"
   },
   "rtt.mean_ms": {
    "unit": "ms",
-   "description": "Mean round-trip time of the packets the node originated in the ranking window"
+   "title": "Mean RTT",
+   "description": "Mean round-trip time of the node's packets in the ranking window"
   },
   "rtt.max_ms": {
    "unit": "ms",
-   "description": "Largest round-trip time of the packets the node originated in the ranking window"
+   "title": "Largest RTT",
+   "description": "Largest round-trip time of the node's packets in the ranking window"
   },
   "mac.retries_per_frame": {
    "unit": "retries",
+   "title": "MAC retries per frame",
    "description": "MAC retries per unicast frame the node delivered in the ranking window"
   },
   "mac.retries": {
    "unit": "retries",
+   "title": "MAC retries",
    "description": "MAC retransmissions of the unicast frames the node delivered in the ranking window"
   },
-  "mac.collisions": {
+  "medium.collisions": {
    "unit": "frames",
-   "description": "Frame receptions lost to a collision at the node in the ranking window (another frame or an external interferer overlapping it; central medium)"
+   "title": "Collisions",
+   "description": "Frames lost to a collision while the node was receiving, in the ranking window (another frame or an external interferer overlapping them)"
   },
   "loss": {
    "unit": "ratio",
-   "description": "Share of the packets the node originated in the ranking window that were lost"
+   "title": "Loss",
+   "description": "Share of the node's packets lost in the ranking window (packets it sent, and for downlink traffic the packets sent to it)"
   },
   "subtree": {
    "unit": "nodes",
-   "description": "Routers below the node in the RPL tree when the step starts"
+   "title": "Subtree size",
+   "description": "Routers below the node in the routing tree when the step starts"
   },
   "children": {
    "unit": "nodes",
+   "title": "Number of children",
    "description": "Routers whose preferred parent is the node when the step starts"
   }
  },
@@ -3663,7 +3799,7 @@
   "medium.collisions": {
    "unit": "frames",
    "title": "Collisions",
-   "description": "Frame receptions lost to a collision, all receivers (central medium)"
+   "description": "Frames lost at a receiver to a collision, all receivers"
   },
   "medium.collision_share": {
    "unit": "ratio",
@@ -3678,17 +3814,17 @@
   "power.min_ma": {
    "unit": "mA",
    "title": "Power min",
-   "description": "Lowest average current of a router (needs POWER)"
+   "description": "Lowest average current of a router (needs power recording)"
   },
   "power.mean_ma": {
    "unit": "mA",
    "title": "Power mean",
-   "description": "Mean over the routers of their average current (needs POWER)"
+   "description": "Mean over the routers of their average current (needs power recording)"
   },
   "power.max_ma": {
    "unit": "mA",
    "title": "Power max",
-   "description": "Highest average current of a router (needs POWER)"
+   "description": "Highest average current of a router (needs power recording)"
   },
   "power.max_node": {
    "unit": "",
@@ -3698,7 +3834,7 @@
   "power.br_ma": {
    "unit": "mA",
    "title": "Border router power",
-   "description": "Average current of the border router (needs POWER)"
+   "description": "Average current of the border router (needs power recording)"
   },
   "mesh.joined_fraction": {
    "unit": "ratio",

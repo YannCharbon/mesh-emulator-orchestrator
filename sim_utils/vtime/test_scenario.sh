@@ -109,7 +109,12 @@ cat > "$OUT/probe.json" <<'EOF2'
   {"use": "node_outage", "name": "none", "capacity_phase": "", "nodes": {"select": "all", "rank_by": "loss", "pick": "above", "value": 2}},
   {"use": "node_outage", "name": "back", "mode": "on", "of_step": "none", "capacity_phase": ""},
   {"use": "node_outage", "name": "q", "capacity_phase": "", "max_s": 60, "nodes": {"select": "hop", "hop": 1, "rank_by": "queue.mean", "count": 1}},
-  {"name": "tail", "end": {"after_s": 20}}
+  {"name": "handwritten", "actions": [{"do": "leave", "nodes": {"select": "hop", "hop": 1, "pick": "most_children"}, "label": "x", "for_s": 30},
+                                      {"do": "degrade_links", "nodes": {"select": "label", "label": "x"}, "rssi_dbm": -95, "for_s": 30}],
+   "end": {"after_s": 35}},
+  {"name": "kills", "actions": [{"do": "kill", "nodes": {"select": "all", "pick": "first"}},
+                                {"do": "kill", "nodes": {"select": "all", "pick": "first"}}], "end": {"after_s": 10}},
+  {"name": "tail", "end": {"after_s": 40}}
  ],
  "report": {"window_s": 10},
  "plots": [{"x": "offered_pps", "y": "rtt.p95_ms", "points": "steps"}, {"x": "t_mid_s", "y": ["power.min_ma", "power.mean_ma", "power.max_ma"]}]
@@ -165,6 +170,16 @@ check(all(x['collisions'] is not None and x['retries'] is not None for x in t.va
 m = ph['load']['metrics']
 check(m['worst']['mac.retries']['node'] != 0 and m['per_node'] and m['medium']['collisions'] is not None and m['queues']['retries'],
       'probe: phase metrics with per_node and worst')
+hw = ph['handwritten']
+check(not hw.get('skipped') and hw['actions'][0]['nodes'] and hw['actions'][1]['nodes'] == hw['actions'][0]['nodes'],
+      f'probe: a hand-written phase uses the label of its own earlier action ({hw["actions"][0]["nodes"]})')
+k = ph['kills']['actions']
+check(k[0]['nodes'] and k[1]['nodes'] and k[0]['nodes'] != k[1]['nodes'],
+      f'probe: a second kill does not pick the node the first killed ({k[0]["nodes"]}, {k[1]["nodes"]})')
+t_k = ph['kills']['start']['t_s']
+after = [x for x in s['windows'] if x['t_start_s'] >= t_k and x['power.min_ma'] is not None]
+check(after and min(x['power.min_ma'] for x in after) > 5, 'probe: switched-off routers are not in the power series '
+      f'(lowest router current after the kills: {min((x["power.min_ma"] for x in after), default=None)} mA)')
 print('test_scenario probe:', 'FAILED (%d)' % len(fails) if fails else 'PASSED')
 sys.exit(1 if fails else 0)
 EOF2

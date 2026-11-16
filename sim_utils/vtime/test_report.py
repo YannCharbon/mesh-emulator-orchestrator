@@ -269,13 +269,16 @@ def test_probe_validator():
     e = errs([oto, {'use': 'node_outage', 'mode': 'on', 'of_step': 'out'}])
     check(any('already' in x['message'] for x in e), 'node_outage: on after off_then_on is refused')
     e = errs([{'use': 'node_outage', 'mode': 'on'}])
-    check(any(x['path'] == '/phases/2' and 'of_step' in x['message'] for x in e), 'node_outage: mode on needs of_step')
+    check(any(x['path'] == '/phases/2' and 'earlier step' in x['message'] for x in e), 'node_outage: mode on needs of_step')
+    e = errs([{'use': 'node_outage', 'nodes': {'select': 'ids', 'ids': [3, 0]}}])
+    check(any(x['path'] == '/phases/2/nodes' and 'border router' in x['message'] for x in e),
+          'node_outage: the border router cannot be switched off')
     e = errs([{'use': 'node_outage', 'off_s': 5, 'of_step': 'x'}])
     check({x['path'] for x in e} >= {'/phases/2/off_s', '/phases/2/of_step'}, 'node_outage: off_s and of_step only in their mode')
     e = errs([{'use': 'node_outage', 'nodes': {'select': 'all', 'pick': 'above', 'rank_by': 'loss'}}])
-    check(any('value' in x['message'] for x in e), 'selector: pick above needs value')
+    check(any('threshold' in x['message'] for x in e), 'selector: pick above needs value')
     e = errs([{'use': 'node_outage', 'nodes': {'select': 'all', 'pick': 'random', 'rank_by': 'loss'}}])
-    check(any(x['path'] == '/phases/2/nodes' and 'rank_by goes with' in x['message'] for x in e),
+    check(any(x['path'] == '/phases/2/nodes' and 'A ranking goes with' in x['message'] for x in e),
           'selector: rank_by with a pick that does not rank is refused')
     e = errs([{'use': 'node_outage', 'nodes': {'select': 'all', 'rank_by': 'nope'}}])
     check(any('rank_by' in x['path'] for x in e), 'selector: unknown rank_by')
@@ -299,10 +302,37 @@ def test_probe_validator():
           and r['step'] == 2 and r['step_name'] == 'out' and d['steps'][2]['phases'] == [2, 3]
           and d['run_s'] >= d['virtual_s_max'] + 60, 'dry: phases with their step, plain words, caps; steps; run_s')
     sch = scenario.schema()
-    check(set(sch['x-rank-metrics']) >= {'queue.mean', 'loss', 'mac.collisions'} and sch['x-metrics']['loss']['per_node'],
+    check(set(sch['x-rank-metrics']) >= {'queue.mean', 'loss', 'medium.collisions'} and sch['x-metrics']['loss']['per_node'],
           'schema: x-rank-metrics, x-metrics per_node, x-series-columns')
     check(sch['$defs']['block_node_failure'].get('x-hidden') and not sch['$defs']['block_node_outage'].get('x-hidden'),
           'schema: the legacy blocks are hidden')
+
+
+def test_per_node(scratch):
+    """Per-node values: a minimum of packets per router (2), the down flow counted for its router (3)."""
+    r = runlog.Run.__new__(runlog.Run)
+    r.tx, r.rx, r.echo, r.nodes = {}, {}, {}, {}
+    for k in range(3):             # router 4: 3 packets, one lost
+        r.tx[(1, 4, k)] = [10 + k, 0, 64, 1, 0, 0]
+        if k:
+            r.echo[(1, 4, k)] = (10.5 + k, 10.2 + k, 1)
+    for k in range(6):             # router 5: down flow only, 6 packets, one lost
+        r.tx[(2, 0, k)] = [10 + k, 5, 64, 1, 0, 0]
+        if k:
+            r.echo[(2, 0, k)] = (10.4 + k, 10.2 + k, 1)
+    np_ = runlog.node_packets(r, 0, 100, 100)
+    check(np_[5]['sent'] == 6 and np_[5]['lost'] == 1 and 0 not in np_,
+          f'per node: down-flow packets counted for their router ({np_.get(5)})')
+    d = scenario.Driver.__new__(scenario.Driver)
+    d.run, d.min_node_samples, d.off = r, 5, {}
+    pn = d.per_node(0, 100, 100, {'traffic'})
+    check(pn[4].get('loss') is None and pn[4]['sent'] == 3 and near(pn[5]['loss'], 1 / 6),
+          f'per node: fewer than min_node_samples packets, no loss value ({pn[4]})')
+    w = scenario.Driver.worst_of(pn)
+    check(w['loss'] == {'node': 5, 'value': round(1 / 6, 6), 'sent': 6}, f'per node: the worst router with its packets ({w["loss"]})')
+    d.off = {2: [[15.0, 25.0]]}
+    check(d.was_off(2, 10, 20) and not d.was_off(2, 25, 35) and not d.was_off(3, 10, 20),
+          'per node: a node switched off during a window is known as such')
 
 
 def test_series(scratch):
@@ -320,14 +350,16 @@ def test_series(scratch):
                                 'rx': {'1': [12 * k, 2 * k, 10 * k]}}) + '\n')
     r = runlog.Run(d)
     r.update()
-    s = report.build_series(d, r, [1, 2], 30, None, 10)
+    s = report.build_series(d, r, [1, 2], 30, {'off_intervals': {'2': [[22.0, None]]}}, 10)
     w = s['windows']
     check(len(w) == 3 and near(w[1]['power.mean_ma'], 3) and w[1]['power.min_ma'] == 2 and w[1]['power.max_node'] == 2
           and w[1]['power.br_ma'] == 1, f'series: power min/mean/max per window ({w[1]["power.mean_ma"]})')
     check(w[2]['medium.collisions'] == 2 and near(w[2]['medium.collision_share'], 2 / 12, 1e-3),
           f'series: collisions per window ({w[2]["medium.collisions"]})')
+    check(w[2]['power.max_ma'] == 2 and w[2]['power.max_node'] == 1,
+          f'series: a router switched off in the window is not in its power ({w[2]["power.max_node"]})')
     pl = report.resolve_plots([{'x': 't_mid_s', 'y': ['power.min_ma', 'power.max_ma']}], s)
-    check(pl[0]['kind'] == 'line' and pl[0]['series'][1]['points'] == [[5.0, 4.0], [15.0, 4.0], [25.0, 4.0]]
+    check(pl[0]['kind'] == 'line' and pl[0]['series'][1]['points'] == [[5.0, 4.0], [15.0, 4.0], [25.0, 2.0]]
           and pl[0]['x']['unit'] == 's' and pl[0]['y'][0]['unit'] == 'mA', 'plots: resolved with units and points')
 
 
@@ -346,6 +378,7 @@ def main():
     test_restart_counters(scratch)
     test_validator()
     test_probe_validator()
+    test_per_node(scratch)
     test_series(scratch)
     shutil.rmtree(scratch, ignore_errors=True)
     print('test_report:', f'FAILED ({len(FAILS)})' if FAILS else 'PASSED')

@@ -33,7 +33,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runlog  # noqa: E402
 
 from scenario_schema import (FORMAT, METRICS, SAMPLED, BLOCKS, schema, check, dry, expand,  # noqa: E402
-                             default_op, PER_NODE, RANK_METRICS, RANKED_PICKS, REPORT_WINDOW_S)
+                             default_op, PER_NODE, RANK_METRICS, RANKED_PICKS, REPORT_WINDOW_S,
+                             RANK_ALIASES, fmt_value)
 
 RESULT_FORMAT = 'wssim-scenario-result 1'
 
@@ -61,7 +62,7 @@ PER_NODE_KEY = {'pdr': 'pdr', 'loss': 'loss', 'rtt.mean_ms': 'rtt_mean_ms', 'rtt
 # rank_by -> the per-node key
 RANK_KEY = {'queue.mean': 'queue_mean', 'queue.max': 'queue_max', 'rtt.mean_ms': 'rtt_mean_ms',
             'rtt.max_ms': 'rtt_max_ms', 'mac.retries_per_frame': 'retries_per_frame', 'mac.retries': 'retries',
-            'mac.collisions': 'collisions', 'loss': 'loss'}
+            'medium.collisions': 'collisions', 'mac.collisions': 'collisions', 'loss': 'loss'}
 DISRUPTING = ('kill', 'restart', 'leave', 'cut_links', 'degrade_links')
 
 
@@ -129,6 +130,9 @@ class Driver:
         self.graph = None           # hearing graph {node: {neighbour: dBm}}, asked once
         self.cut = set()            # (src, dst) links cut by the scenario
         self.min_samples = self.settings.get('min_samples', 100)
+        self.min_node_samples = self.settings.get('min_node_samples', 5)
+        self.rank_sent = None
+        self.off = {}               # node -> [[t_off, t_on or None]]: when the scenario had it switched off
         self.parent_min_dbm = self.settings.get('parent_min_dbm', -80)
         self.seq = 0                # node commands: sequence of their acknowledgements
         self.pending_acks = {}      # seq -> (nodes expected, command)
@@ -361,23 +365,25 @@ class Driver:
         sub = {n: len(runlog.subtree(par, n)) for n in cand}
         self.last_sel = {'candidates': len(cand)}
         if pick in RANKED_PICKS:
-            rb = sel['rank_by']
+            rb = RANK_ALIASES.get(sel['rank_by'], sel['rank_by'])
             vals, win = self.rank_values(rb, sel.get('rank_window_s', 60), cand, par, ch)
             ranked = sorted((n for n in cand if n != 0 and vals.get(n) is not None), key=lambda n: (-vals[n], n))
-            unit = RANK_METRICS[rb][0]
+            unit, title = RANK_METRICS[rb][0], RANK_METRICS[rb][1]
             if pick == 'top':
                 cand = ranked[:count]
-                why += f', the {count} highest by {rb}'
+                why += f', the {count} highest by {title}'
             elif pick == 'top_fraction':
                 cand = ranked[:max(1, int(sel['fraction'] * len(ranked)))] if ranked else []
-                why += f', the highest {sel["fraction"]} by {rb}'
+                why += f', the highest {100 * sel["fraction"]:g} % by {title}'
             else:
                 cand = [n for n in ranked if vals[n] >= sel['value']]
-                why += f', {rb} at least {sel["value"]} {"" if unit == "ratio" else unit}'.rstrip()
+                why += f', {title} at least {fmt_value(sel["value"], unit)}'
             why += f' ({len(ranked)} ranked'
             why += (': ' + ', '.join(f'{n}: {vals[n]:.4g}' for n in cand) + ')') if cand else ', none picked)'
             self.last_sel.update({'rank_by': rb, 'rank_unit': unit, 'rank_window': win, 'ranked': len(ranked),
-                                  'chosen': [{'node': n, 'value': round(vals[n], 6)} for n in cand]})
+                                  'chosen': [dict({'node': n, 'value': round(vals[n], 6)},
+                                                  **({'sent': self.rank_sent.get(n)} if self.rank_sent else {}))
+                                             for n in cand]})
             return sorted(cand), why_prefix + why
         if pick == 'largest_subtree':
             cand = sorted(cand, key=lambda n: (-sub[n], n))[:count]
@@ -405,11 +411,13 @@ class Driver:
             return {n: len(runlog.subtree(par, n)) for n in cand}, [self.now, self.now]
         if rb == 'children':
             return {n: len(ch.get(n, [])) for n in cand}, [self.now, self.now]
+        self.rank_sent = None
         if rb in ('rtt.mean_ms', 'rtt.max_ms', 'loss'):
             t_to = max(self.now - self.drain, 0)
             t_from = max(t_to - w, 0)
             pn = self.per_node(t_from, t_to, self.now, {'traffic'})
-        elif rb == 'mac.collisions':
+            self.rank_sent = {n: x.get('sent') for n, x in pn.items()}
+        elif rb in ('medium.collisions', 'mac.collisions'):
             t_from = max(self.now - w, 0)
             t_to = self.now
             pn = self.per_node(t_from, t_to, self.now, {'medium'}, self.ctr_at(t_from), self.counters())
@@ -429,9 +437,11 @@ class Driver:
         if 'traffic' in sets:
             for n, a in runlog.node_packets(self.run, t_from, t_to, t_eval).items():
                 r = a['rtt_ms']
-                pn.setdefault(n, {}).update({'sent': a['sent'], 'lost': a['lost'], 'loss': a['loss'], 'pdr': a['pdr'],
-                                             'rtt_mean_ms': r.get('mean'), 'rtt_p95_ms': r.get('p95'),
-                                             'rtt_max_ms': r.get('max')})
+                x = pn.setdefault(n, {'sent': a['sent'], 'lost': a['lost']})
+                x.update(sent=a['sent'], lost=a['lost'])
+                if a['sent'] >= self.min_node_samples:      # too few packets: no value
+                    x.update({'loss': a['loss'], 'pdr': a['pdr'], 'rtt_mean_ms': r.get('mean'),
+                              'rtt_p95_ms': r.get('p95'), 'rtt_max_ms': r.get('max')})
         if 'queues' in sets:
             nd = runlog.net_delta(self.run, t_from, t_eval)
             peaks = runlog.queue_peaks(self.run, t_from, t_eval)
@@ -450,9 +460,15 @@ class Driver:
             span = (snap_b['t_us'] - snap_a['t_us']) / 1e6
             a = {x[0]: x for x in snap_a['nodes']}
             for x in snap_b['nodes']:
-                if x[0] in a and span > 0:
+                # a node switched off meanwhile is not counted (the ledger
+                # charges it as asleep, radio off)
+                if x[0] in a and span > 0 and not self.was_off(x[0], t_from, t_to):
                     pn.setdefault(x[0], {})['power_ma'] = (x[1] - a[x[0]][1]) / 1e3 / span
         return pn
+
+    def was_off(self, n, t_from, t_to):
+        """The scenario had node n switched off during part of [t_from, t_to]."""
+        return any(a < t_to - 1e-9 and (b is None or b > t_from + 1e-9) for a, b in self.off.get(n, []))
 
     @staticmethod
     def worst_of(pn):
@@ -465,6 +481,8 @@ class Driver:
             low = METRICS[metric][3] == 'low'
             v, n = (min if low else max)(vals, key=lambda x: (x[0], -x[1]) if not low else (x[0], x[1]))
             out[metric] = {'node': n, 'value': round(v, 6)}
+            if metric in ('pdr', 'loss') or metric.startswith('rtt.'):
+                out[metric]['sent'] = pn[n].get('sent')
         return out
 
     # --------------------------------------------------------------- load
@@ -564,7 +582,9 @@ class Driver:
                                                                    'candidates', 'ranked')})
             else:
                 nodes, why = self.select(a['nodes'])
-                out.update({k: v for k, v in (self.last_sel or {}).items() if k in ('chosen', 'candidates')})
+                out.update({k: v for k, v in (self.last_sel or {}).items() if k in ('chosen', 'rank_by', 'rank_unit',
+                                                                                    'rank_window', 'candidates',
+                                                                                    'ranked')})
             out.update({'nodes': nodes, 'why': why})
             if do in ('kill', 'leave'):
                 off = self.step_off.setdefault(rec.get('step_name'), [])
@@ -691,6 +711,7 @@ class Driver:
         r = self.cmd(f'kill {n}')
         if r.startswith('ok'):
             self.killed.add(n)
+            self.off.setdefault(n, []).append([round(self.now, 6), None])
             # no more packets to or from it (down streams, p2p peers)
             self.node('all', f'load exclude {n}')
 
@@ -711,6 +732,8 @@ class Driver:
         r = self.cmd(f'start {n}')
         if r.startswith('ok'):
             self.killed.discard(n)
+            if self.off.get(n) and self.off[n][-1][1] is None:
+                self.off[n][-1][1] = round(self.now, 6)
             self.restart_times.setdefault(n, []).append(self.now)
             self.release([n])
             self.run.update()
@@ -802,7 +825,7 @@ class Driver:
                 q = [x - y for x, y in zip(n[1:], o[1:])]
                 per[str(n[0])] = {'avg_ma': q[0] / 1e3 / span, 'charge_uc': q[0], 'mcu_uc': q[1], 'listen_uc': q[2],
                                   'receive_uc': q[3], 'tx_uc': q[4], 'other_uc': q[5]}
-            vals = [v['avg_ma'] for k, v in per.items() if k != '0']
+            vals = [v['avg_ma'] for k, v in per.items() if k != '0' and not self.was_off(int(k), t_from, t_to)]
             m['power'] = {'span_s': span, 'avg_ma': sum(vals) / len(vals) if vals else None,
                           'max_ma': max(vals) if vals else None, 'per_node': per}
         pn = self.per_node(t_from, t_to, t_eval, set(sets), ctr_a, ctr_b, snap_a, snap_b)
@@ -1190,12 +1213,14 @@ class Driver:
             self.refresh(net=True, tree=True)
         snap0 = self._snap(f'{p["name"]}:start')
         ctr0 = self.counters() if 'medium' in sets else None
-        # The nodes of the actions that switch nodes off or on, chosen now (a
-        # ranking measures the window before the step): none, the step is
-        # skipped before its load changes
+        # A "Switch nodes off" step (one action) chooses its nodes now, before
+        # its load changes (a ranking measures the window before the step):
+        # none, the step is skipped. Hand-written phases select in each
+        # action, in order, as before (a later action may use an earlier one's
+        # label or kills)
         pre = {}
         for j, a in enumerate(p.get('actions') or []):
-            if a.get('do') in DISRUPTING and a.get('nodes'):
+            if p.get('x_block') == 'node_outage' and a.get('do') in DISRUPTING and a.get('nodes'):
                 nodes, why = self.select(a['nodes'])
                 if not nodes:
                     self.skip_phase(p, rec, f'{a["do"]}: no node selected ({why})')
@@ -1241,6 +1266,7 @@ class Driver:
         self.record['end_t_s'] = self.now
         self.record['labels'] = self.labels
         self.record['step_off'] = {str(k): v for k, v in self.step_off.items()}
+        self.record['off_intervals'] = {str(k): v for k, v in self.off.items()}
         try:
             self.record['summary'] = summarize(self.record)
         except Exception as e:      # noqa: BLE001

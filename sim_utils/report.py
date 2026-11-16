@@ -28,7 +28,7 @@ Options:
 
 Standard library only.
 """
-import json, os, re, statistics, sys
+import bisect, json, os, re, statistics, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runlog  # noqa: E402
@@ -212,8 +212,13 @@ class Series:
     the main flow's packets, the NET1 samples, the medium's counters and the
     power snapshots, over any interval."""
 
-    def __init__(self, d, run, routers, end_s):
+    def __init__(self, d, run, routers, end_s, off=None):
         self.run, self.routers, self.end_s = run, set(routers), end_s
+        # nodes a scenario switched off: not counted in the power of a window they were off in
+        self.off = {int(k): v for k, v in (off or {}).items()}
+        # the packets by send time, once (each row takes its slice)
+        self.tx = sorted(run.tx.items(), key=lambda kv: kv[1][0])
+        self.tx_t = [v[0] for _, v in self.tx]
         smp = read_jsonl(os.path.join(d, 'series_samples.jsonl'))
         self.ctr = sorted((x['t_s'], x) for x in smp)
         snaps = read_jsonl(os.path.join(d, 'power_snap.jsonl'))
@@ -224,7 +229,10 @@ class Series:
     def row(self, a, b):
         r = {k: None for k in SERIES_COLUMNS}
         r.update(t_start_s=round(a, 3), t_end_s=round(b, 3), t_mid_s=round((a + b) / 2, 3))
-        f = runlog.packet_metrics(self.run, a, b, self.end_s, flows=[self.flow]).get(self.flow)
+        sub = runlog.Run.__new__(runlog.Run)
+        sub.__dict__.update(self.run.__dict__)
+        sub.tx = dict(self.tx[bisect.bisect_left(self.tx_t, a):bisect.bisect_left(self.tx_t, b)])
+        f = runlog.packet_metrics(sub, a, b, self.end_s, flows=[self.flow]).get(self.flow)
         if f and f['sent']:
             r['offered_pps'] = r4(f['offered_pps'])
             r['delivered_pps'] = r4(f['delivered_pps'])
@@ -255,7 +263,9 @@ class Series:
         if sb and sb is not sa and sb['t_us'] / 1e6 > a:
             span = (sb['t_us'] - (sa['t_us'] if sa else 0)) / 1e6
             old = {x[0]: x[1] for x in (sa['nodes'] if sa else [])}
-            per = {x[0]: (x[1] - old.get(x[0], 0)) / 1e3 / span for x in sb['nodes']} if span > 0 else {}
+            per = {x[0]: (x[1] - old.get(x[0], 0)) / 1e3 / span for x in sb['nodes']
+                   if not any(p < b - 1e-9 and (q is None or q > a + 1e-9) for p, q in self.off.get(x[0], []))} \
+                if span > 0 else {}
             rt = [(v, n) for n, v in per.items() if n != 0]
             if rt:
                 r['power.min_ma'] = r4(min(rt)[0])
@@ -268,7 +278,7 @@ class Series:
 
 
 def build_series(d, run, routers, end_s, scen, window_s):
-    sr = Series(d, run, routers, end_s)
+    sr = Series(d, run, routers, end_s, (scen or {}).get('off_intervals'))
     phases = (scen or {}).get('phases') or []
 
     def step_at(t):

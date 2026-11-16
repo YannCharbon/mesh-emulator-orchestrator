@@ -511,8 +511,9 @@ def queue_peaks(run, t_from, t_to):
 
 
 def node_packets(run, t_from, t_to, t_eval):
-    """Per originating node, its packets sent in [t_from, t_to) (every flow it
-    originates, send errors left out): sent, lost (not echoed for a request,
+    """Per router, its packets sent in [t_from, t_to) (send errors left out):
+    those it originated (up, p2p) and, for the down flow, those the border
+    router sent to it (the router they concern): sent, lost (not echoed for a request,
     not delivered for a one-way packet, by t_eval), loss, pdr, and the RTT
     statistics (ms) of its echoed packets."""
     acc = {}
@@ -522,7 +523,8 @@ def node_packets(run, t_from, t_to, t_eval):
         typ = v[5] if len(v) > 5 else (2 if flow == 3 else 0)
         if not (t_from <= t_tx < t_to) or rc < 0 or flow == 3:
             continue
-        a = acc.setdefault(src, {'sent': 0, 'lost': 0, '_rtt': []})
+        who = v[1] if flow == 2 else src
+        a = acc.setdefault(who, {'sent': 0, 'lost': 0, '_rtt': []})
         a['sent'] += 1
         if typ == 0:
             e = run.echo.get(key)
