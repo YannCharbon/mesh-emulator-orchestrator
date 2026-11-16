@@ -208,6 +208,31 @@ def test_validator():
     check(any('twice' in x['message'] for x in e), 'validator: duplicate names')
     e = errors_of({'format': scenario.FORMAT, 'phases': [{'name': 'a', 'bogus': 1}]})
     check(any(x['path'] == '/phases/0/bogus' for x in e), 'validator: an unknown field')
+    # interference with a reference at the same load: recovery measured against it, not the light-load probe
+    ref = {'format': scenario.FORMAT, 'phases': [
+        {'use': 'formed'}, {'use': 'probe'}, {'use': 'capacity'},
+        {'use': 'interference', 'spec': 'chan=0-9,level=-80', 'load_fraction': 0.7, 'reference_s': 90},
+        {'use': 'recovery', 'baseline': 'interference_reference'}]}
+    check(errors_of(ref) == [], 'validator: interference with reference_s, recovery against its reference')
+    ph = [p['phase'] for p in scenario.dry(ref)['phases']]
+    check([p['name'] for p in ph][3:] == ['interference_reference', 'interference', 'recovery']
+          and ph[3]['load'] == ph[4]['load'] and ph[4]['load']['rate_of']['factor'] == 0.7
+          and not ph[3].get('actions') and ph[3]['end'] == {'after_s': 120}
+          and ph[5]['end']['relative_to']['phase'] == 'interference_reference',
+          'expand: the reference at the interference\'s load, without the interferer, then the interference')
+    e = errors_of(dict(ref, phases=ref['phases'][:3] + [dict(ref['phases'][3], spec='chan=1,lvl=3')]))
+    check(any(x['path'] == '/phases/3/spec' for x in e), 'validator: spec error of an interference with a reference')
+    # node restart: its own load and an end in the border router's table
+    rs = {'format': scenario.FORMAT, 'phases': [{'use': 'probe'}, {'use': 'capacity'}, {'use': 'node_failure'},
+                                                {'use': 'node_restart', 'load_fraction': 0.3}]}
+    check(errors_of(rs) == [], 'validator: node_restart with a load')
+    q = scenario.dry(rs)['phases'][-1]['phase']
+    check(q['load']['rate_of'] == {'phase': 'capacity', 'metric': 'capacity_pps', 'factor': 0.3}
+          and q['end']['is'] == 'formed' and q['end']['milestone'] == 'ready'
+          and q['end']['nodes'] == {'select': 'label', 'label': 'failed'},
+          'expand: node_restart at 0.3 x the capacity, ends when ready and in the border router\'s table')
+    e = errors_of(dict(rs, phases=rs['phases'][:3] + [{'use': 'node_restart', 'capacity_phase': 'zz'}]))
+    check(any(x['path'] == '/phases/3/capacity_phase' for x in e), 'validator: node_restart from an unknown capacity')
     dr = scenario.dry(ok)
     check(len(dr['phases']) == 5 and dr['virtual_s_max'] > 0, f'dry: 5 phases, at most {dr["virtual_s_max"]} s')
     sch = scenario.schema()

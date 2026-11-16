@@ -158,7 +158,9 @@ COND_PROPS = {
                   'joined', 'ratio', minimum=0, maximum=1, default=1),
     'milestone': S('string', 'Milestone', 'For formed (default ready) and node_event joined (default operational): '
                    'operational (Wi-SUN join done) or ready (RPL routing ready; not repeated when an interface comes '
-                   'back up)', enum=['operational', 'ready']),
+                   'back up)', enum=['operational', 'ready'],
+                   **{'x-default': {'rule': 'by_kind', 'map': {'formed': 'ready', 'node_event': 'operational'},
+                                    'text': 'ready for formed, operational for node_event'}}),
     'stable_s': S('number', 'Stable for', 'For formed: and no parent change anywhere for this long', 's', minimum=0,
                   default=0),
     'nodes': SELECTOR,
@@ -168,17 +170,21 @@ COND_PROPS = {
              default=False),
     'metric': S('string', 'Metric', 'For metric', enum=sorted(METRICS)),
     'op': S('string', 'Comparison', 'For metric. Default: "worse than" the value: >= for delays, queues, '
-            'retries...; < for pdr, delivered_pps and joined_fraction', enum=OPS),
+            'retries...; < for pdr, delivered_pps and joined_fraction', enum=OPS,
+            **{'x-default': {'rule': 'worse_than', 'up': '<', 'down': '>=',
+                             'up_metrics': ['pdr', 'delivered_pps', 'joined_fraction'],
+                             'text': 'worse than the value (< for pdr, delivered_pps and joined_fraction, else >=)'}}),
     'value': S('number', 'Value', 'For metric: the threshold, in the metric\'s unit (or relative_to instead)'),
     'relative_to': REL,
     'per_hop': S('boolean', 'Per hop count', 'For metric (rtt, latency): true if the comparison holds for any hop '
                  'count, each against the same hop count of relative_to', default=False),
     'flow': S('string', 'Flow', 'For traffic metrics: the flow (default: up, else the first one running)',
-              enum=FLOWS),
+              enum=FLOWS, **{'x-default': {'value': 'up', 'text': 'up, else the first flow running'}}),
     'window_s': S('number', 'Window', 'For metric: the trailing window of packets sent', 's', minimum=1, default=60),
     'min_samples': S('integer', 'Samples', 'For pdr, rtt and latency metrics: at least this many packets in the '
                      'window, else the condition is not decided yet (default: settings.min_samples)', 'packets',
-                     minimum=1),
+                     minimum=1, **{'x-default': {'rule': 'setting', 'setting': 'min_samples',
+                                                 'text': 'the scenario setting min_samples'}}),
     'of': S('array', 'Conditions', 'For all / any', items={'$ref': '#/$defs/condition'}, minItems=1),
 }
 COND_RULES = [
@@ -219,7 +225,7 @@ LOAD = obj('Load', 'The application load from the start of the phase', {
     'rate_pps': S('number', 'Rate', 'Offered packets per second of each flow, whole network', 'packets/s',
                   exclusiveMinimum=0),
     'interval_s': S('number', 'Interval', 'Instead of rate_pps: mean interval of each router (default 30 s)', 's',
-                    minimum=0.001),
+                    minimum=0.001, **{'x-default': {'value': 30, 'text': '30 s when neither rate_pps nor rate_of is given'}}),
     'rate_of': REL,
     'max_rate_pps': S('number', 'Rate cap', 'With interval_s: at most this rate, whole network (a light probe '
                       'whatever the network size)', 'packets/s', exclusiveMinimum=0),
@@ -342,6 +348,22 @@ def _capacity(p):
     return [_expand_capacity(p, p.get('name', 'capacity'), base, start)]
 
 
+def _interference(p):
+    name = p.get('name', 'interference')
+    load = {'rate_of': {'phase': p.get('capacity_phase', 'capacity'), 'metric': 'capacity_pps',
+                        'factor': p.get('load_fraction', 0.8)}}
+    settle = p.get('settle_s', 30)
+    out = []
+    if p.get('reference_s', 0) > 0:    # the same load without the interferer: a recovery's baseline
+        out.append({'name': name + '_reference', 'load': load, 'measure': {'sets': ALL_SETS, 'settle_s': settle},
+                    'end': {'after_s': p['reference_s'] + settle}})
+    out.append({'name': name,
+                'actions': [{'do': 'interferer_add', 'spec': p['spec'], 'name': p.get('interferer_name', 'jam')}],
+                'load': load, 'measure': {'sets': ALL_SETS, 'settle_s': settle},
+                'end': {'after_s': p.get('duration_s', 300)}})
+    return out
+
+
 def _capacity_check(p):
     name = p.get('name', 'capacity_check')
     out = []
@@ -395,7 +417,9 @@ BLOCKS = {
         'doc': 'A light load, its RTT, delay and delivery per hop count: the baseline of later phases',
         'params': {
             'rate_pps': S('number', 'Rate', 'Offered packets/s, whole network (default: one packet per router every '
-                          '30 s, at most 0.5 packets/s)', 'packets/s', exclusiveMinimum=0),
+                          '30 s, at most 0.5 packets/s)', 'packets/s', exclusiveMinimum=0,
+                          **{'x-default': {'rule': 'per_router', 'interval_s': 30, 'max_pps': 0.5,
+                                           'text': 'one packet per router every 30 s, at most 0.5 packets/s'}}),
             'flows': P['flows'],
             'duration_s': S('number', 'Duration', 'Measured time', 's', minimum=1, default=300),
             'settle_s': S('number', 'Settle', 'Not measured at the start', 's', minimum=0, default=30),
@@ -412,7 +436,9 @@ BLOCKS = {
         'params': {
             'baseline': S('string', 'Baseline phase', 'The phase whose RTT is the reference', default='probe'),
             'start_rate_pps': S('number', 'First rate', 'Packets/s of the first step (default: 2 x the baseline\'s)',
-                                'packets/s', exclusiveMinimum=0),
+                                'packets/s', exclusiveMinimum=0,
+                                **{'x-default': {'rule': 'times_baseline', 'factor': 2, 'field': 'baseline',
+                                                 'text': '2 x the rate of the baseline phase'}}),
             'mul': P['mul'],
             'max_steps': S('integer', 'Steps', 'At most this many windows', minimum=1, maximum=100, default=12),
             'window_s': P['window_s'],
@@ -431,7 +457,8 @@ BLOCKS = {
     },
     'interference': {
         'title': 'Interference',
-        'doc': 'An external interferer from the start of the phase, under a share of the capacity found',
+        'doc': 'An external interferer from the start of the phase, under a share of the capacity found; optionally '
+               'first a reference at the same load without it (<name>_reference), the baseline of a recovery',
         'required': ['spec'],
         'params': {
             'spec': ACTION['properties']['spec'],
@@ -439,17 +466,14 @@ BLOCKS = {
             'capacity_phase': S('string', 'Capacity phase', 'Where the capacity comes from', default='capacity'),
             'load_fraction': S('number', 'Load', 'Share of the capacity offered', 'ratio', exclusiveMinimum=0,
                                maximum=2, default=0.8),
+            'reference_s': S('number', 'Reference', 'Before the interferer: this long measured at the same load '
+                             'without it, as the phase <name>_reference (0: none)', 's', minimum=0, default=0),
             'duration_s': S('number', 'Duration', 'Length of the phase', 's', minimum=1, default=300),
-            'settle_s': S('number', 'Settle', 'Not measured at the start', 's', minimum=0, default=30),
+            'settle_s': S('number', 'Settle', 'Not measured at the start (of the reference too)', 's', minimum=0,
+                          default=30),
         },
-        'expand': lambda p: [{
-            'name': p.get('name', 'interference'),
-            'actions': [{'do': 'interferer_add', 'spec': p['spec'], 'name': p.get('interferer_name', 'jam')}],
-            'load': {'rate_of': {'phase': p.get('capacity_phase', 'capacity'), 'metric': 'capacity_pps',
-                                 'factor': p.get('load_fraction', 0.8)}},
-            'measure': {'sets': ALL_SETS, 'settle_s': p.get('settle_s', 30)},
-            'end': {'after_s': p.get('duration_s', 300)}}],
-        'map': {'0/actions/0/spec': 'spec', '0/load/rate_of': 'capacity_phase'},
+        'expand': _interference,
+        'map': {'-1/actions/0/spec': 'spec', '-1/load/rate_of': 'capacity_phase', '0/load/rate_of': 'capacity_phase'},
     },
     'recovery': {
         'title': 'Recovery',
@@ -498,18 +522,26 @@ BLOCKS = {
     },
     'node_restart': {
         'title': 'Node restart',
-        'doc': 'Start the failed nodes again (fresh instances) and measure until they joined again',
+        'doc': 'Start the failed nodes again (fresh instances) under a share of the capacity, and measure until they '
+               'are ready again and in the border router\'s routing table',
         'params': {
             'label': S('string', 'Label', 'The nodes of an earlier action', default='failed'),
+            'capacity_phase': S('string', 'Capacity phase', 'Where the capacity comes from ("": keep the load)',
+                                default='capacity'),
+            'load_fraction': S('number', 'Load', 'Share of the capacity offered', 'ratio', exclusiveMinimum=0,
+                               maximum=2, default=0.5),
             'max_s': S('number', 'Cap', 'At most this long', 's', minimum=1, default=600),
         },
-        'expand': lambda p: [{
+        'expand': lambda p: [dict({
             'name': p.get('name', 'node_restart'),
             'actions': [{'do': 'restart', 'nodes': {'select': 'label', 'label': p.get('label', 'failed')}}],
             'measure': {'sets': ALL_SETS},
-            'end': {'is': 'node_event', 'event': 'joined',
-                    'nodes': {'select': 'label', 'label': p.get('label', 'failed')}, 'max_s': p.get('max_s', 600)}}],
-        'map': {'0/actions/0/nodes': 'label', '0/end/nodes': 'label'},
+            'end': {'is': 'formed', 'milestone': 'ready', 'fraction': 1,
+                    'nodes': {'select': 'label', 'label': p.get('label', 'failed')}, 'max_s': p.get('max_s', 600)}},
+            **({'load': {'rate_of': {'phase': p.get('capacity_phase', 'capacity'), 'metric': 'capacity_pps',
+                                     'factor': p.get('load_fraction', 0.5)}}}
+               if p.get('capacity_phase', 'capacity') else {}))],
+        'map': {'0/actions/0/nodes': 'label', '0/end/nodes': 'label', '0/load/rate_of': 'capacity_phase'},
     },
     'capacity_check': {
         'title': 'Capacity again',
@@ -543,7 +575,8 @@ def block_schema():
     alts = []
     for name, b in BLOCKS.items():
         props = {'use': S('string', 'Block', b['doc'], enum=[name]),
-                 'name': S('string', 'Name', 'Phase name (default: the block\'s)')}
+                 'name': S('string', 'Name', 'Phase name (default: the block\'s)',
+                           **{'x-default': {'value': name, 'text': 'the block\'s name'}})}
         props.update(b['params'])
         alts.append(obj(b['title'], b['doc'], props, ['use'] + b.get('required', [])))
     return alts

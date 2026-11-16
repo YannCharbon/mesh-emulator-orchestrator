@@ -52,7 +52,7 @@ Pieces:
 }
 ```
 
-Only `format` and `phases` are required. The JSON Schema (`--schema`, committed as `docs/scenario.schema.json`) carries every rule a form needs: per field a title, a one-line description, its unit (`x-unit`), its default and, for closed vocabularies, its enumeration; mutually exclusive fields as `oneOf`/`not` (`rate_pps`, `interval_s` and `rate_of`; `after_s` or a condition; `value` or `relative_to`; `end` or `repeat`), the fields each kind requires as `if`/`then` (a `metric` condition needs `metric`, a `node_event` needs `event` and `nodes`, `kill` needs `nodes`, ...), each composite rule with a plain-words `x-message`, and the metrics' units and directions (`x-metrics`). Fields starting with `x_` are ignored (free for an editor's own data).
+Only `format` and `phases` are required. The JSON Schema (`--schema`, committed as `docs/scenario.schema.json`) carries every rule a form needs: per field a title, a one-line description, its unit (`x-unit`), its default and, for closed vocabularies, its enumeration; where the default depends on the network or on other fields, an `x-default` object with the rule in words (`text`) and, when a form can compute it, its parts: `value` (a constant that applies only in a given case), `rule` `per_router` (`interval_s`, `max_pps`: one packet per router every `interval_s`, at most `max_pps`), `times_baseline` (`factor` × the rate of the phase named by `field`), `setting` (the scenario setting named `setting`), `by_kind` (`map`: the condition kind's default) or `worse_than` (`up` for the metrics in `up_metrics`, else `down`); mutually exclusive fields as `oneOf`/`not` (`rate_pps`, `interval_s` and `rate_of`; `after_s` or a condition; `value` or `relative_to`; `end` or `repeat`), the fields each kind requires as `if`/`then` (a `metric` condition needs `metric`, a `node_event` needs `event` and `nodes`, `kill` needs `nodes`, ...), each composite rule with a plain-words `x-message`, and the metrics' units and directions (`x-metrics`). Fields starting with `x_` are ignored (free for an editor's own data).
 
 | Settings | Default | Meaning |
 | --- | --- | --- |
@@ -228,23 +228,23 @@ One command per line on a UNIX stream socket, one answer line each. The first li
 | `formed` | `fraction` (1), `stable_s` (60), `timeout_s` (3600) | Start when that share of routers is ready and in the border router's table, parents stable; ends at once |
 | `probe` | `rate_pps` (one packet per router every 30 s, at most 0.5/s), `flows` (up), `duration_s` (300), `settle_s` (30), `payload_b` (64) | Light load; every set measured: the baseline |
 | `capacity` | `baseline` (`probe`), `start_rate_pps` (2 × the baseline's), `mul` (1.5), `max_steps` (12), `window_s` (60), `settle_s` (15), `confirm` (2), `rtt_metric` (`rtt.p95_ms`), `rtt_factor` (2), `max_rtt_ms`, `min_pdr` (0.95), `flows`, `payload_b` (64) | Iterations until the RTT reaches `rtt_factor` × the baseline's, the largest RTT `max_rtt_ms`, or the delivery falls below `min_pdr` |
-| `interference` | `spec` (required), `interferer_name` (`jam`), `capacity_phase` (`capacity`), `load_fraction` (0.8), `duration_s` (300), `settle_s` (30) | Interferer added; that share of the capacity |
-| `recovery` | `interferer_name` (`all`; empty: none removed), `baseline` (`probe`), `within` (1.2), `max_s` (600) | Interferer removed, same load; ends when the RTT p95 over 60 s is within that factor of the baseline's |
+| `interference` | `spec` (required), `interferer_name` (`jam`), `capacity_phase` (`capacity`), `load_fraction` (0.8), `reference_s` (0: none), `duration_s` (300), `settle_s` (30) | Interferer added; that share of the capacity. With `reference_s`, first a phase `<name>_reference` at the same load without the interferer, measured for `reference_s` after `settle_s` (two phases) |
+| `recovery` | `interferer_name` (`all`; empty: none removed), `baseline` (`probe`), `within` (1.2), `max_s` (600) | Interferer removed, same load; ends when the RTT p95 over 60 s is within that factor of the baseline's. After a loaded interference, give the interference's reference (`<name>_reference`) as `baseline`: the light-load probe's RTT is not reached again at that load |
 | `node_failure` | `nodes` (hop 1, largest subtree), `label` (`failed`), `capacity_phase` (`capacity`; empty: keep the load), `load_fraction` (0.5), `max_s` (600), `e2e` (true) | Kill; ends when repaired |
-| `node_restart` | `label` (`failed`), `max_s` (600) | Restart those nodes; ends when they joined |
+| `node_restart` | `label` (`failed`), `capacity_phase` (`capacity`; empty: keep the load), `load_fraction` (0.5), `max_s` (600) | Restart those nodes under that share of the capacity; ends when they are ready (RPL) in their new instance and in the border router's routing table |
 | `capacity_check` | `capacity_phase` (`capacity`), `start_fraction` (0.5), `baseline` (`self`: its own probe, `<name>_probe`, of `probe_s` 300 s first; or an earlier phase), `mul`, `max_steps` (8), `window_s`, `settle_s`, `confirm`, `rtt_factor`, `min_pdr`, `flows`, `payload_b` | A capacity search from a share of an earlier capacity, against a baseline of the network as it is now (two phases with `baseline: "self"`) |
 
-A block's `name` defaults to the block's; give one to use a block twice. The owner's study, `sim_utils/scenarios/capacity_interference.json`, is five entries:
+A block's `name` defaults to the block's; give one to use a block twice. The owner's study, `sim_utils/scenarios/capacity_interference.json`, is five entries (six phases):
 
 ```json
 {"use": "formed", "stable_s": 60},
 {"use": "probe", "duration_s": 300},
 {"use": "capacity", "max_rtt_ms": 5000, "window_s": 60},
-{"use": "interference", "spec": "chan=0-17,level=-75,kind=fsk,pattern=ge:40ms:60ms", "load_fraction": 0.8, "duration_s": 240},
-{"use": "recovery", "max_s": 300}
+{"use": "interference", "spec": "chan=0-17,level=-75,kind=fsk,pattern=ge:40ms:60ms", "load_fraction": 0.8, "reference_s": 120, "duration_s": 240},
+{"use": "recovery", "baseline": "interference_reference", "max_s": 300}
 ```
 
-Examples: `capacity_interference.json` (above), `node_failure.json` (formed, probe, capacity, the busiest hop-1 router killed under 50 % of the capacity, capacity after the repair, the router restarted), `link_cut_layers.json` (hand-written phases: a steady load from 300 s, every link of a random hop-2 router cut for 120 s, then until the delivery is back to 99 %).
+Examples: `capacity_interference.json` (above), `node_failure.json` (formed, probe, capacity, the busiest hop-1 router killed under 50 % of the capacity, capacity after the repair, the router restarted under 50 % of the capacity until it is back in the border router's routing table), `link_cut_layers.json` (hand-written phases: a steady load from 300 s, every link of a random hop-2 router cut for 120 s, then until the delivery is back to 99 %).
 
 ## 10. Validation
 
@@ -252,9 +252,9 @@ Examples: `capacity_interference.json` (above), `node_failure.json` (formed, pro
 
 ## 11. Demonstrations
 
-Seed 1 (and seed 3 for one check), `POWER=examples/power/efr32fg25-soc.ini` (radio always listening, about 8–10 mA per router), `COMPACT=1`, default medium preset (`calibrated`). Networks: `dag_simple` (15 nodes, depths 1–4) and a 150-node building on three floors, 10 m apart, links from the positions (`radio_if/scale/gen_building.py --nodes 150 --floors 3 --spacing 10`, `--positions`, `--prop-tx-dbm=20`; depths 1–3, 34 routers at hop 1). Wall time with the runs at once on the 24-core PC: 10–13 s for each `dag_simple` run, 2.9 and 3.7 min for the two building runs; 225 s for the whole set.
+Seed 1 (and seed 3 for one check), `POWER=examples/power/efr32fg25-soc.ini` (radio always listening, about 8–10 mA per router), `COMPACT=1`, default medium preset (`calibrated`). Networks: `dag_simple` (15 nodes, depths 1–4) and a 150-node building on three floors, 10 m apart, links from the positions (`radio_if/scale/gen_building.py --nodes 150 --floors 3 --spacing 10`, `--positions`, `--prop-tx-dbm=20`; depths 1–3, 34 routers at hop 1). Wall time with the four runs at once on the 24-core PC: 9 s (`capacity_interference.json`) and 11 s (`node_failure.json`) on `dag_simple`, 2.6 and 3.6 min on the building; 214 s for the whole set. The `dag_simple` seed-3 column was not rerun after the last template change (restart phase).
 
-**`capacity_interference.json`** (the owner's study; interferer on channels 0–17 of 35, −75 dBm at every node, FSK, on 40 % of the time):
+**`capacity_interference.json`** (the owner's study; 120 s at 80 % of the capacity without interferer as the reference, then the interferer on channels 0–17 of 35, −75 dBm at every node, FSK, on 40 % of the time):
 
 | Phase | dag_simple | 150-node building |
 | --- | --- | --- |
@@ -262,11 +262,12 @@ Seed 1 (and seed 3 for one check), `POWER=examples/power/efr32fg25-soc.ini` (rad
 | probe (300 s): packets; RTT mean / p95; mean RTT by hops | 145; 361 / 732 ms; 196, 307, 524, 620 ms (1–4 hops) | 140; 333 / 654 ms; 203, 307, 489 ms (1–3 hops) |
 | capacity: steps (nominal packets/s, network), 2 windows to confirm | 1.0, 1.5, 2.25, 3.38, 5.06 (p95 1629 and 2004 ms ≥ 2 × 732) | 0.97, 1.45, 2.17, 3.26, 4.89 (1559 ms, then 1285 ms: not confirmed), 7.33 (2118 and 2425 ms ≥ 2 × 654) |
 | capacity found (measured offered rate) | 3.45 packets/s | 4.75 packets/s |
-| interference at 80 % of it: PDR; RTT mean / p95; mean RTT by hops | 1.0; 572 / 1399 ms; 273, 558, 767, 1017 ms | 0.985; 815 / 2133 ms; 567, 797, 1242 ms |
-| recovery (interferer removed): RTT p95 over the last 60 s (or more, for 100 packets) back within 1.2 × the probe's after | 295 s (817 ≤ 878 ms) | not within the 300-s cap (last value 968 ms against 785 ms) |
-| routers' mean current, probe / capacity / interference | 8.90 / 9.71 / 9.47 mA | 8.26 / 8.32 / 8.29 mA |
+| reference at 80 % of it, no interferer (120 s): PDR; RTT mean / p95; mean RTT by hops | 1.0; 440 / 968 ms; 247, 443, 561, 676 ms | 1.0; 411 / 997 ms; 318, 418, 537 ms |
+| interference at the same load (240 s): PDR; RTT mean / p95; mean RTT by hops | 1.0; 598 / 1447 ms; 289, 544, 836, 1122 ms | 0.978; 886 / 2388 ms; 616, 914, 1260 ms |
+| recovery (interferer removed): RTT p95 over the last 60 s (or more, for 100 packets) back within 1.2 × the reference's after | 85 s (963 ≤ 1161 ms) | 70 s (952 ≤ 1196 ms) |
+| routers' mean current, probe / capacity / reference / interference | 8.90 / 9.71 / 9.50 / 9.50 mA | 8.26 / 8.32 / 8.30 / 8.30 mA |
 
-The RTT grows with the hop count in every phase, and the interference adds most at the deepest routers. After the interferer is removed, the load stays at 80 % of the capacity, where delays run above the light-load probe's with or without interference: dag_simple came back within 1.2 × the probe's p95 after 295 s, the building not within the 300-s cap. In the building, the confirmation rule took effect: the step at 4.89 packets/s met the condition once and not on its second window, so the search went on.
+The RTT grows with the hop count in every phase, and the interference adds most at the deepest routers. At 80 % of the capacity, delays run above the light-load probe's with or without interference (p95 968 against 732 ms on dag_simple, 997 against 654 ms in the building), so recovery is compared with the reference taken at the same load just before the interferer, not with the probe (against the probe's p95, recovery cannot be met at that load). Both networks came back within 1.2 × the reference's p95 in the first windows after the removal: 85 and 70 s, of which 60 s is the window the first decision needs; the resolution is the poll period, 5 s. In the building, the confirmation rule took effect: the step at 4.89 packets/s met the condition once and not on its second window, so the search went on.
 
 **`node_failure.json`** (the busiest hop-1 router powered off under 50 % of the capacity):
 
@@ -283,7 +284,8 @@ The RTT grows with the hop count in every phase, and the interference adds most 
 | routers at hop 1, 2, 3, 4 before → after | 4, 5, 4, 1 → 3, 4, 4, 1 | 4, 5, 4, 1 → 3, 4, 4, 1 | 34, 90, 25 → 33, 89, 26 |
 | fresh probe after the repair: RTT p95 (packets) | 1024 ms (131) | 859 ms (101) | 608 ms (141) |
 | capacity after the repair, against that probe | 4.18 packets/s | 4.65 packets/s | 3.42 packets/s |
-| restart of the killed router: joined again after | 30 s | 20 s | 30 s |
+| restart of the killed router, at 50 % of the capacity before: Wi-SUN join done (operational) / back in the border router's table (its DAO acknowledged; end of the phase) after | 33 s / 80 s | not rerun (earlier version, load of the capacity search kept: joined after 20 s) | 21 s / 60 s |
+| delivery during the restart phase (packets) | 0.991 (115) | | 1.0 (115) |
 
 The capacity search is relative to its baseline: after the repair, `capacity_check` measures its own probe and doubles *its* RTT. In dag_simple the post-repair probe is slower (p95 1024 against 732 ms), so the threshold is higher and the capacity found is higher too; in the building the post-repair probe is faster (608 against 654 ms) and the capacity lower. Both answer "the load at which the RTT doubles from the network's own light-load RTT", not an absolute delay limit: use `max_rtt_ms` (or a fixed `value`) for that. In the previous version of the engine, seed 3 of this scenario found a capacity after the repair of 1.05 packets/s from one window 3 % over its threshold, with a pre-repair baseline of 84 packets; with the minimum of 100 packets per window, the confirmation on a second window and a fresh baseline, it finds 4.65 packets/s.
 
@@ -296,6 +298,7 @@ The resolution of the repair times is the poll period, 5 s. The runs: `SCENARIO=
 - An interferer added at run time applies to frames and sniffs that start after it; one that the medium has already computed (a frame on air) keeps its earlier levels. The medium-log line has the interferer column for the whole run when the run has a control socket and the central medium.
 - `kill` with `POWER`: the node is then charged as asleep with its radio off, not as unpowered; a restarted node continues the same ledger. `--power` stays refused with the static `--vtime-kill`/`--vtime-start` options.
 - A restart starts a new program with the same key storage; the border router's restart was checked once (`test_scenario.sh`: the network re-formed).
+- The border router keeps a killed router in its routing table until the entry expires, so for a restarted router the end of `node_restart` is set in practice by its new instance being ready, that is its DAO acknowledged by the border router.
 - `degrade_links` restores a link only when `topology.txt` gives its level; with positions, use `cut_links`.
 - Medium settings other than interferers cannot be changed during a run.
 - The driver and the conductor talk over a local socket; a run whose driver stops ends at once and fails (§1).

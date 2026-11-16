@@ -70,7 +70,12 @@
 #                      relative to the directory run.sh is called from, as
 #                      POWER and TOPO, and must exist; the files it writes
 #                      (--medium-log, --sniff-log, --power-out, --power-log,
-#                      --vtime-frames) are relative to <outdir>
+#                      --vtime-frames) are relative to <outdir>. The inputs
+#                      that describe the network (--positions,
+#                      --prop-floorplan, --interferer-file) are copied into
+#                      <outdir>/input/ and the server reads the copies, so a
+#                      run keeps the files it ran with (run_info.txt names the
+#                      copies) when the originals change later
 #   KILL="<i>:<s> ..."  stop node i outright at virtual second s (wssimserver
 #                      --vtime-kill: no more wakes or frames, its connection
 #                      closed; the program then exits with "conductor closed
@@ -132,6 +137,10 @@
 #                      smaller node logs; join milestones and LOAD1, NET1 kept)
 #   REPORT=auto|1|0    run sim_utils/report.py at the end: <outdir>/report.json.
 #                      auto (default): when LOAD, STATS or SCENARIO is set
+#   RUN_TAG_<KEY>=<text> a label of the run, written as a line
+#                      tag_<key>=<text> in run_info.txt (key in lower case),
+#                      e.g. RUN_TAG_CONFIG="Building 150", RUN_TAG_ACTIVITY=...:
+#                      for the tools that list runs; the run ignores them
 #   IF_NODES="<i> ..." nodes that are clients of the stack-neutral radio
 #                      interface (docs/RADIO_INTERFACE.md) instead of
 #                      wsnode-inproc: each runs IF_CMD_<i> (default IF_CMD)
@@ -153,7 +162,8 @@
 # Output in <outdir>: simserver.log, br.log, node<i>.log (each line starts with
 # NSIM_EPOCH_S + virtual time, written by the simulation port), if<i>.log
 # (the clients' output, as they write it), t0 (= NSIM_EPOCH_S), topology.txt,
-# exit_codes.txt, run_info.txt, and with Nanostack programs only: log_wsbr (the
+# exit_codes.txt, run_info.txt, input/ (copies of the server's network
+# inputs, see SIM_OPTS), and with Nanostack programs only: log_wsbr (the
 # BR's trace file), storage/ (the stack's key storage, fresh for every run),
 # examples (a link to <workdir>/examples). A run of clients only (node 0 in
 # IF_NODES) needs no examples/ in <workdir>.
@@ -236,11 +246,15 @@ abs_words() {   # abs_words <words>: the words, relative paths made absolute
 	echo "${out[*]}"
 }
 # The input files that POWER_OPTS and SIM_OPTS name (--power=FILE,
-# --power-node=IDS:FILE, --group-file=FILE, also as two words) are relative
+# --power-node=IDS:FILE, --group-file=FILE, --positions=FILE, --prop-floorplan=FILE,
+# --interferer-file=FILE, also as two words) are relative
 # to the caller's directory, as POWER and TOPO: made absolute here, and
 # checked. The files that the server writes (--power-out, --power-log,
 # --medium-log, --sniff-log, --vtime-frames) stay relative to <outdir>, where
 # the server runs: each run keeps its own.
+# The network's inputs among them (--positions, --prop-floorplan,
+# --interferer-file) are copied into <outdir>/input/ and named by their
+# copies: the run keeps the files it ran with.
 abs_input() {   # abs_input <option> <file>: the file's absolute path
 	local f=$2
 	[[ $f == /* ]] || f=$CALLER/${f#./}
@@ -250,8 +264,18 @@ abs_input() {   # abs_input <option> <file>: the file's absolute path
 	fi
 	realpath "$f"
 }
+copy_input() {   # copy_input <option> <file>: the path of a copy in <outdir>/input/
+	local f b d k
+	f=$(abs_input "$1" "$2") || return 1
+	mkdir -p "$OUT/input" || return 1
+	b=$(basename "$f"); d=$OUT/input/$b
+	for (( k = 2; k < 1000; k++ )); do [ -e "$d" ] || break; d=$OUT/input/$k-$b; done
+	cp "$f" "$d" || return 1
+	echo "$d"
+}
 abs_opt_value() {   # abs_opt_value <option> <value>: the value, its file made absolute
 	case $1 in
+	--positions|--prop-floorplan|--interferer-file) copy_input "$1" "$2" ;;
 	--power-node)
 		[[ $2 == *:* ]] || { echo "run.sh: --power-node: expected IDS:PROFILE, got $2" >&2; return 1; }
 		local f; f=$(abs_input "$1" "${2#*:}") || return 1
@@ -268,9 +292,9 @@ abs_server_opts() {   # abs_server_opts <words>: the words, input files made abs
 			next=
 		else
 			case $w in
-			--power=*|--power-node=*|--group-file=*)
+			--power=*|--power-node=*|--group-file=*|--positions=*|--prop-floorplan=*|--interferer-file=*)
 				o=${w%%=*}; w=$o=$(abs_opt_value "$o" "${w#*=}") || return 1 ;;
-			--power|--power-node|--group-file) next=$w ;;
+			--power|--power-node|--group-file|--positions|--prop-floorplan|--interferer-file) next=$w ;;
 			esac
 		fi
 		out+=("$w")
@@ -351,6 +375,9 @@ phy_env=$(env | grep '^WSSIM_PHY_' | sort | tr '\n' ' ')
 bin=$BIN work=$WORK
 start_wall=$(date +%s.%N)
 EOF
+for v in $(compgen -v RUN_TAG_); do
+	k=${v#RUN_TAG_}; printf 'tag_%s=%s\n' "${k,,}" "${!v//$'\n'/ }" >> "$OUT/run_info.txt"
+done
 
 declare -A NAME   # pid -> log name
 declare -A ACTIVE # pids started and not yet reaped: the only ones signalled

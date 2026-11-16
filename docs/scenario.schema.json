@@ -97,7 +97,11 @@
        "title": "Interval",
        "description": "Instead of rate_pps: mean interval of each router (default 30 s)",
        "x-unit": "s",
-       "minimum": 0.001
+       "minimum": 0.001,
+       "x-default": {
+        "value": 30,
+        "text": "30 s when neither rate_pps nor rate_of is given"
+       }
       },
       "rate_of": {
        "$ref": "#/$defs/relative"
@@ -287,7 +291,15 @@
      "enum": [
       "operational",
       "ready"
-     ]
+     ],
+     "x-default": {
+      "rule": "by_kind",
+      "map": {
+       "formed": "ready",
+       "node_event": "operational"
+      },
+      "text": "ready for formed, operational for node_event"
+     }
     },
     "stable_s": {
      "type": "number",
@@ -359,7 +371,18 @@
       "<=",
       "<",
       "=="
-     ]
+     ],
+     "x-default": {
+      "rule": "worse_than",
+      "up": "<",
+      "down": ">=",
+      "up_metrics": [
+       "pdr",
+       "delivered_pps",
+       "joined_fraction"
+      ],
+      "text": "worse than the value (< for pdr, delivered_pps and joined_fraction, else >=)"
+     }
     },
     "value": {
      "type": "number",
@@ -384,7 +407,11 @@
       "down",
       "mcast",
       "p2p"
-     ]
+     ],
+     "x-default": {
+      "value": "up",
+      "text": "up, else the first flow running"
+     }
     },
     "window_s": {
      "type": "number",
@@ -399,7 +426,12 @@
      "title": "Samples",
      "description": "For pdr, rtt and latency metrics: at least this many packets in the window, else the condition is not decided yet (default: settings.min_samples)",
      "x-unit": "packets",
-     "minimum": 1
+     "minimum": 1,
+     "x-default": {
+      "rule": "setting",
+      "setting": "min_samples",
+      "text": "the scenario setting min_samples"
+     }
     },
     "of": {
      "type": "array",
@@ -610,7 +642,15 @@
        "enum": [
         "operational",
         "ready"
-       ]
+       ],
+       "x-default": {
+        "rule": "by_kind",
+        "map": {
+         "formed": "ready",
+         "node_event": "operational"
+        },
+        "text": "ready for formed, operational for node_event"
+       }
       },
       "stable_s": {
        "type": "number",
@@ -682,7 +722,18 @@
         "<=",
         "<",
         "=="
-       ]
+       ],
+       "x-default": {
+        "rule": "worse_than",
+        "up": "<",
+        "down": ">=",
+        "up_metrics": [
+         "pdr",
+         "delivered_pps",
+         "joined_fraction"
+        ],
+        "text": "worse than the value (< for pdr, delivered_pps and joined_fraction, else >=)"
+       }
       },
       "value": {
        "type": "number",
@@ -707,7 +758,11 @@
         "down",
         "mcast",
         "p2p"
-       ]
+       ],
+       "x-default": {
+        "value": "up",
+        "text": "up, else the first flow running"
+       }
       },
       "window_s": {
        "type": "number",
@@ -722,7 +777,12 @@
        "title": "Samples",
        "description": "For pdr, rtt and latency metrics: at least this many packets in the window, else the condition is not decided yet (default: settings.min_samples)",
        "x-unit": "packets",
-       "minimum": 1
+       "minimum": 1,
+       "x-default": {
+        "rule": "setting",
+        "setting": "min_samples",
+        "text": "the scenario setting min_samples"
+       }
       },
       "of": {
        "type": "array",
@@ -1155,7 +1215,11 @@
          "title": "Interval",
          "description": "Instead of rate_pps: mean interval of each router (default 30 s)",
          "x-unit": "s",
-         "minimum": 0.001
+         "minimum": 0.001,
+         "x-default": {
+          "value": 30,
+          "text": "30 s when neither rate_pps nor rate_of is given"
+         }
         },
         "rate_of": {
          "$ref": "#/$defs/relative"
@@ -1348,7 +1412,15 @@
        "enum": [
         "operational",
         "ready"
-       ]
+       ],
+       "x-default": {
+        "rule": "by_kind",
+        "map": {
+         "formed": "ready",
+         "node_event": "operational"
+        },
+        "text": "ready for formed, operational for node_event"
+       }
       },
       "stable_s": {
        "type": "number",
@@ -1420,7 +1492,18 @@
         "<=",
         "<",
         "=="
-       ]
+       ],
+       "x-default": {
+        "rule": "worse_than",
+        "up": "<",
+        "down": ">=",
+        "up_metrics": [
+         "pdr",
+         "delivered_pps",
+         "joined_fraction"
+        ],
+        "text": "worse than the value (< for pdr, delivered_pps and joined_fraction, else >=)"
+       }
       },
       "value": {
        "type": "number",
@@ -1445,7 +1528,11 @@
         "down",
         "mcast",
         "p2p"
-       ]
+       ],
+       "x-default": {
+        "value": "up",
+        "text": "up, else the first flow running"
+       }
       },
       "window_s": {
        "type": "number",
@@ -1460,7 +1547,12 @@
        "title": "Samples",
        "description": "For pdr, rtt and latency metrics: at least this many packets in the window, else the condition is not decided yet (default: settings.min_samples)",
        "x-unit": "packets",
-       "minimum": 1
+       "minimum": 1,
+       "x-default": {
+        "rule": "setting",
+        "setting": "min_samples",
+        "text": "the scenario setting min_samples"
+       }
       },
       "of": {
        "type": "array",
@@ -1771,7 +1863,11 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Phase name (default: the block's)"
+     "description": "Phase name (default: the block's)",
+     "x-default": {
+      "value": "formed",
+      "text": "the block's name"
+     }
     },
     "fraction": {
      "type": "number",
@@ -1820,14 +1916,24 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Phase name (default: the block's)"
+     "description": "Phase name (default: the block's)",
+     "x-default": {
+      "value": "probe",
+      "text": "the block's name"
+     }
     },
     "rate_pps": {
      "type": "number",
      "title": "Rate",
      "description": "Offered packets/s, whole network (default: one packet per router every 30 s, at most 0.5 packets/s)",
      "x-unit": "packets/s",
-     "exclusiveMinimum": 0
+     "exclusiveMinimum": 0,
+     "x-default": {
+      "rule": "per_router",
+      "interval_s": 30,
+      "max_pps": 0.5,
+      "text": "one packet per router every 30 s, at most 0.5 packets/s"
+     }
     },
     "flows": {
      "type": "array",
@@ -1894,7 +2000,11 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Phase name (default: the block's)"
+     "description": "Phase name (default: the block's)",
+     "x-default": {
+      "value": "capacity",
+      "text": "the block's name"
+     }
     },
     "baseline": {
      "type": "string",
@@ -1907,7 +2017,13 @@
      "title": "First rate",
      "description": "Packets/s of the first step (default: 2 x the baseline's)",
      "x-unit": "packets/s",
-     "exclusiveMinimum": 0
+     "exclusiveMinimum": 0,
+     "x-default": {
+      "rule": "times_baseline",
+      "factor": 2,
+      "field": "baseline",
+      "text": "2 x the rate of the baseline phase"
+     }
     },
     "mul": {
      "type": "number",
@@ -2021,12 +2137,12 @@
   "block_interference": {
    "type": "object",
    "title": "Interference",
-   "description": "An external interferer from the start of the phase, under a share of the capacity found",
+   "description": "An external interferer from the start of the phase, under a share of the capacity found; optionally first a reference at the same load without it (<name>_reference), the baseline of a recovery",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "An external interferer from the start of the phase, under a share of the capacity found",
+     "description": "An external interferer from the start of the phase, under a share of the capacity found; optionally first a reference at the same load without it (<name>_reference), the baseline of a recovery",
      "enum": [
       "interference"
      ]
@@ -2034,7 +2150,11 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Phase name (default: the block's)"
+     "description": "Phase name (default: the block's)",
+     "x-default": {
+      "value": "interference",
+      "text": "the block's name"
+     }
     },
     "spec": {
      "type": "string",
@@ -2062,6 +2182,14 @@
      "maximum": 2,
      "default": 0.8
     },
+    "reference_s": {
+     "type": "number",
+     "title": "Reference",
+     "description": "Before the interferer: this long measured at the same load without it, as the phase <name>_reference (0: none)",
+     "x-unit": "s",
+     "minimum": 0,
+     "default": 0
+    },
     "duration_s": {
      "type": "number",
      "title": "Duration",
@@ -2073,7 +2201,7 @@
     "settle_s": {
      "type": "number",
      "title": "Settle",
-     "description": "Not measured at the start",
+     "description": "Not measured at the start (of the reference too)",
      "x-unit": "s",
      "minimum": 0,
      "default": 30
@@ -2101,7 +2229,11 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Phase name (default: the block's)"
+     "description": "Phase name (default: the block's)",
+     "x-default": {
+      "value": "recovery",
+      "text": "the block's name"
+     }
     },
     "interferer_name": {
      "type": "string",
@@ -2153,7 +2285,11 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Phase name (default: the block's)"
+     "description": "Phase name (default: the block's)",
+     "x-default": {
+      "value": "node_failure",
+      "text": "the block's name"
+     }
     },
     "nodes": {
      "$ref": "#/$defs/selector"
@@ -2202,12 +2338,12 @@
   "block_node_restart": {
    "type": "object",
    "title": "Node restart",
-   "description": "Start the failed nodes again (fresh instances) and measure until they joined again",
+   "description": "Start the failed nodes again (fresh instances) under a share of the capacity, and measure until they are ready again and in the border router's routing table",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "Start the failed nodes again (fresh instances) and measure until they joined again",
+     "description": "Start the failed nodes again (fresh instances) under a share of the capacity, and measure until they are ready again and in the border router's routing table",
      "enum": [
       "node_restart"
      ]
@@ -2215,13 +2351,32 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Phase name (default: the block's)"
+     "description": "Phase name (default: the block's)",
+     "x-default": {
+      "value": "node_restart",
+      "text": "the block's name"
+     }
     },
     "label": {
      "type": "string",
      "title": "Label",
      "description": "The nodes of an earlier action",
      "default": "failed"
+    },
+    "capacity_phase": {
+     "type": "string",
+     "title": "Capacity phase",
+     "description": "Where the capacity comes from (\"\": keep the load)",
+     "default": "capacity"
+    },
+    "load_fraction": {
+     "type": "number",
+     "title": "Load",
+     "description": "Share of the capacity offered",
+     "x-unit": "ratio",
+     "exclusiveMinimum": 0,
+     "maximum": 2,
+     "default": 0.5
     },
     "max_s": {
      "type": "number",
@@ -2253,7 +2408,11 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Phase name (default: the block's)"
+     "description": "Phase name (default: the block's)",
+     "x-default": {
+      "value": "capacity_check",
+      "text": "the block's name"
+     }
     },
     "capacity_phase": {
      "type": "string",
