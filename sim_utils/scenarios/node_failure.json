@@ -7,7 +7,7 @@
     {"use": "probe", "duration_s": 300},
     {"use": "capacity", "max_rtt_ms": 5000},
     {"use": "node_outage", "name": "failure", "mode": "off", "load_fraction": 0.5, "max_s": 600},
-    {"use": "capacity_check", "start_fraction": 0.5},
+    {"use": "capacity", "name": "capacity_check", "start_from": "capacity", "start_fraction": 0.5, "baseline": "self", "max_steps": 8},
     {"use": "node_outage", "name": "restart", "mode": "on", "of_step": "failure", "load_fraction": 0.5, "max_s": 600}
   ],
   "plots": [

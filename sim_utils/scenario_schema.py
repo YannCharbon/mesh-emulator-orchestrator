@@ -476,12 +476,30 @@ def _expand_capacity(p, name, base, start_load):
 
 
 def _capacity(p):
+    """A capacity search. Its reference RTT: an earlier phase (baseline), or with baseline "self" a light-load
+    probe of its own first (<name>_probe, of probe_s). Its first rate: start_rate_pps, a share (start_fraction) of
+    the capacity an earlier capacity search found (start_from), or twice the baseline's offered rate."""
+    name = p.get('name', 'capacity')
+    out = []
     base = p.get('baseline', 'probe')
-    if 'start_rate_pps' in p:
+    if base == 'self':          # its own light-load probe: a baseline of the network as it is now
+        base = name + '_probe'
+        out.append(_probe_phase(base, {'duration_s': p.get('probe_s', 300), 'settle_s': 30,
+                                       'flows': p.get('flows', ['up']), 'payload_b': p.get('payload_b', 64)}))
+    if 'start_from' in p:
+        start = {'rate_of': {'phase': p['start_from'], 'metric': 'capacity_pps', 'factor': p.get('start_fraction', 0.5)}}
+    elif 'start_rate_pps' in p:
         start = {'rate_pps': p['start_rate_pps']}
     else:
         start = {'rate_of': {'phase': base, 'metric': 'offered_pps', 'factor': 2}}
-    return [_expand_capacity(p, p.get('name', 'capacity'), base, start)]
+    out.append(_expand_capacity(p, name, base, start))
+    return out
+
+
+def _capacity_map(p):
+    """Where the expanded capacity search's references come from in the block's own fields."""
+    return {'-1/repeat/until/of/0/relative_to': 'baseline',
+            '-1/load/rate_of': 'start_from' if 'start_from' in p else 'baseline'}
 
 
 def _interference(p):
@@ -605,9 +623,18 @@ BLOCKS = {
         'title': 'Capacity search',
         'doc': 'Raise the load until the RTT reaches the RTT factor times the baseline RTT, the maximum RTT reaches '
                'its limit, or the delivery ratio falls below its minimum, on several windows in a row. The capacity '
-               'is the offered load measured at the last level before saturation',
+               'is the offered load measured at the last level before saturation. Optionally start from a share of '
+               'an earlier capacity and measure a new reference first (for example after a repair)',
         'params': {
-            'baseline': S('string', 'Baseline phase', 'The phase whose RTT is the reference', default='probe'),
+            'baseline': S('string', 'Reference RTT', 'The earlier phase whose RTT is the reference, or "self": a '
+                          'light-load probe of the network as it is now, measured first', default='probe'),
+            'probe_s': S('number', 'Probe duration', 'With reference "self": the probe\'s measured time', 's', minimum=1,
+                         default=300),
+            'start_from': S('string', 'Start from capacity', 'Start at a share of the capacity this earlier capacity '
+                            'search found, instead of from the baseline\'s rate',
+                            **{'x-default': {'text': 'from the light load of the baseline'}}),
+            'start_fraction': S('number', 'Share of that capacity', 'With a start from an earlier capacity: the share '
+                                'offered in the first window', 'ratio', exclusiveMinimum=0, default=0.5),
             'start_rate_pps': S('number', 'Initial rate', 'Offered load of the first window',
                                 'packets/s', exclusiveMinimum=0,
                                 **{'x-default': {'rule': 'times_baseline', 'factor': 2, 'field': 'baseline',
@@ -625,8 +652,10 @@ BLOCKS = {
             'flows': P['flows'],
             'payload_b': P['payload_b'],
         },
+        'rules': [exclusive(['start_from', 'start_rate_pps'], 'Give an initial rate or an earlier capacity to start '
+                            'from, not both')],
         'expand': _capacity,
-        'map': {'0/repeat/until/of/0/relative_to': 'baseline', '0/load/rate_of': 'baseline'},
+        'map': _capacity_map,
     },
     'interference': {
         'title': 'Interference',
@@ -764,6 +793,7 @@ BLOCKS = {
     },
     'capacity_check': {
         'title': 'Capacity recheck',
+        'legacy': 'capacity with start_from and baseline "self"',
         'doc': 'Search the capacity again (for example after a repair), from a share of an earlier capacity and '
                'against a new baseline: by default, a probe of the network in its current state, then the search',
         'params': {
@@ -1267,7 +1297,8 @@ def _map_block_errors(doc, errs):
         use = doc['phases'][i].get('use')
         parts = len(BLOCKS[use]['expand'](doc['phases'][i]))
         param = None
-        for k, v in BLOCKS[use]['map'].items():
+        mp = BLOCKS[use]['map']
+        for k, v in (mp(doc['phases'][i]) if callable(mp) else mp).items():
             kp, _, kr = k.partition('/')
             if int(kp) % parts == part and (rest == kr or rest.startswith(kr + '/')):
                 param = v
@@ -1444,7 +1475,7 @@ def phase_title(p):
             acts.append('write a mark in the logs')
     if b == 'formed':
         return 'Wait for the network to form'
-    if b == 'probe' or (b == 'capacity_check' and p['name'].endswith('_probe')):
+    if b == 'probe' or (b in ('capacity', 'capacity_check') and 'repeat' not in p):
         return 'Light-load baseline: RTT, one-way delay and delivery ratio per hop count'
     if 'repeat' in p:
         return 'Raise the load until saturation'

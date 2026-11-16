@@ -233,6 +233,22 @@ def test_validator():
           'expand: node_restart at 0.3 x the capacity, ends when ready and in the border router\'s table')
     e = errors_of(dict(rs, phases=rs['phases'][:3] + [{'use': 'node_restart', 'capacity_phase': 'zz'}]))
     check(any(x['path'] == '/phases/3/capacity_phase' for x in e), 'validator: node_restart from an unknown capacity')
+    # a capacity search from a share of an earlier capacity, against its own new probe: the old capacity_check
+    base = [{'use': 'probe'}, {'use': 'capacity'}]
+    old = scenario.dry({'format': scenario.FORMAT, 'phases': base + [{'use': 'capacity_check', 'start_fraction': 0.4}]})
+    new_doc = {'format': scenario.FORMAT, 'phases': base + [{'use': 'capacity', 'name': 'capacity_check',
+               'start_from': 'capacity', 'start_fraction': 0.4, 'baseline': 'self', 'max_steps': 8}]}
+    new = scenario.dry(new_doc)
+    check(errors_of(new_doc) == [] and [p['phase'] for p in old['phases']] == [p['phase'] for p in new['phases']]
+          and [p['title'] for p in old['phases']] == [p['title'] for p in new['phases']] and len(new['phases']) == 4,
+          'expand: capacity with start_from and baseline self = the legacy capacity_check')
+    e = errors_of(dict(new_doc, phases=base + [{'use': 'capacity', 'name': 'c2', 'start_from': 'zz'}]))
+    check([x['path'] for x in e] == ['/phases/2/start_from'], f'validator: start_from an unknown phase ({e})')
+    e = errors_of(dict(new_doc, phases=base + [{'use': 'capacity', 'name': 'c2', 'start_from': 'capacity',
+                                                'start_rate_pps': 1}]))
+    check(len(e) == 1 and 'not both' in e[0]['message'], 'validator: start_from and start_rate_pps refused together')
+    sch_b = scenario.schema()['$defs']['block_capacity_check']
+    check(sch_b.get('x-hidden') is True, 'schema: capacity_check hidden (legacy)')
     dr = scenario.dry(ok)
     check(len(dr['phases']) == 5 and dr['virtual_s_max'] > 0, f'dry: 5 phases, at most {dr["virtual_s_max"]} s')
     sch = scenario.schema()

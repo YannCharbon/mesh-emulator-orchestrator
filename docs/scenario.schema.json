@@ -2298,12 +2298,12 @@
   "block_capacity": {
    "type": "object",
    "title": "Capacity search",
-   "description": "Raise the load until the RTT reaches the RTT factor times the baseline RTT, the maximum RTT reaches its limit, or the delivery ratio falls below its minimum, on several windows in a row. The capacity is the offered load measured at the last level before saturation",
+   "description": "Raise the load until the RTT reaches the RTT factor times the baseline RTT, the maximum RTT reaches its limit, or the delivery ratio falls below its minimum, on several windows in a row. The capacity is the offered load measured at the last level before saturation. Optionally start from a share of an earlier capacity and measure a new reference first (for example after a repair)",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "Raise the load until the RTT reaches the RTT factor times the baseline RTT, the maximum RTT reaches its limit, or the delivery ratio falls below its minimum, on several windows in a row. The capacity is the offered load measured at the last level before saturation",
+     "description": "Raise the load until the RTT reaches the RTT factor times the baseline RTT, the maximum RTT reaches its limit, or the delivery ratio falls below its minimum, on several windows in a row. The capacity is the offered load measured at the last level before saturation. Optionally start from a share of an earlier capacity and measure a new reference first (for example after a repair)",
      "enum": [
       "capacity"
      ]
@@ -2319,9 +2319,33 @@
     },
     "baseline": {
      "type": "string",
-     "title": "Baseline phase",
-     "description": "The phase whose RTT is the reference",
+     "title": "Reference RTT",
+     "description": "The earlier phase whose RTT is the reference, or \"self\": a light-load probe of the network as it is now, measured first",
      "default": "probe"
+    },
+    "probe_s": {
+     "type": "number",
+     "title": "Probe duration",
+     "description": "With reference \"self\": the probe's measured time",
+     "x-unit": "s",
+     "minimum": 1,
+     "default": 300
+    },
+    "start_from": {
+     "type": "string",
+     "title": "Start from capacity",
+     "description": "Start at a share of the capacity this earlier capacity search found, instead of from the baseline's rate",
+     "x-default": {
+      "text": "from the light load of the baseline"
+     }
+    },
+    "start_fraction": {
+     "type": "number",
+     "title": "Share of that capacity",
+     "description": "With a start from an earlier capacity: the share offered in the first window",
+     "x-unit": "ratio",
+     "exclusiveMinimum": 0,
+     "default": 0.5
     },
     "start_rate_pps": {
      "type": "number",
@@ -2443,6 +2467,21 @@
    "additionalProperties": false,
    "required": [
     "use"
+   ],
+   "allOf": [
+    {
+     "not": {
+      "anyOf": [
+       {
+        "required": [
+         "start_from",
+         "start_rate_pps"
+        ]
+       }
+      ]
+     },
+     "x-message": "Give an initial rate or an earlier capacity to start from, not both"
+    }
    ]
   },
   "block_interference": {
@@ -2973,7 +3012,9 @@
    "additionalProperties": false,
    "required": [
     "use"
-   ]
+   ],
+   "x-hidden": true,
+   "x-legacy": "kept for older files; the builder uses capacity with start_from and baseline \"self\""
   },
   "selector": {
    "type": "object",
