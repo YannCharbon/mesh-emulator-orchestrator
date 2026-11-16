@@ -143,6 +143,8 @@ class Run:
                 except ValueError:
                     continue
                 j['t'] = j['t_us'] / 1e6
+                # The instance that wrote it: a restarted node's counters start again from 0
+                j['inst'] = inst
                 if self.keep_net:
                     node.net.append(j)
                 else:
@@ -393,53 +395,97 @@ def packet_metrics(run, t_from, t_to, t_eval, flows=None, hop_of=None):
 
 def net_delta(run, t_from, t_to, nodes=None):
     """Per node, the change of its NET1 counters between its last samples at or
-    before t_from and t_to, with its mean queue depths over the interval."""
+    before t_from and t_to, with its mean queue depths over the interval.
+
+    A node restarted in the interval (node<i>.r<k>.log) has its counters
+    starting again from 0 in each instance: the change is the sum over the
+    instances that wrote samples in the interval, each from its own first
+    reference (the sample at or before t_from for the instance running then,
+    0 for a later one) to its last sample at or before t_to. Peaks are the
+    highest of the instances'."""
     out = {}
     for nid in (nodes or sorted(run.nodes)):
         a, b = run.last_net(nid, t_from), run.last_net(nid, t_to)
         if b is None:
             continue
-        z = {}
-        def g(s, *path):
-            for p in path:
-                if s is None:
-                    return 0
-                s = s.get(p)
-            return s or 0
+        # (reference, last sample) of each instance, in order
+        segs, cur = [], None
+        for smp in run.nodes[nid].net:
+            if smp['t'] > t_to + 1e-9:
+                break
+            if a is not None and smp['t'] <= a['t'] + 1e-9 and smp is not a:
+                continue
+            inst = smp.get('inst', 0)
+            if cur is None or cur[0] != inst:
+                ref = a if (a is not None and a.get('inst', 0) == inst) else None
+                cur = [inst, ref, smp]
+                segs.append(cur)
+            else:
+                cur[2] = smp
+        parts = [_net_delta1(ref, last) for _, ref, last in segs if last is not ref] or [_net_delta1(b, b)]
         dt = (b['t_us'] - (a['t_us'] if a else 0)) or 1
         d = {}
-        for k in ('tx', 'rx', 'bc_tx', 'retry_attempts', 'cca_att', 'cca_fail', 'rx_drop', 'bc_done'):
-            d['mac_' + k] = g(b, 'mac', k) - g(a, 'mac', k)
-        # Unicast frames the MAC confirmed: successes by retries, and give-ups
-        hb = g(b, 'mac', 'uc_retry_hist') or []
-        ha = g(a, 'mac', 'uc_retry_hist') or [0] * len(hb)
-        d['uc_retry_hist'] = [x - y for x, y in zip(hb, ha)]
-        gu = {k: g(b, 'mac', 'uc_give_up', k) - g(a, 'mac', 'uc_give_up', k)
-              for k in ('no_ack', 'channel_access', 'other')}
-        d['uc_give_up'] = gu
-        d['give_up'] = sum(gu.values())
+        for k in parts[0]:
+            v0 = parts[0][k]
+            if k in ('mac_q_int', 'al_q_int'):
+                d[k] = sum(p[k] for p in parts)
+            elif k in ('mac_q_peak', 'al_q_peak'):
+                d[k] = max(p[k] for p in parts)
+            elif k == 'uc_retry_hist':
+                n = max(len(p[k]) for p in parts)
+                d[k] = [sum((p[k][i] if i < len(p[k]) else 0) for p in parts) for i in range(n)]
+            elif k == 'uc_give_up':
+                d[k] = {r: sum(p[k][r] for p in parts) for r in v0}
+            elif isinstance(v0, (int, float)) and not isinstance(v0, bool):
+                d[k] = sum(p[k] for p in parts)
+        d['mac_q_mean'] = d.pop('mac_q_int') / dt
+        d['al_q_mean'] = d.pop('al_q_int') / dt
+        d['give_up'] = sum(d['uc_give_up'].values())
         d['uc_frames'] = sum(d['uc_retry_hist']) + d['give_up']
-        d['sock_tx_fail'] = g(b, 'app', 'sock', 'tx_fail') - g(a, 'app', 'sock', 'tx_fail')
-        d['mac_q_mean'] = (g(b, 'mac', 'q_int_us') - g(a, 'mac', 'q_int_us')) / dt
-        d['al_q_mean'] = (g(b, 'al', 'q_int_us') - g(a, 'al', 'q_int_us')) / dt
-        d['mac_q_peak'] = g(b, 'mac', 'q_max')
-        d['al_q_peak'] = g(b, 'al', 'q_max')
-        d['mac_q_now'] = g(b, 'mac', 'q')
-        d['al_q_now'] = g(b, 'al', 'q')
-        d['red_drop'] = g(b, 'al', 'red_drop') - g(a, 'al', 'red_drop')
-        d['no_route'] = g(b, 'ip', 'no_route') - g(a, 'ip', 'no_route')
-        d['parent_changes'] = g(b, 'rpl', 'parent_changes') - g(a, 'rpl', 'parent_changes')
-        d['parent_tx_fail'] = g(b, 'rpl', 'parent_tx_fail') - g(a, 'rpl', 'parent_tx_fail')
-        for k in ('dis', 'dio', 'dao'):
-            d['ctl_' + k] = g(b, 'ctl', k) - g(a, 'ctl', k)
+        d['mac_q_now'] = _g(b, 'mac', 'q')
+        d['al_q_now'] = _g(b, 'al', 'q')
         ok = sum(d['uc_retry_hist'])
         # retries per unicast frame delivered (bin 8 counts 8 or more)
         d['retries_per_frame'] = (sum(i * x for i, x in enumerate(d['uc_retry_hist'])) / ok) if ok else None
-        d['parent'] = g(b, 'rpl', 'parent') if b.get('rpl', {}).get('parent') is not None else None
+        d['parent'] = _g(b, 'rpl', 'parent') if b.get('rpl', {}).get('parent') is not None else None
         d['dag_rank'] = b.get('rpl', {}).get('dag_rank')
         d['rank'] = b.get('rpl', {}).get('rank')
+        d['instances'] = len(segs)
         out[nid] = d
     return out
+
+
+def _g(s, *path):
+    for p in path:
+        if s is None:
+            return 0
+        s = s.get(p)
+    return s or 0
+
+
+def _net_delta1(a, b):
+    """The counters' change from sample a (None: 0, a fresh instance) to b, of one instance."""
+    g = _g
+    d = {}
+    for k in ('tx', 'rx', 'bc_tx', 'retry_attempts', 'cca_att', 'cca_fail', 'rx_drop', 'bc_done'):
+        d['mac_' + k] = g(b, 'mac', k) - g(a, 'mac', k)
+    hb = g(b, 'mac', 'uc_retry_hist') or []
+    ha = g(a, 'mac', 'uc_retry_hist') or [0] * len(hb)
+    d['uc_retry_hist'] = [x - y for x, y in zip(hb, ha)]
+    d['uc_give_up'] = {k: g(b, 'mac', 'uc_give_up', k) - g(a, 'mac', 'uc_give_up', k)
+                       for k in ('no_ack', 'channel_access', 'other')}
+    d['sock_tx_fail'] = g(b, 'app', 'sock', 'tx_fail') - g(a, 'app', 'sock', 'tx_fail')
+    d['mac_q_int'] = g(b, 'mac', 'q_int_us') - g(a, 'mac', 'q_int_us')
+    d['al_q_int'] = g(b, 'al', 'q_int_us') - g(a, 'al', 'q_int_us')
+    d['mac_q_peak'] = g(b, 'mac', 'q_max')
+    d['al_q_peak'] = g(b, 'al', 'q_max')
+    d['red_drop'] = g(b, 'al', 'red_drop') - g(a, 'al', 'red_drop')
+    d['no_route'] = g(b, 'ip', 'no_route') - g(a, 'ip', 'no_route')
+    d['parent_changes'] = g(b, 'rpl', 'parent_changes') - g(a, 'rpl', 'parent_changes')
+    d['parent_tx_fail'] = g(b, 'rpl', 'parent_tx_fail') - g(a, 'rpl', 'parent_tx_fail')
+    for k in ('dis', 'dio', 'dao'):
+        d['ctl_' + k] = g(b, 'ctl', k) - g(a, 'ctl', k)
+    return d
 
 
 def retries_per_frame(deltas):
