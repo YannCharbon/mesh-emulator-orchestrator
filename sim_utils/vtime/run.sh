@@ -139,7 +139,7 @@
 #                      auto (default): when LOAD, STATS or SCENARIO is set
 #   RUN_TAG_<KEY>=<text> a label of the run, written as a line
 #                      tag_<key>=<text> in run_info.txt (key in lower case),
-#                      e.g. RUN_TAG_CONFIG="Building 150", RUN_TAG_SCENARIO=...:
+#                      e.g. RUN_TAG_CONFIG="Building 150", RUN_TAG_ACTIVITY=...:
 #                      for the tools that list runs; the run ignores them
 #   IF_NODES="<i> ..." nodes that are clients of the stack-neutral radio
 #                      interface (docs/RADIO_INTERFACE.md) instead of

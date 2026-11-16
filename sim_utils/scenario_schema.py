@@ -158,7 +158,9 @@ COND_PROPS = {
                   'joined', 'ratio', minimum=0, maximum=1, default=1),
     'milestone': S('string', 'Milestone', 'For formed (default ready) and node_event joined (default operational): '
                    'operational (Wi-SUN join done) or ready (RPL routing ready; not repeated when an interface comes '
-                   'back up)', enum=['operational', 'ready']),
+                   'back up)', enum=['operational', 'ready'],
+                   **{'x-default': {'rule': 'by_kind', 'map': {'formed': 'ready', 'node_event': 'operational'},
+                                    'text': 'ready for formed, operational for node_event'}}),
     'stable_s': S('number', 'Stable for', 'For formed: and no parent change anywhere for this long', 's', minimum=0,
                   default=0),
     'nodes': SELECTOR,
@@ -168,17 +170,21 @@ COND_PROPS = {
              default=False),
     'metric': S('string', 'Metric', 'For metric', enum=sorted(METRICS)),
     'op': S('string', 'Comparison', 'For metric. Default: "worse than" the value: >= for delays, queues, '
-            'retries...; < for pdr, delivered_pps and joined_fraction', enum=OPS),
+            'retries...; < for pdr, delivered_pps and joined_fraction', enum=OPS,
+            **{'x-default': {'rule': 'worse_than', 'up': '<', 'down': '>=',
+                             'up_metrics': ['pdr', 'delivered_pps', 'joined_fraction'],
+                             'text': 'worse than the value (< for pdr, delivered_pps and joined_fraction, else >=)'}}),
     'value': S('number', 'Value', 'For metric: the threshold, in the metric\'s unit (or relative_to instead)'),
     'relative_to': REL,
     'per_hop': S('boolean', 'Per hop count', 'For metric (rtt, latency): true if the comparison holds for any hop '
                  'count, each against the same hop count of relative_to', default=False),
     'flow': S('string', 'Flow', 'For traffic metrics: the flow (default: up, else the first one running)',
-              enum=FLOWS),
+              enum=FLOWS, **{'x-default': {'value': 'up', 'text': 'up, else the first flow running'}}),
     'window_s': S('number', 'Window', 'For metric: the trailing window of packets sent', 's', minimum=1, default=60),
     'min_samples': S('integer', 'Samples', 'For pdr, rtt and latency metrics: at least this many packets in the '
                      'window, else the condition is not decided yet (default: settings.min_samples)', 'packets',
-                     minimum=1),
+                     minimum=1, **{'x-default': {'rule': 'setting', 'setting': 'min_samples',
+                                                 'text': 'the scenario setting min_samples'}}),
     'of': S('array', 'Conditions', 'For all / any', items={'$ref': '#/$defs/condition'}, minItems=1),
 }
 COND_RULES = [
@@ -219,7 +225,7 @@ LOAD = obj('Load', 'The application load from the start of the phase', {
     'rate_pps': S('number', 'Rate', 'Offered packets per second of each flow, whole network', 'packets/s',
                   exclusiveMinimum=0),
     'interval_s': S('number', 'Interval', 'Instead of rate_pps: mean interval of each router (default 30 s)', 's',
-                    minimum=0.001),
+                    minimum=0.001, **{'x-default': {'value': 30, 'text': '30 s when neither rate_pps nor rate_of is given'}}),
     'rate_of': REL,
     'max_rate_pps': S('number', 'Rate cap', 'With interval_s: at most this rate, whole network (a light probe '
                       'whatever the network size)', 'packets/s', exclusiveMinimum=0),
@@ -411,7 +417,9 @@ BLOCKS = {
         'doc': 'A light load, its RTT, delay and delivery per hop count: the baseline of later phases',
         'params': {
             'rate_pps': S('number', 'Rate', 'Offered packets/s, whole network (default: one packet per router every '
-                          '30 s, at most 0.5 packets/s)', 'packets/s', exclusiveMinimum=0),
+                          '30 s, at most 0.5 packets/s)', 'packets/s', exclusiveMinimum=0,
+                          **{'x-default': {'rule': 'per_router', 'interval_s': 30, 'max_pps': 0.5,
+                                           'text': 'one packet per router every 30 s, at most 0.5 packets/s'}}),
             'flows': P['flows'],
             'duration_s': S('number', 'Duration', 'Measured time', 's', minimum=1, default=300),
             'settle_s': S('number', 'Settle', 'Not measured at the start', 's', minimum=0, default=30),
@@ -428,7 +436,9 @@ BLOCKS = {
         'params': {
             'baseline': S('string', 'Baseline phase', 'The phase whose RTT is the reference', default='probe'),
             'start_rate_pps': S('number', 'First rate', 'Packets/s of the first step (default: 2 x the baseline\'s)',
-                                'packets/s', exclusiveMinimum=0),
+                                'packets/s', exclusiveMinimum=0,
+                                **{'x-default': {'rule': 'times_baseline', 'factor': 2, 'field': 'baseline',
+                                                 'text': '2 x the rate of the baseline phase'}}),
             'mul': P['mul'],
             'max_steps': S('integer', 'Steps', 'At most this many windows', minimum=1, maximum=100, default=12),
             'window_s': P['window_s'],
@@ -565,7 +575,8 @@ def block_schema():
     alts = []
     for name, b in BLOCKS.items():
         props = {'use': S('string', 'Block', b['doc'], enum=[name]),
-                 'name': S('string', 'Name', 'Phase name (default: the block\'s)')}
+                 'name': S('string', 'Name', 'Phase name (default: the block\'s)',
+                           **{'x-default': {'value': name, 'text': 'the block\'s name'}})}
         props.update(b['params'])
         alts.append(obj(b['title'], b['doc'], props, ['use'] + b.get('required', [])))
     return alts
