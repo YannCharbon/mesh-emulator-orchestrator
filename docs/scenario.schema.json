@@ -2021,12 +2021,12 @@
   "block_interference": {
    "type": "object",
    "title": "Interference",
-   "description": "An external interferer from the start of the phase, under a share of the capacity found",
+   "description": "An external interferer from the start of the phase, under a share of the capacity found; optionally first a reference at the same load without it (<name>_reference), the baseline of a recovery",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "An external interferer from the start of the phase, under a share of the capacity found",
+     "description": "An external interferer from the start of the phase, under a share of the capacity found; optionally first a reference at the same load without it (<name>_reference), the baseline of a recovery",
      "enum": [
       "interference"
      ]
@@ -2062,6 +2062,14 @@
      "maximum": 2,
      "default": 0.8
     },
+    "reference_s": {
+     "type": "number",
+     "title": "Reference",
+     "description": "Before the interferer: this long measured at the same load without it, as the phase <name>_reference (0: none)",
+     "x-unit": "s",
+     "minimum": 0,
+     "default": 0
+    },
     "duration_s": {
      "type": "number",
      "title": "Duration",
@@ -2073,7 +2081,7 @@
     "settle_s": {
      "type": "number",
      "title": "Settle",
-     "description": "Not measured at the start",
+     "description": "Not measured at the start (of the reference too)",
      "x-unit": "s",
      "minimum": 0,
      "default": 30
@@ -2202,12 +2210,12 @@
   "block_node_restart": {
    "type": "object",
    "title": "Node restart",
-   "description": "Start the failed nodes again (fresh instances) and measure until they joined again",
+   "description": "Start the failed nodes again (fresh instances) under a share of the capacity, and measure until they are ready again and in the border router's routing table",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "Start the failed nodes again (fresh instances) and measure until they joined again",
+     "description": "Start the failed nodes again (fresh instances) under a share of the capacity, and measure until they are ready again and in the border router's routing table",
      "enum": [
       "node_restart"
      ]
@@ -2222,6 +2230,21 @@
      "title": "Label",
      "description": "The nodes of an earlier action",
      "default": "failed"
+    },
+    "capacity_phase": {
+     "type": "string",
+     "title": "Capacity phase",
+     "description": "Where the capacity comes from (\"\": keep the load)",
+     "default": "capacity"
+    },
+    "load_fraction": {
+     "type": "number",
+     "title": "Load",
+     "description": "Share of the capacity offered",
+     "x-unit": "ratio",
+     "exclusiveMinimum": 0,
+     "maximum": 2,
+     "default": 0.5
     },
     "max_s": {
      "type": "number",

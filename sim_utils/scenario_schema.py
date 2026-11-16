@@ -342,6 +342,22 @@ def _capacity(p):
     return [_expand_capacity(p, p.get('name', 'capacity'), base, start)]
 
 
+def _interference(p):
+    name = p.get('name', 'interference')
+    load = {'rate_of': {'phase': p.get('capacity_phase', 'capacity'), 'metric': 'capacity_pps',
+                        'factor': p.get('load_fraction', 0.8)}}
+    settle = p.get('settle_s', 30)
+    out = []
+    if p.get('reference_s', 0) > 0:    # the same load without the interferer: a recovery's baseline
+        out.append({'name': name + '_reference', 'load': load, 'measure': {'sets': ALL_SETS, 'settle_s': settle},
+                    'end': {'after_s': p['reference_s'] + settle}})
+    out.append({'name': name,
+                'actions': [{'do': 'interferer_add', 'spec': p['spec'], 'name': p.get('interferer_name', 'jam')}],
+                'load': load, 'measure': {'sets': ALL_SETS, 'settle_s': settle},
+                'end': {'after_s': p.get('duration_s', 300)}})
+    return out
+
+
 def _capacity_check(p):
     name = p.get('name', 'capacity_check')
     out = []
@@ -431,7 +447,8 @@ BLOCKS = {
     },
     'interference': {
         'title': 'Interference',
-        'doc': 'An external interferer from the start of the phase, under a share of the capacity found',
+        'doc': 'An external interferer from the start of the phase, under a share of the capacity found; optionally '
+               'first a reference at the same load without it (<name>_reference), the baseline of a recovery',
         'required': ['spec'],
         'params': {
             'spec': ACTION['properties']['spec'],
@@ -439,17 +456,14 @@ BLOCKS = {
             'capacity_phase': S('string', 'Capacity phase', 'Where the capacity comes from', default='capacity'),
             'load_fraction': S('number', 'Load', 'Share of the capacity offered', 'ratio', exclusiveMinimum=0,
                                maximum=2, default=0.8),
+            'reference_s': S('number', 'Reference', 'Before the interferer: this long measured at the same load '
+                             'without it, as the phase <name>_reference (0: none)', 's', minimum=0, default=0),
             'duration_s': S('number', 'Duration', 'Length of the phase', 's', minimum=1, default=300),
-            'settle_s': S('number', 'Settle', 'Not measured at the start', 's', minimum=0, default=30),
+            'settle_s': S('number', 'Settle', 'Not measured at the start (of the reference too)', 's', minimum=0,
+                          default=30),
         },
-        'expand': lambda p: [{
-            'name': p.get('name', 'interference'),
-            'actions': [{'do': 'interferer_add', 'spec': p['spec'], 'name': p.get('interferer_name', 'jam')}],
-            'load': {'rate_of': {'phase': p.get('capacity_phase', 'capacity'), 'metric': 'capacity_pps',
-                                 'factor': p.get('load_fraction', 0.8)}},
-            'measure': {'sets': ALL_SETS, 'settle_s': p.get('settle_s', 30)},
-            'end': {'after_s': p.get('duration_s', 300)}}],
-        'map': {'0/actions/0/spec': 'spec', '0/load/rate_of': 'capacity_phase'},
+        'expand': _interference,
+        'map': {'-1/actions/0/spec': 'spec', '-1/load/rate_of': 'capacity_phase', '0/load/rate_of': 'capacity_phase'},
     },
     'recovery': {
         'title': 'Recovery',
@@ -498,18 +512,26 @@ BLOCKS = {
     },
     'node_restart': {
         'title': 'Node restart',
-        'doc': 'Start the failed nodes again (fresh instances) and measure until they joined again',
+        'doc': 'Start the failed nodes again (fresh instances) under a share of the capacity, and measure until they '
+               'are ready again and in the border router\'s routing table',
         'params': {
             'label': S('string', 'Label', 'The nodes of an earlier action', default='failed'),
+            'capacity_phase': S('string', 'Capacity phase', 'Where the capacity comes from ("": keep the load)',
+                                default='capacity'),
+            'load_fraction': S('number', 'Load', 'Share of the capacity offered', 'ratio', exclusiveMinimum=0,
+                               maximum=2, default=0.5),
             'max_s': S('number', 'Cap', 'At most this long', 's', minimum=1, default=600),
         },
-        'expand': lambda p: [{
+        'expand': lambda p: [dict({
             'name': p.get('name', 'node_restart'),
             'actions': [{'do': 'restart', 'nodes': {'select': 'label', 'label': p.get('label', 'failed')}}],
             'measure': {'sets': ALL_SETS},
-            'end': {'is': 'node_event', 'event': 'joined',
-                    'nodes': {'select': 'label', 'label': p.get('label', 'failed')}, 'max_s': p.get('max_s', 600)}}],
-        'map': {'0/actions/0/nodes': 'label', '0/end/nodes': 'label'},
+            'end': {'is': 'formed', 'milestone': 'ready', 'fraction': 1,
+                    'nodes': {'select': 'label', 'label': p.get('label', 'failed')}, 'max_s': p.get('max_s', 600)}},
+            **({'load': {'rate_of': {'phase': p.get('capacity_phase', 'capacity'), 'metric': 'capacity_pps',
+                                     'factor': p.get('load_fraction', 0.5)}}}
+               if p.get('capacity_phase', 'capacity') else {}))],
+        'map': {'0/actions/0/nodes': 'label', '0/end/nodes': 'label', '0/load/rate_of': 'capacity_phase'},
     },
     'capacity_check': {
         'title': 'Capacity again',
