@@ -510,7 +510,7 @@ def report(d, top=5, pdr_min=0.99, lat_factor=3.0, tail=20.0, window_s=None):
         if row['subtree'] and row['node'] != 0:
             why.append(f'relays for {row["subtree"]} routers below it')
         if row['node'] == 0:
-            why.append('the border router: every packet of the network')
+            why.append('border router: carries every packet of the network')
         row['reasons'] = why
     ranked = sorted(table, key=lambda r: (-(r['score'] or 0), r['node']))
     rep['nodes'] = {'window_s': [r4(a, 3), end_s], 'table': table,
@@ -618,8 +618,8 @@ def queue_flag(run, load_opts, rows):
     steps = [r['tag'] for r in rows if (r.get('queues') or {}).get('mean_max') and r['queues']['mean_max'] > 16]
     if worst[1] <= 32 and not steps:
         return None
-    return {'text': 'no queue_limit: queues grew beyond what a device holds (heap-sized on a PC); delays at '
-                    'these loads include waits a device would turn into drops',
+    return {'text': 'no device queue limit: queues grew beyond what a device can hold, so delays at these loads '
+                    'include waits that a device would turn into drops',
             'al_q_peak': worst[1], 'node': worst[0], 'steps': steps}
 
 

@@ -25,12 +25,12 @@ METRICS = {
     'rtt.mean_ms': ('ms', 'Mean round-trip time (request and echo)', 'traffic', 'high'),
     'rtt.p50_ms': ('ms', 'Median round-trip time', 'traffic', 'high'),
     'rtt.p95_ms': ('ms', '95th percentile of the round-trip time', 'traffic', 'high'),
-    'rtt.max_ms': ('ms', 'Largest round-trip time', 'traffic', 'high'),
-    'rtt.min_ms': ('ms', 'Smallest round-trip time', 'traffic', 'high'),
+    'rtt.max_ms': ('ms', 'Maximum round-trip time', 'traffic', 'high'),
+    'rtt.min_ms': ('ms', 'Minimum round-trip time', 'traffic', 'high'),
     'latency.mean_ms': ('ms', 'Mean one-way delay (send to reception at the target)', 'traffic', 'high'),
     'latency.p95_ms': ('ms', '95th percentile of the one-way delay', 'traffic', 'high'),
-    'latency.max_ms': ('ms', 'Largest one-way delay', 'traffic', 'high'),
-    'offered_pps': ('packets/s', 'Packets sent per second by the flow (measured), whole network', 'traffic', 'high'),
+    'latency.max_ms': ('ms', 'Maximum one-way delay', 'traffic', 'high'),
+    'offered_pps': ('packets/s', 'Packets sent per second by the flow, measured over the whole network', 'traffic', 'high'),
     'delivered_pps': ('packets/s', 'Packets delivered (echoed) per second, whole network', 'traffic', 'low'),
     'queue.mean_max': ('frames', 'Highest mean queue depth of a node (MAC and adaptation layer) over the window',
                        'queues', 'high'),
@@ -43,19 +43,18 @@ METRICS = {
     'mac.cca_fail_rate': ('ratio', 'Channel-access failures / CCA attempts, whole network', 'queues', 'high'),
     'mesh.joined_fraction': ('ratio', 'Routers with a route to the border router (parent chain)', 'mesh', 'low'),
     'mesh.orphans': ('nodes', 'Running routers without a route to the border router', 'mesh', 'high'),
-    'mesh.parent_changes': ('changes', 'Changes to a new parent seen in the window, all routers', 'mesh', 'high'),
+    'mesh.parent_changes': ('changes', 'Parent changes in the window, all routers', 'mesh', 'high'),
     'mesh.max_hops': ('hops', 'Depth of the deepest router', 'mesh', 'high'),
-    'power.avg_ma': ('mA', 'Mean over the routers of their average current in the window (needs power recording)', 'power',
+    'power.avg_ma': ('mA', 'Mean of the routers\' average currents in the window (needs power recording)', 'power',
                      'high'),
     'medium.frames_per_s': ('frames/s', 'Frames sent per second, whole network', 'medium', 'high'),
-    'medium.airtime_s_per_s': ('s/s', 'Airtime of every frame sent per second of the window (sum over all nodes)',
+    'medium.airtime_s_per_s': ('s/s', 'Total airtime of the frames sent, per second of the window (all nodes)',
                                'medium', 'high'),
-    'medium.loss_share': ('ratio', 'Frames lost at receivers that were listening, over those heard (central medium)',
+    'medium.loss_share': ('ratio', 'Share of the frames heard by listening receivers that were lost (central medium)',
                           'medium', 'high'),
-    'loss': ('ratio', 'Share of the application packets lost in the window (sent and not delivered, or not echoed '
-             'when the flow is echoed): one minus the delivery ratio', 'traffic', 'high'),
-    'mac.retries': ('retries', 'MAC retransmissions of the unicast frames delivered in the window (the sum over the '
-                    'frames of their retries), all nodes', 'queues', 'high'),
+    'loss': ('ratio', 'Share of the application packets lost in the window (not delivered, or not echoed for an '
+             'echoed flow): one minus the delivery ratio', 'traffic', 'high'),
+    'mac.retries': ('retries', 'MAC retransmissions of the unicast frames delivered in the window, all nodes', 'queues', 'high'),
     'medium.collisions': ('frames', 'Frames lost at a receiver because another frame or an external interferer '
                           'overlapped them, all receivers, in the window', 'medium', 'high'),
     'medium.collision_share': ('ratio', 'Share of the frames heard by listening receivers that were lost to a '
@@ -68,7 +67,7 @@ PER_NODE = {
     'loss': 'the share of the packets the router originated that were lost',
     'rtt.mean_ms': 'the mean RTT of the packets the router originated',
     'rtt.p95_ms': 'the 95th percentile RTT of the packets the router originated',
-    'rtt.max_ms': 'the largest RTT of the packets the router originated',
+    'rtt.max_ms': 'the maximum RTT of the packets the router originated',
     'queue.mean_max': 'the router\'s mean queue depth (MAC and adaptation layer)',
     'queue.drops': 'the packets the router\'s full queue dropped',
     'mac.retries': 'the MAC retransmissions of the router\'s unicast frames delivered',
@@ -86,7 +85,7 @@ RANK_METRICS = {
     'queue.max': ('frames', 'queue peak', 'Exact peak of the node\'s queue depth (MAC plus adaptation layer), '
                   'reported at every report window: the ranking window may start up to one window early'),
     'rtt.mean_ms': ('ms', 'mean RTT', 'Mean round-trip time of the node\'s packets in the ranking window'),
-    'rtt.max_ms': ('ms', 'largest RTT', 'Largest round-trip time of the node\'s packets in the ranking window'),
+    'rtt.max_ms': ('ms', 'maximum RTT', 'Maximum round-trip time of the node\'s packets in the ranking window'),
     'mac.retries_per_frame': ('retries', 'MAC retries per frame', 'MAC retries per unicast frame the node delivered '
                               'in the ranking window'),
     'mac.retries': ('retries', 'MAC retries', 'MAC retransmissions of the unicast frames the node delivered in the '
@@ -102,11 +101,11 @@ RANK_ALIASES = {'mac.collisions': 'medium.collisions'}     # accepted, hidden
 # Plain titles of the metrics, for sentences
 METRIC_TITLES = {
     'pdr': 'the delivery ratio', 'loss': 'the loss', 'rtt.mean_ms': 'the mean RTT', 'rtt.p50_ms': 'the median RTT',
-    'rtt.p95_ms': 'the RTT p95', 'rtt.max_ms': 'the largest RTT', 'rtt.min_ms': 'the smallest RTT',
+    'rtt.p95_ms': 'the RTT p95', 'rtt.max_ms': 'the maximum RTT', 'rtt.min_ms': 'the minimum RTT',
     'latency.mean_ms': 'the mean one-way delay', 'latency.p95_ms': 'the one-way delay p95',
-    'latency.max_ms': 'the largest one-way delay', 'offered_pps': 'the offered load',
-    'delivered_pps': 'the delivered load', 'queue.mean_max': 'the highest mean queue',
-    'queue.now_max': 'the highest current queue', 'queue.drops': 'the queue drops', 'mac.retries': 'the MAC retries',
+    'latency.max_ms': 'the maximum one-way delay', 'offered_pps': 'the offered load',
+    'delivered_pps': 'the delivered load', 'queue.mean_max': 'the highest mean queue depth',
+    'queue.now_max': 'the highest queue depth at the end', 'queue.drops': 'the queue drops', 'mac.retries': 'the MAC retries',
     'mac.retries_per_frame': 'the MAC retries per frame', 'mac.give_up': 'the frames given up by the MAC',
     'mac.cca_fail_rate': 'the channel-access failure rate', 'mesh.joined_fraction': 'the share of joined routers',
     'mesh.orphans': 'the routers without a route', 'mesh.parent_changes': 'the parent changes',
@@ -122,37 +121,37 @@ SERIES_COLUMNS = {
     't_start_s': ('s', 'Start', 'Start of the window or step (virtual time)'),
     't_end_s': ('s', 'End', 'End of the window or step (virtual time)'),
     't_mid_s': ('s', 'Time', 'Middle of the window or step (virtual time)'),
-    'step_index': ('', 'Step', 'Index of the scenario step running (the entry of "phases"); null outside one'),
+    'step_index': ('', 'Step', 'Index of the scenario step running; empty outside a step'),
     'offered_pps': ('packets/s', 'Offered load', 'Packets sent per second by the main flow (up if running, else '
                     'the first), whole network'),
     'delivered_pps': ('packets/s', 'Delivered load', 'Packets delivered (echoed) per second, main flow'),
     'pdr': ('ratio', 'Delivery ratio', 'Packets delivered (echoed) over packets sent, main flow'),
-    'loss': ('ratio', 'Loss', '1 - delivery ratio, main flow'),
+    'loss': ('ratio', 'Loss', 'One minus the delivery ratio, main flow'),
     'rtt.min_ms': ('ms', 'RTT min', 'Smallest round-trip time, main flow'),
     'rtt.mean_ms': ('ms', 'RTT mean', 'Mean round-trip time, main flow'),
     'rtt.p95_ms': ('ms', 'RTT p95', '95th percentile of the round-trip time, main flow'),
-    'rtt.max_ms': ('ms', 'RTT max', 'Largest round-trip time, main flow'),
-    'latency.mean_ms': ('ms', 'Delay mean', 'Mean one-way delay, main flow'),
-    'latency.p95_ms': ('ms', 'Delay p95', '95th percentile of the one-way delay, main flow'),
+    'rtt.max_ms': ('ms', 'RTT max', 'Maximum round-trip time, main flow'),
+    'latency.mean_ms': ('ms', 'One-way delay mean', 'Mean one-way delay, main flow'),
+    'latency.p95_ms': ('ms', 'One-way delay p95', '95th percentile of the one-way delay, main flow'),
     'mac.retries': ('retries', 'MAC retries', 'MAC retransmissions of the unicast frames delivered, all nodes'),
-    'mac.retries_per_frame': ('retries', 'Retries per frame', 'MAC retries per unicast frame delivered, all nodes'),
+    'mac.retries_per_frame': ('retries', 'MAC retries per frame', 'MAC retries per unicast frame delivered, all nodes'),
     'medium.collisions': ('frames', 'Collisions', 'Frames lost at a receiver to a collision, all receivers'),
     'medium.collision_share': ('ratio', 'Collision share', 'Receptions lost to a collision over frames heard'),
-    'queue.mean_max': ('frames', 'Highest mean queue', 'Highest mean queue depth of a node (MAC plus adaptation '
+    'queue.mean_max': ('frames', 'Highest mean queue depth', 'Highest mean queue depth of a node (MAC plus adaptation '
                        'layer)'),
-    'power.min_ma': ('mA', 'Power min', 'Lowest average current of a router (needs power recording)'),
-    'power.mean_ma': ('mA', 'Power mean', 'Mean over the routers of their average current (needs power recording)'),
-    'power.max_ma': ('mA', 'Power max', 'Highest average current of a router (needs power recording)'),
-    'power.max_node': ('', 'Power max node', 'The router with the highest average current'),
-    'power.br_ma': ('mA', 'Border router power', 'Average current of the border router (needs power recording)'),
-    'mesh.joined_fraction': ('ratio', 'Joined', 'Share of the running routers with a route to the border router '
+    'power.min_ma': ('mA', 'Current min', 'Lowest average current of a router (needs power recording)'),
+    'power.mean_ma': ('mA', 'Current mean', 'Mean of the routers\' average currents (needs power recording)'),
+    'power.max_ma': ('mA', 'Current max', 'Highest average current of a router (needs power recording)'),
+    'power.max_node': ('', 'Highest-current router', 'The router with the highest average current'),
+    'power.br_ma': ('mA', 'Border router current', 'Average current of the border router (needs power recording)'),
+    'mesh.joined_fraction': ('ratio', 'Joined routers', 'Share of the running routers with a route to the border router '
                              'at the end of the window or step'),
 }
 PLOT_POINTS = ['windows', 'steps']
 PLOT_KINDS = ['line', 'scatter']
 REPORT_WINDOW_S = 10
 MEASURE_SETS = {
-    'traffic': 'Delivery, RTT and one-way delay overall and per hop count, offered and delivered throughput',
+    'traffic': 'Delivery, RTT and one-way delay (overall and per hop count), offered and delivered load',
     'queues': 'Per node: queue depths, drops, MAC retries and give-ups, channel-access failures',
     'mesh': 'Topology: parents, depths, orphans, parent changes, RPL control messages',
     'power': 'Per node: charge and average current in the phase, by state (needs power recording)',
@@ -206,8 +205,8 @@ def exclusive(fields, message):
             'x-message': message}
 
 
-SELECTOR = obj('Nodes', 'Which nodes an action acts on, resolved from the topology when the action runs: the '
-               'candidates (select), then optionally ranked by a measured value (rank_by) and picked', {
+SELECTOR = obj('Nodes', 'The nodes an action applies to, resolved from the topology when the action runs: the '
+               'candidates, optionally ranked by a measured value, then picked', {
     'select': S('string', 'Candidates', 'The nodes considered: given by ID, every router, the routers at a hop count, '
                 'the border router\'s children, the router at a hop count on the path of a given node, by storey or '
                 'area (needs a positions file), or the nodes an earlier step switched off', enum=SELECTS,
@@ -217,7 +216,7 @@ SELECTOR = obj('Nodes', 'Which nodes an action acts on, resolved from the topolo
                                      'ancestor': 'Router on the path of a node', 'storey': 'Routers on a storey',
                                      'area': 'Routers in an area', 'step': 'Nodes switched off by an earlier step',
                                      'label': 'Labelled nodes (older files)'}}),
-    'step': S('string', 'Step', 'The name of an earlier step that switched nodes off'),
+    'step': S('string', 'Step', 'The earlier step that switched the nodes off'),
     'id': S('integer', 'Node ID', 'For select id (0: the border router)', minimum=0, maximum=4095),
     'ids': S('array', 'Node IDs', 'For select ids', items={'type': 'integer', 'minimum': 0, 'maximum': 4095},
              minItems=1),
@@ -227,19 +226,18 @@ SELECTOR = obj('Nodes', 'Which nodes an action acts on, resolved from the topolo
     'storey': S('integer', 'Storey', 'For select storey: the FLOOR of the positions file (else Z / 3.5 m)'),
     'box': S('array', 'Area', 'For select area: [x0, y0, x1, y1]', 'm', items={'type': 'number'},
              minItems=4, maxItems=4),
-    'label': S('string', 'Label', 'Legacy (select label): the label of an earlier action; use select step',
+    'label': S('string', 'Label', 'Older files only: the label of an earlier action (use an earlier step instead)',
                **{'x-hidden': True}),
     'rank_by': S('string', 'Rank by', 'Order the candidates by this measured value, highest first. The border '
                  'router is never ranked, and a node without a value (too few packets, no sample) is not ranked',
                  enum=list(RANK_METRICS) + list(RANK_ALIASES),
                  **{'x-hidden-values': list(RANK_ALIASES),
                     'x-enum-titles': {k: v[1][:1].upper() + v[1][1:] for k, v in RANK_METRICS.items()}}),
-    'rank_window_s': S('number', 'Ranking window', 'The ranking value is measured over this long before the step '
+    'rank_window_s': S('number', 'Ranking window', 'The ranking value is measured over this period before the step '
                        'starts', 's', minimum=1, default=60),
-    'pick': S('string', 'Pick', 'Which of the candidates: all of them; the highest by the ranking (a number of '
-              'them, a share of them, or all those at or above a threshold; when none is at or above it, the step '
-              'is skipped); the routers with the largest subtree or the most children; drawn at random; the lowest '
-              'IDs', enum=PICKS,
+    'pick': S('string', 'Pick', 'Which candidates: all of them; the highest by the ranking (a number, a share, or '
+              'all those at or above a threshold; when none reaches it, the step is skipped); the routers with the '
+              'largest subtree or the most children; drawn at random; the lowest IDs', enum=PICKS,
               **{'x-default': {'rule': 'if_field', 'field': 'rank_by', 'then': 'top', 'else': 'all',
                                'text': 'the highest when a ranking is given, else all'},
                  'x-enum-titles': {'all': 'All of them', 'top': 'The highest (a number)',
@@ -259,31 +257,31 @@ SELECTOR = obj('Nodes', 'Which nodes an action acts on, resolved from the topolo
          'Picking the highest share needs a ranking (rank by) and the share'),
     when('pick', 'above', {'required': ['rank_by', 'value']},
          'Picking those at or above a threshold needs a ranking (rank by) and the threshold'),
-    when('select', 'id', {'required': ['id']}, 'select id needs id'),
-    when('select', 'ids', {'required': ['ids']}, 'select ids needs ids'),
-    when('select', 'hop', {'required': ['hop']}, 'select hop needs hop'),
-    when('select', 'ancestor', {'required': ['of', 'hop']}, 'select ancestor needs of and hop'),
-    when('select', 'storey', {'required': ['storey']}, 'select storey needs storey'),
-    when('select', 'area', {'required': ['box']}, 'select area needs box'),
-    when('select', 'label', {'required': ['label']}, 'select label needs label'),
-    when('pick', 'fraction', {'required': ['fraction']}, 'pick fraction needs fraction'),
+    when('select', 'id', {'required': ['id']}, 'Give the node ID'),
+    when('select', 'ids', {'required': ['ids']}, 'Give the node IDs'),
+    when('select', 'hop', {'required': ['hop']}, 'Give the hop count'),
+    when('select', 'ancestor', {'required': ['of', 'hop']}, 'Give the node and the hop count'),
+    when('select', 'storey', {'required': ['storey']}, 'Give the storey'),
+    when('select', 'area', {'required': ['box']}, 'Give the area'),
+    when('select', 'label', {'required': ['label']}, 'Give the label'),
+    when('pick', 'fraction', {'required': ['fraction']}, 'Give the share'),
 ])
 
-REL = obj('Relative to', 'Factor x the same metric (or another one) measured in an earlier phase', {
+REL = obj('Relative to', 'A multiple of a metric measured in an earlier phase', {
     'phase': S('string', 'Phase', 'Name of an earlier phase'),
-    'metric': S('string', 'Metric', 'The earlier phase\'s metric (default: the condition\'s metric); a capacity '
-                'search also has capacity_pps', enum=sorted(METRICS) + ['capacity_pps']),
+    'metric': S('string', 'Metric', 'The metric of the earlier phase (default: the condition\'s metric); a capacity '
+                'search also gives its capacity (capacity_pps)', enum=sorted(METRICS) + ['capacity_pps']),
     'factor': S('number', 'Factor', 'Multiplier of the earlier value', 'ratio', exclusiveMinimum=0, default=1),
 }, ['phase'])
 
 COND_PROPS = {
-    'is': S('string', 'Kind', 'immediately: true at once; time: virtual time reached; elapsed: time since the '
-            'reference (the previous phase\'s end for a start, the phase\'s start for an end); formed: the network '
-            'has joined; node_event: a node joined, changed or lost its parent, restarted; repaired: every router '
-            'cut off by the last disruption that can be repaired has a route again; metric: a measured value '
-            'compared with a threshold; all / any: a combination', enum=CONDITION_KINDS),
-    't_s': S('number', 'Time', 'For time: virtual time since the run\'s start', 's', minimum=0),
-    's': S('number', 'Seconds', 'For elapsed', 's', minimum=0),
+    'is': S('string', 'Kind', 'immediately: at once; time: at a virtual time; elapsed: after a delay (from the previous '
+            'phase\'s end for a start, from the phase\'s start for an end); formed: the network has joined; '
+            'node_event: nodes joined, changed or lost their parent, or restarted; repaired: every router cut off by '
+            'the last repairable disruption has a route again; metric: a measured value compared with a threshold; '
+            'all / any: a combination', enum=CONDITION_KINDS),
+    't_s': S('number', 'Time', 'For time: virtual time since the start of the run', 's', minimum=0),
+    's': S('number', 'Elapsed time', 'For elapsed: time after the reference', 's', minimum=0),
     'fraction': S('number', 'Share of routers', 'For formed: the share of the routers (or of nodes) that must have '
                   'joined', 'ratio', minimum=0, maximum=1, default=1),
     'milestone': S('string', 'Milestone', 'For formed (default ready) and node_event joined (default operational): '
@@ -291,47 +289,48 @@ COND_PROPS = {
                    'back up)', enum=['operational', 'ready'],
                    **{'x-default': {'rule': 'by_kind', 'map': {'formed': 'ready', 'node_event': 'operational'},
                                     'text': 'ready for formed, operational for node_event'}}),
-    'stable_s': S('number', 'Stable for', 'For formed: and no parent change anywhere for this long', 's', minimum=0,
+    'stable_s': S('number', 'Stable for', 'For formed: no parent change anywhere for this long', 's', minimum=0,
                   default=0),
     'nodes': SELECTOR,
     'event': S('string', 'Event', 'For node_event', enum=NODE_EVENTS),
-    'e2e': S('boolean', 'End to end', 'For repaired: also every cut-off router is in the border router\'s routing '
-             'table and got an echo for a packet sent after the disruption (when it takes part in an echoed flow)',
+    'e2e': S('boolean', 'End to end', 'For repaired: every cut-off router must also be in the border router\'s routing '
+             'table and, in an echoed flow, receive an echo for a packet sent after the disruption',
              default=False),
     'metric': S('string', 'Metric', 'For metric', enum=sorted(METRICS)),
-    'op': S('string', 'Comparison', 'For metric. Default: "worse than" the value: >= for delays, queues, '
-            'retries...; < for pdr, delivered_pps and joined_fraction', enum=OPS,
+    'op': S('string', 'Comparison', 'For metric. Default: worse than the value (< for the delivery ratio, the delivered '
+            'load and the share of joined routers; >= otherwise)', enum=OPS,
             **{'x-default': {'rule': 'worse_than', 'up': '<', 'down': '>=',
                              'up_metrics': ['pdr', 'delivered_pps', 'joined_fraction'],
-                             'text': 'worse than the value (< for pdr, delivered_pps and joined_fraction, else >=)'}}),
-    'value': S('number', 'Value', 'For metric: the threshold, in the metric\'s unit (or relative_to instead)'),
+                             'text': 'worse than the value (< for the delivery ratio, the delivered load and the share of joined '
+                             'routers, else >=)'}}),
+    'value': S('number', 'Value', 'For metric: the threshold, in the metric\'s unit (or a value relative to an earlier phase)'),
     'relative_to': REL,
-    'per_hop': S('boolean', 'Per hop count', 'For metric (rtt, latency): true if the comparison holds for any hop '
-                 'count, each against the same hop count of relative_to', default=False),
+    'per_hop': S('boolean', 'Per hop count', 'For RTT and one-way delay metrics: met when the comparison holds at any hop '
+                 'count, each against the same hop count of the earlier phase', default=False),
     'flow': S('string', 'Flow', 'For traffic metrics: the flow (default: up, else the first one running)',
               enum=FLOWS, **{'x-default': {'value': 'up', 'text': 'up, else the first flow running'}}),
     'over': S('string', 'Over', 'For a metric: the value of the whole network, or that of the worst router (the '
               'border router not counted; only for the metrics that exist per router)', enum=['mesh', 'worst_node'],
               default='mesh', **{'x-enum-titles': {'mesh': 'Whole network', 'worst_node': 'Worst router'}}),
     'window_s': S('number', 'Window', 'For metric: the trailing window of packets sent', 's', minimum=1, default=60),
-    'min_samples': S('integer', 'Samples', 'For pdr, rtt and latency metrics: at least this many packets in the '
-                     'window, else the condition is not decided yet (default: settings.min_samples)', 'packets',
+    'min_samples': S('integer', 'Minimum samples', 'For delivery ratio, RTT and one-way delay metrics: at least this many packets '
+                     'in the window, else the condition is not decided yet', 'packets',
                      minimum=1, **{'x-default': {'rule': 'setting', 'setting': 'min_samples',
-                                                 'text': 'the scenario setting min_samples'}}),
+                                                 'text': 'the scenario\'s minimum samples setting'}}),
     'of': S('array', 'Conditions', 'For all / any', items={'$ref': '#/$defs/condition'}, minItems=1),
 }
 COND_RULES = [
-    when('is', 'time', {'required': ['t_s']}, 'a time condition needs t_s'),
-    when('is', 'elapsed', {'required': ['s']}, 'an elapsed condition needs s'),
-    when('is', 'node_event', {'required': ['event', 'nodes']}, 'a node_event condition needs event and nodes'),
+    when('is', 'time', {'required': ['t_s']}, 'Give the time'),
+    when('is', 'elapsed', {'required': ['s']}, 'Give the elapsed time'),
+    when('is', 'node_event', {'required': ['event', 'nodes']}, 'Choose the event and the nodes'),
     when('is', 'metric', {'required': ['metric'], 'oneOf': [
         {'required': ['value'], 'not': {'required': ['relative_to']}},
         {'required': ['relative_to'], 'not': {'required': ['value']}}]},
-        'a metric condition needs a metric and either value or relative_to (not both)'),
-    when('is', 'all', {'required': ['of']}, 'all needs of'),
-    when('is', 'any', {'required': ['of']}, 'any needs of'),
+        'Choose a metric, and either a value or a reference to an earlier phase (not both)'),
+    when('is', 'all', {'required': ['of']}, 'Give the conditions to combine'),
+    when('is', 'any', {'required': ['of']}, 'Give the conditions to combine'),
 ]
-CONDITION = obj('Condition', 'A condition on the run, evaluated live at each poll', COND_PROPS, ['is'],
+CONDITION = obj('Condition', 'A condition on the run, evaluated at each poll', COND_PROPS, ['is'],
                 allOf=COND_RULES)
 
 START = obj('Start', 'When the phase starts (default: right after the previous phase): a condition, with a timeout '
@@ -341,15 +340,15 @@ START = obj('Start', 'When the phase starts (default: right after the previous p
                                 'phase; abort: end the scenario', enum=['start', 'skip', 'abort'], default='start'),
             }), ['is'], allOf=COND_RULES)
 
-END = obj('End', 'When the phase ends: after a fixed duration (after_s), or when a condition holds, with a cap '
-          '(max_s). Default: after 60 s', dict(COND_PROPS, **{
+END = obj('End', 'When the phase ends: after a fixed duration, or when a condition holds, with a time limit. '
+          'Default: after 60 s', dict(COND_PROPS, **{
               'after_s': S('number', 'Duration', 'A fixed duration (no condition)', 's', minimum=0),
-              'max_s': S('number', 'Cap', 'With a condition: end after this long anyway', 's', minimum=0,
+              'max_s': S('number', 'Time limit', 'With a condition: the phase ends after this long at the latest', 's', minimum=0,
                          default=600),
           }), [], allOf=COND_RULES + [
               {'oneOf': [{'required': ['after_s'], 'not': {'anyOf': [{'required': ['is']}, {'required': ['max_s']}]}},
                          {'required': ['is'], 'not': {'required': ['after_s']}}],
-               'x-message': 'end is either after_s alone (a fixed duration) or a condition ("is") with max_s'}])
+               'x-message': 'The end is either a fixed duration, or a condition with a time limit'}])
 
 LOAD = obj('Load', 'The application load from the start of the phase', {
     'flows': S('array', 'Flows', 'up: routers to border router; down: border router to each router; mcast: border '
@@ -357,88 +356,89 @@ LOAD = obj('Load', 'The application load from the start of the phase', {
                items={'type': 'string', 'enum': FLOWS}, minItems=1, default=['up']),
     'rate_pps': S('number', 'Rate', 'Offered packets per second of each flow, whole network', 'packets/s',
                   exclusiveMinimum=0),
-    'interval_s': S('number', 'Interval', 'Instead of rate_pps: mean interval of each router (default 30 s)', 's',
-                    minimum=0.001, **{'x-default': {'value': 30, 'text': '30 s when neither rate_pps nor rate_of is given'}}),
+    'interval_s': S('number', 'Interval', 'Instead of a rate: mean interval between a router\'s packets', 's',
+                    minimum=0.001, **{'x-default': {'value': 30, 'text': '30 s when no rate is given'}}),
     'rate_of': REL,
-    'max_rate_pps': S('number', 'Rate cap', 'With interval_s: at most this rate, whole network (a light probe '
-                      'whatever the network size)', 'packets/s', exclusiveMinimum=0),
+    'max_rate_pps': S('number', 'Rate limit', 'With an interval: at most this rate over the whole network, so '
+                      'that the load stays light at any network size', 'packets/s', exclusiveMinimum=0),
     'payload_b': S('integer', 'Payload', 'UDP payload', 'bytes', minimum=32, maximum=1232, default=64),
-    'dist': S('string', 'Intervals', 'fixed or exp (Poisson)', enum=['fixed', 'exp'], default='exp'),
+    'dist': S('string', 'Packet spacing', 'fixed: regular; exp: random (Poisson)', enum=['fixed', 'exp'], default='exp'),
     'nodes': SELECTOR,
-    'echo': S('boolean', 'Echo', 'Targets answer, so that originators measure the RTT', default=True),
-}, [], allOf=[exclusive(['rate_pps', 'interval_s', 'rate_of'], 'give one of rate_pps, interval_s and rate_of'),
-              exclusive(['rate_pps', 'max_rate_pps'], 'max_rate_pps goes with interval_s, not rate_pps'),
-              exclusive(['rate_of', 'max_rate_pps'], 'max_rate_pps goes with interval_s, not rate_of')])
+    'echo': S('boolean', 'Echo', 'The targets answer each packet so that the senders measure the RTT', default=True),
+}, [], allOf=[exclusive(['rate_pps', 'interval_s', 'rate_of'], 'Give one of rate, interval and relative rate'),
+              exclusive(['rate_pps', 'max_rate_pps'], 'A rate limit applies only with an interval'),
+              exclusive(['rate_of', 'max_rate_pps'], 'A rate limit applies only with an interval')])
 
 ACTION = obj('Action', 'Something done at the start of the phase, after the load is set', {
-    'do': S('string', 'Action', 'kill: power off; restart: power off and a fresh start; leave: the interface goes '
-            'down (a graceful leave); cut_links: every link of the nodes (or to peers) cut; partition: links '
-            'between groups a and b cut; degrade_links: every link of the nodes at rssi_dbm; interferer_add, '
+    'do': S('string', 'Action', 'kill: switch off; restart: switch off and start again; leave: interface down (a graceful '
+            'leave); cut_links: cut every link of the nodes (or those to the peers); partition: cut the links '
+            'between groups a and b; degrade_links: set every link of the nodes to the given RSSI; interferer_add, '
             'interferer_remove: external interference (central medium); mark: a note in the logs', enum=ACTIONS),
     'nodes': SELECTOR,
     'peers': SELECTOR,
     'a': SELECTOR,
     'b': SELECTOR,
-    'for_s': S('number', 'For', 'Undo after this long: restart the killed nodes, interface up, links back, '
-               'interferer removed. Omitted: permanent', 's', exclusiveMinimum=0),
-    'rssi_dbm': S('number', 'RSSI', 'For degrade_links', 'dBm', maximum=0, minimum=-200),
+    'for_s': S('number', 'Duration', 'Undone after this long (switched-off nodes restarted, interface up, '
+               'links restored, interferer removed); permanent when omitted', 's', exclusiveMinimum=0),
+    'rssi_dbm': S('number', 'RSSI', 'For degrade_links: the RSSI of every link of the nodes', 'dBm', maximum=0, minimum=-200),
     'spec': S('string', 'Interferer', 'For interferer_add: as wssimserver --interferer (docs/MEDIUM.md §13.1), '
               'e.g. "chan=0-9,level=-75,kind=fsk,pattern=ge:20ms:80ms"'),
     'name': S('string', 'Name', 'For interferer_add and interferer_remove ("all": every one)'),
     'label': S('string', 'Label', 'Name of the nodes this action picked, for later selections (select label)'),
-    'text': S('string', 'Text', 'For mark'),
+    'text': S('string', 'Text', 'For mark: the note written in the logs'),
 }, ['do'], allOf=[
-    when('do', 'kill', {'required': ['nodes']}, 'kill needs nodes'),
-    when('do', 'restart', {'required': ['nodes']}, 'restart needs nodes'),
-    when('do', 'leave', {'required': ['nodes']}, 'leave needs nodes'),
-    when('do', 'cut_links', {'required': ['nodes']}, 'cut_links needs nodes'),
-    when('do', 'degrade_links', {'required': ['nodes', 'rssi_dbm']}, 'degrade_links needs nodes and rssi_dbm'),
-    when('do', 'partition', {'required': ['a', 'b']}, 'partition needs a and b'),
-    when('do', 'interferer_add', {'required': ['spec']}, 'interferer_add needs spec'),
-    when('do', 'interferer_remove', {'required': ['name']}, 'interferer_remove needs name'),
+    when('do', 'kill', {'required': ['nodes']}, 'Choose the nodes to switch off'),
+    when('do', 'restart', {'required': ['nodes']}, 'Choose the nodes to restart'),
+    when('do', 'leave', {'required': ['nodes']}, 'Choose the nodes that leave'),
+    when('do', 'cut_links', {'required': ['nodes']}, 'Choose the nodes whose links are cut'),
+    when('do', 'degrade_links', {'required': ['nodes', 'rssi_dbm']}, 'Choose the nodes and the RSSI of their links'),
+    when('do', 'partition', {'required': ['a', 'b']}, 'Choose the two groups (a and b)'),
+    when('do', 'interferer_add', {'required': ['spec']}, 'Give the interferer specification'),
+    when('do', 'interferer_remove', {'required': ['name']}, 'Give the interferer name'),
 ])
 
 MEASURE = obj('Measure', 'What the phase measures (default: traffic)', {
     'sets': S('array', 'Measurements', 'Any of: ' + '; '.join(f'{k}: {v}' for k, v in MEASURE_SETS.items()),
               items={'type': 'string', 'enum': list(MEASURE_SETS)}, default=['traffic']),
-    'settle_s': S('number', 'Settle', 'Time after the start not measured', 's', minimum=0, default=0),
+    'settle_s': S('number', 'Settling time', 'Time after the start that is not measured', 's', minimum=0, default=0),
 }, [])
 
-REPEAT = obj('Repeat', 'Iterations: the load changes at each, until a condition holds (a capacity search)', {
-    'max': S('integer', 'Iterations', 'At most this many (confirmations included)', minimum=1, maximum=100, default=12),
-    'mul': S('number', 'Multiply', 'The rate is multiplied by this at each iteration', 'ratio', exclusiveMinimum=1,
+REPEAT = obj('Repeat', 'The load changes at each iteration until a condition holds (a capacity search)', {
+    'max': S('integer', 'Iterations', 'Maximum number, confirmations included', minimum=1, maximum=100, default=12),
+    'mul': S('number', 'Rate factor', 'The rate is multiplied by this at each iteration', 'ratio', exclusiveMinimum=1,
              default=1.5),
-    'add_pps': S('number', 'Add', 'Instead of mul: the rate grows by this at each iteration', 'packets/s',
+    'add_pps': S('number', 'Rate increment', 'Instead of a factor: the rate grows by this at each iteration', 'packets/s',
                  exclusiveMinimum=0),
-    'window_s': S('number', 'Window', 'Measured time of an iteration (made longer when the rate gives fewer than '
-                  'min_samples packets)', 's', minimum=1, default=60),
-    'settle_s': S('number', 'Settle', 'Time at the new load before the window', 's', minimum=0, default=15),
-    'confirm': S('integer', 'Confirm', 'The condition must hold on this many windows in a row at the same load',
+    'window_s': S('number', 'Measurement window', 'Measured time of an iteration (extended when the rate '
+                  'gives too few packets)', 's', minimum=1, default=60),
+    'settle_s': S('number', 'Settling time', 'Time at the new load before the window', 's', minimum=0, default=15),
+    'confirm': S('integer', 'Confirmations', 'The condition must hold on this many windows in a row at the same load',
                  'windows', minimum=1, maximum=5, default=2),
     'until': {'$ref': '#/$defs/condition', 'description': 'Stop when this holds on an iteration\'s measurements'},
-}, ['until'], allOf=[exclusive(['mul', 'add_pps'], 'give mul or add_pps, not both')])
+}, ['until'], allOf=[exclusive(['mul', 'add_pps'], 'Give a rate factor or a rate increment, not both')])
 
-PHASE = obj('Phase', 'Start when [start]; set [load]; do [actions]; measure [measure]; end when [end] (or repeat)', {
+PHASE = obj('Phase', 'A hand-written phase: start condition, load, actions, measurements, and end condition or '
+            'repetition', {
     'name': S('string', 'Name', 'Unique name, used by later phases'),
     'start': START,
-    'actions': S('array', 'Actions', 'Done in order at the start, after the load', items=ACTION),
+    'actions': S('array', 'Actions', 'Done in order at the start, after the load is set', items=ACTION),
     'load': {'oneOf': [LOAD, {'type': 'string', 'enum': ['off', 'keep']}], 'title': 'Load',
              'description': 'The load from this phase on: settings, "off", or "keep" (the default)',
-             'x-message': 'load is an object, "off" or "keep"'},
+             'x-message': 'The load is either settings, "off" or "keep"'},
     'measure': MEASURE,
     'end': END,
     'repeat': REPEAT,
-}, ['name'], allOf=[exclusive(['end', 'repeat'], 'a phase has end or repeat, not both')])
+}, ['name'], allOf=[exclusive(['end', 'repeat'], 'A phase has an end or a repetition, not both')])
 
-SETTINGS = obj('Settings', 'Defaults of the whole scenario', {
-    'poll_s': S('number', 'Poll', 'How often conditions and disruptions are evaluated while waiting', 's',
+SETTINGS = obj('Settings', 'Settings of the whole scenario', {
+    'poll_s': S('number', 'Poll interval', 'How often conditions and disruptions are evaluated while waiting', 's',
                 minimum=0.5, default=5),
-    'drain_s': S('number', 'Drain', 'Packets sent in the last drain_s before an evaluation are not counted yet', 's',
+    'drain_s': S('number', 'Drain time', 'Packets sent this long before an evaluation are not counted yet', 's',
                  minimum=0, default=10),
-    'min_samples': S('integer', 'Samples', 'Packets a window needs before a pdr, rtt or latency condition is '
-                     'decided', 'packets', minimum=1, default=100),
-    'min_node_samples': S('integer', 'Samples per router', 'Packets a router needs in a window before its own '
-                          'delivery, loss or RTT counts (for the worst router and for rankings)', 'packets',
+    'min_samples': S('integer', 'Minimum samples', 'Packets a window needs before a delivery ratio, RTT or '
+                     'one-way delay condition is decided', 'packets', minimum=1, default=100),
+    'min_node_samples': S('integer', 'Minimum samples per router', 'Packets a router needs in a window before '
+                          'its own delivery ratio, loss or RTT counts (for the worst router and for rankings)', 'packets',
                           minimum=1, default=5),
     'parent_min_dbm': S('number', 'Parent threshold', 'Links at or below this level cannot carry a new parent: '
                         'routers that would need them are not counted as repairable (the stack\'s DEVICE_MIN_SENS '
@@ -552,13 +552,14 @@ def _node_outage(p):
 P = {   # parameters shared by the blocks
     'flows': LOAD['properties']['flows'],
     'payload_b': LOAD['properties']['payload_b'],
-    'mul': S('number', 'Step factor', 'Rate multiplied by this at each step', 'ratio', exclusiveMinimum=1, default=1.5),
-    'window_s': S('number', 'Window', 'Measured time of a step (longer when the rate gives too few packets)', 's',
+    'mul': S('number', 'Rate factor', 'The rate is multiplied by this at each new load level', 'ratio', exclusiveMinimum=1, default=1.5),
+    'window_s': S('number', 'Measurement window', 'Measured time of each window (extended when the rate gives '
+                  'too few packets)', 's',
                   minimum=1, default=60),
-    'settle_s_cap': S('number', 'Settle', 'Time at the new load before measuring', 's', minimum=0, default=15),
-    'rtt_factor': S('number', 'RTT factor', 'Saturated when the RTT reaches this x the baseline\'s', 'ratio',
+    'settle_s_cap': S('number', 'Settling time', 'Time at a new load before it is measured', 's', minimum=0, default=15),
+    'rtt_factor': S('number', 'RTT factor', 'Saturated when the RTT reaches this multiple of the baseline RTT', 'ratio',
                     exclusiveMinimum=1, default=2),
-    'min_pdr': S('number', 'Delivery floor', 'Saturated when the delivery ratio falls below this', 'ratio', minimum=0,
+    'min_pdr': S('number', 'Minimum delivery ratio', 'Saturated when the delivery ratio falls below this', 'ratio', minimum=0,
                  maximum=1, default=0.95),
     'confirm': REPEAT['properties']['confirm'],
 }
@@ -567,14 +568,14 @@ P = {   # parameters shared by the blocks
 # the expanded phases (to report errors against what the user wrote)
 BLOCKS = {
     'formed': {
-        'title': 'Wait for the network',
-        'doc': 'Wait until the routers have joined (ready and in the border router\'s table) and no parent changed '
-               'for stable_s',
+        'title': 'Network formation',
+        'doc': 'Wait until the routers have joined (ready and in the border router\'s routing table) and no parent '
+               'has changed for the stable time',
         'params': {
             'fraction': S('number', 'Share of routers', 'Share that must have joined', 'ratio', minimum=0, maximum=1,
                           default=1),
             'stable_s': S('number', 'Stable for', 'No parent change for this long', 's', minimum=0, default=60),
-            'timeout_s': S('number', 'Timeout', 'Start anyway after this long, flagged', 's', minimum=0, default=3600),
+            'timeout_s': S('number', 'Timeout', 'After this long, the scenario continues anyway and the timeout is reported', 's', minimum=0, default=3600),
         },
         'expand': lambda p: [{
             'name': p.get('name', 'formed'),
@@ -585,15 +586,16 @@ BLOCKS = {
     },
     'probe': {
         'title': 'Per-hop RTT probe',
-        'doc': 'A light load, its RTT, delay and delivery per hop count: the baseline of later phases',
+        'doc': 'Measure the RTT, one-way delay and delivery ratio per hop count under a light load, as the baseline '
+               'for later steps',
         'params': {
-            'rate_pps': S('number', 'Rate', 'Offered packets/s, whole network (default: one packet per router every '
-                          '30 s, at most 0.5 packets/s)', 'packets/s', exclusiveMinimum=0,
+            'rate_pps': S('number', 'Rate', 'Offered packets per second, whole network (default: one packet per '
+                          'router every 30 s, at most 0.5 packets/s)', 'packets/s', exclusiveMinimum=0,
                           **{'x-default': {'rule': 'per_router', 'interval_s': 30, 'max_pps': 0.5,
                                            'text': 'one packet per router every 30 s, at most 0.5 packets/s'}}),
             'flows': P['flows'],
             'duration_s': S('number', 'Duration', 'Measured time', 's', minimum=1, default=300),
-            'settle_s': S('number', 'Settle', 'Not measured at the start', 's', minimum=0, default=30),
+            'settle_s': S('number', 'Settling time', 'Time at the start that is not measured', 's', minimum=0, default=30),
             'payload_b': P['payload_b'],
         },
         'expand': lambda p: [_probe_phase(p.get('name', 'probe'), p)],
@@ -601,24 +603,24 @@ BLOCKS = {
     },
     'capacity': {
         'title': 'Capacity search',
-        'doc': 'Raise the load step by step until the RTT reaches rtt_factor x the baseline\'s, the largest RTT '
-               'max_rtt_ms, or the delivery falls below min_pdr (on confirm windows in a row); the capacity is the '
-               'measured offered rate of the last step before',
+        'doc': 'Raise the load until the RTT reaches the RTT factor times the baseline RTT, the maximum RTT reaches '
+               'its limit, or the delivery ratio falls below its minimum, on several windows in a row. The capacity '
+               'is the offered load measured at the last level before saturation',
         'params': {
             'baseline': S('string', 'Baseline phase', 'The phase whose RTT is the reference', default='probe'),
-            'start_rate_pps': S('number', 'First rate', 'Packets/s of the first step (default: 2 x the baseline\'s)',
+            'start_rate_pps': S('number', 'Initial rate', 'Offered load of the first window',
                                 'packets/s', exclusiveMinimum=0,
                                 **{'x-default': {'rule': 'times_baseline', 'factor': 2, 'field': 'baseline',
-                                                 'text': '2 x the rate of the baseline phase'}}),
+                                                 'text': 'twice the rate of the baseline phase'}}),
             'mul': P['mul'],
-            'max_steps': S('integer', 'Steps', 'At most this many windows', minimum=1, maximum=100, default=12),
+            'max_steps': S('integer', 'Windows', 'At most this many measurement windows', minimum=1, maximum=100, default=12),
             'window_s': P['window_s'],
             'settle_s': P['settle_s_cap'],
             'confirm': P['confirm'],
-            'rtt_metric': S('string', 'RTT metric', 'The RTT compared with the baseline',
+            'rtt_metric': S('string', 'RTT statistic', 'The RTT statistic compared with the baseline',
                             enum=['rtt.mean_ms', 'rtt.p50_ms', 'rtt.p95_ms'], default='rtt.p95_ms'),
             'rtt_factor': P['rtt_factor'],
-            'max_rtt_ms': S('number', 'RTT ceiling', 'Saturated when the largest RTT reaches this', 'ms', minimum=1),
+            'max_rtt_ms': S('number', 'Maximum RTT', 'Saturated when the maximum RTT reaches this', 'ms', minimum=1),
             'min_pdr': P['min_pdr'],
             'flows': P['flows'],
             'payload_b': P['payload_b'],
@@ -628,19 +630,20 @@ BLOCKS = {
     },
     'interference': {
         'title': 'Interference',
-        'doc': 'An external interferer from the start of the phase, under a share of the capacity found; optionally '
-               'first a reference at the same load without it (<name>_reference), the baseline of a recovery',
+        'doc': 'Add an external interferer under a share of the capacity found, optionally after a reference '
+               'measurement at the same load without it (the baseline for a recovery)',
         'required': ['spec'],
         'params': {
             'spec': ACTION['properties']['spec'],
-            'interferer_name': S('string', 'Interferer name', 'Its name, to remove it later', default='jam'),
-            'capacity_phase': S('string', 'Capacity phase', 'Where the capacity comes from', default='capacity'),
+            'interferer_name': S('string', 'Interferer name', 'Name used to remove it later', default='jam'),
+            'capacity_phase': S('string', 'Capacity source', 'The earlier capacity search that sets the load',
+                                  default='capacity'),
             'load_fraction': S('number', 'Load', 'Share of the capacity offered', 'ratio', exclusiveMinimum=0,
                                maximum=2, default=0.8),
-            'reference_s': S('number', 'Reference', 'Before the interferer: this long measured at the same load '
-                             'without it, as the phase <name>_reference (0: none)', 's', minimum=0, default=0),
-            'duration_s': S('number', 'Duration', 'Length of the phase', 's', minimum=1, default=300),
-            'settle_s': S('number', 'Settle', 'Not measured at the start (of the reference too)', 's', minimum=0,
+            'reference_s': S('number', 'Reference duration', 'Measured time at the same load without the '
+                             'interferer, before it is added (0: none)', 's', minimum=0, default=0),
+            'duration_s': S('number', 'Duration', 'Measured time with the interferer', 's', minimum=1, default=300),
+            'settle_s': S('number', 'Settling time', 'Time at the start that is not measured (also for the reference)', 's', minimum=0,
                           default=30),
         },
         'expand': _interference,
@@ -650,12 +653,12 @@ BLOCKS = {
         'title': 'Recovery',
         'doc': 'Remove the interferer (if any) at the same load and measure until the RTT is back near the baseline',
         'params': {
-            'interferer_name': S('string', 'Interferer name', 'The interferer removed ("all": every one; "": none)',
+            'interferer_name': S('string', 'Interferer name', 'The interferer to remove ("all": every one; empty: none)',
                                  default='all'),
-            'baseline': S('string', 'Baseline phase', 'The reference RTT', default='probe'),
-            'within': S('number', 'Back within', 'Ends when the RTT p95 is at most this x the baseline\'s', 'ratio',
+            'baseline': S('string', 'Baseline phase', 'The phase whose RTT is the reference', default='probe'),
+            'within': S('number', 'Back within', 'Ends when the RTT p95 is at most this multiple of the baseline', 'ratio',
                         minimum=1, default=1.2),
-            'max_s': S('number', 'Cap', 'At most this long', 's', minimum=1, default=600),
+            'max_s': S('number', 'Time limit', 'Ends after this long at the latest', 's', minimum=1, default=600),
         },
         'expand': lambda p: [{
             'name': p.get('name', 'recovery'),
@@ -669,14 +672,14 @@ BLOCKS = {
     },
     'node_outage': {
         'title': 'Switch nodes off',
-        'doc': 'Switch nodes off (power off) under a share of the capacity and measure until the mesh is repaired; '
+        'doc': 'Switch nodes off under a share of the capacity and measure until the mesh is repaired; '
                'optionally switch them back on afterwards and measure until they are back in the border router\'s '
                'routing table; or switch back on the nodes an earlier step switched off',
         'name_default': {'rule': 'by_field', 'field': 'mode',
                          'map': {'off': 'node_outage', 'off_then_on': 'node_outage', 'on': 'node_outage_on'},
                          'text': 'node_outage (node_outage_on for mode on)'},
         'params': {
-            'mode': S('string', 'What to do', 'Switch the nodes off and keep them off (the step ends when the mesh is '
+            'mode': S('string', 'Action', 'Switch the nodes off and keep them off (the step ends when the mesh is '
                       'repaired); switch them off, then back on once the mesh is repaired (the step ends when they '
                       'are back in the border router\'s routing table); or switch back on the nodes an earlier step '
                       'switched off (the step ends when they are back)', enum=OUTAGE_MODES, default='off',
@@ -687,18 +690,17 @@ BLOCKS = {
                                      'switched off here)',
                       'x-default': {'value': SEL_HOP1_WORST,
                                     'text': 'the hop-1 router with the largest subtree'}},
-            'off_s': S('number', 'Off for at least', 'When they are switched back on: keep them off at least this '
+            'off_s': S('number', 'Minimum time off', 'When they are switched back on: keep them off at least this '
                        'long, even if the mesh is repaired sooner', 's', minimum=0,
-                       **{'x-default': {'text': 'until the mesh is repaired (or the cap)'}}),
+                       **{'x-default': {'text': 'until the mesh is repaired (or the time limit)'}}),
             'of_step': S('string', 'Step that switched them off', 'The earlier step whose nodes are switched back '
                          'on (a step that switched nodes off and kept them off)'),
-            'capacity_phase': S('string', 'Capacity phase', 'The load is a share of the capacity this earlier '
-                                'capacity search found ("": keep the load in force)', default='capacity'),
+            'capacity_phase': S('string', 'Capacity source', 'The earlier capacity search whose capacity sets the '
+                                'load (empty: keep the current load)', default='capacity'),
             'load_fraction': S('number', 'Load', 'Share of that capacity offered during the step', 'ratio',
                                exclusiveMinimum=0, maximum=2, default=0.5),
-            'max_s': S('number', 'Cap', 'Each part (off, back on) ends after this long at most, flagged as not met; '
-                       'when they are kept off at least a given time, the off part may last that time if it is '
-                       'longer', 's', minimum=1, default=600),
+            'max_s': S('number', 'Time limit', 'Each part (off, back on) ends after this long at the latest and is '
+                       'then reported as not met; with a minimum time off, the off part lasts at least that time', 's', minimum=1, default=600),
             'e2e': dict(COND_PROPS['e2e'], title='Repaired end to end',
                         description='The mesh counts as repaired only when every router cut off has a route, is '
                                     'in the border router\'s routing table and got an echo for a packet sent after '
@@ -712,16 +714,17 @@ BLOCKS = {
     'node_failure': {
         'title': 'Node failure',
         'legacy': 'node_outage with mode off',
-        'doc': 'Power off nodes (default: the hop-1 router with the largest subtree) under a share of the capacity, '
+        'doc': 'Switch off nodes (default: the hop-1 router with the largest subtree) under a share of the capacity, '
                'and measure until the mesh is repaired',
         'params': {
             'nodes': SELECTOR,
             'label': S('string', 'Label', 'Name of the failed nodes, for a later restart', default='failed'),
-            'capacity_phase': S('string', 'Capacity phase', 'Where the capacity comes from ("": keep the load)',
+            'capacity_phase': S('string', 'Capacity source', 'The earlier capacity search that sets the load (empty: '
+                                'keep the current load)',
                                 default='capacity'),
             'load_fraction': S('number', 'Load', 'Share of the capacity offered', 'ratio', exclusiveMinimum=0,
                                maximum=2, default=0.5),
-            'max_s': S('number', 'Cap', 'At most this long', 's', minimum=1, default=600),
+            'max_s': S('number', 'Time limit', 'Ends after this long at the latest', 's', minimum=1, default=600),
             'e2e': COND_PROPS['e2e'],
         },
         'expand': lambda p: [dict({
@@ -741,11 +744,12 @@ BLOCKS = {
                'are ready again and in the border router\'s routing table',
         'params': {
             'label': S('string', 'Label', 'The nodes of an earlier action', default='failed'),
-            'capacity_phase': S('string', 'Capacity phase', 'Where the capacity comes from ("": keep the load)',
+            'capacity_phase': S('string', 'Capacity source', 'The earlier capacity search that sets the load (empty: '
+                                'keep the current load)',
                                 default='capacity'),
             'load_fraction': S('number', 'Load', 'Share of the capacity offered', 'ratio', exclusiveMinimum=0,
                                maximum=2, default=0.5),
-            'max_s': S('number', 'Cap', 'At most this long', 's', minimum=1, default=600),
+            'max_s': S('number', 'Time limit', 'Ends after this long at the latest', 's', minimum=1, default=600),
         },
         'expand': lambda p: [dict({
             'name': p.get('name', 'node_restart'),
@@ -759,19 +763,19 @@ BLOCKS = {
         'map': {'0/actions/0/nodes': 'label', '0/end/nodes': 'label', '0/load/rate_of': 'capacity_phase'},
     },
     'capacity_check': {
-        'title': 'Capacity again',
-        'doc': 'A capacity search from a share of an earlier capacity (e.g. after a repair), against a fresh '
-               'baseline: by default a probe of the network as it is now, then the search',
+        'title': 'Capacity recheck',
+        'doc': 'Search the capacity again (for example after a repair), from a share of an earlier capacity and '
+               'against a new baseline: by default, a probe of the network in its current state, then the search',
         'params': {
-            'capacity_phase': S('string', 'Earlier capacity', 'The capacity it starts from', default='capacity'),
-            'start_fraction': S('number', 'First rate', 'Share of the earlier capacity of the first step', 'ratio',
+            'capacity_phase': S('string', 'Capacity source', 'The earlier capacity search whose capacity sets the '
+                                'initial rate', default='capacity'),
+            'start_fraction': S('number', 'Initial rate', 'Share of the earlier capacity offered in the first window', 'ratio',
                                 exclusiveMinimum=0, default=0.5),
-            'baseline': S('string', 'Baseline', '"self": a probe of its own first (<name>_probe); else an earlier '
-                          'phase', default='self'),
+            'baseline': S('string', 'Baseline', '"self": its own probe first; otherwise the name of an earlier phase', default='self'),
             'probe_s': S('number', 'Probe duration', 'With baseline self: the probe\'s measured time', 's', minimum=1,
                          default=300),
             'mul': P['mul'],
-            'max_steps': S('integer', 'Steps', 'At most this many windows', minimum=1, maximum=100, default=8),
+            'max_steps': S('integer', 'Windows', 'At most this many measurement windows', minimum=1, maximum=100, default=8),
             'window_s': P['window_s'],
             'settle_s': P['settle_s_cap'],
             'confirm': P['confirm'],
@@ -790,8 +794,7 @@ def block_schema():
     alts = []
     for name, b in BLOCKS.items():
         props = {'use': S('string', 'Block', b['doc'], enum=[name]),
-                 'name': S('string', 'Name', 'Name of the step, unique; later steps refer to it (default: the '
-                           'block\'s)', **{'x-default': b.get('name_default',
+                 'name': S('string', 'Name', 'Unique name of the step, used by later steps', **{'x-default': b.get('name_default',
                                                               {'value': name, 'text': 'the block\'s name'})})}
         props.update(b['params'])
         kw = {}
@@ -807,7 +810,7 @@ NUMERIC_COLUMNS = list(SERIES_COLUMNS)
 PLOT = obj('Plot', 'A graph of the run\'s report: one measured quantity against another, per report window or '
            'per step', {
     'title': S('string', 'Title', 'Shown above the graph',
-               **{'x-default': {'text': 'the y columns\' titles against the x column\'s'}}),
+               **{'x-default': {'text': '"<vertical axis> against <horizontal axis>"'}}),
     'x': S('string', 'X axis', 'The quantity along the horizontal axis', enum=NUMERIC_COLUMNS,
            **{'x-enum-titles': {k: v[1] for k, v in SERIES_COLUMNS.items()}}),
     'y': {'title': 'Y axis', 'description': 'One quantity, or several drawn together (for instance the lowest, '
@@ -1132,10 +1135,10 @@ def _semantic(doc, errs):
             errs.append({'path': path + '/relative_to', 'message': 'With the worst router, give a fixed value, not a '
                                                                    'value relative to an earlier phase'})
         if c.get('per_hop') and not str(c.get('metric', '')).startswith(('rtt.', 'latency.')):
-            errs.append({'path': path + '/per_hop', 'message': 'only for rtt and latency metrics'})
+            errs.append({'path': path + '/per_hop', 'message': 'Only for RTT and one-way delay metrics'})
         if c.get('is') == 'repaired' and not disrupted:
-            errs.append({'path': path, 'message': 'repaired needs a disruption before it (kill, leave, cut_links, '
-                                                  'partition or degrade_links in this phase or an earlier one)'})
+            errs.append({'path': path, 'message': 'A repair condition needs a disruption in this phase or an earlier one '
+                                                  '(kill, leave, cut_links, partition or degrade_links)'})
         if 'nodes' in c:
             sel(c['nodes'], path + '/nodes', in_outage)
 
@@ -1442,11 +1445,11 @@ def phase_title(p):
     if b == 'formed':
         return 'Wait for the network to form'
     if b == 'probe' or (b == 'capacity_check' and p['name'].endswith('_probe')):
-        return 'Light load: RTT, delay and delivery per hop count (baseline)'
+        return 'Light-load baseline: RTT, one-way delay and delivery ratio per hop count'
     if 'repeat' in p:
-        return 'Capacity search: raise the load step by step until saturation'
+        return 'Raise the load until saturation'
     if b == 'interference' and not acts:
-        return 'Reference at the same load, without the interferer'
+        return 'Reference measurement at the same load without the interferer'
     load = p.get('load')
     txt = '; '.join(acts)
     if isinstance(load, dict) and 'rate_of' in load:

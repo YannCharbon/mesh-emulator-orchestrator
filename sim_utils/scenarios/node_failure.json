@@ -1,7 +1,7 @@
 {
   "format": "wssim-scenario 1",
   "name": "Failure of the busiest hop-1 router",
-  "description": "Formed and stable; baseline probe and capacity; the hop-1 router with the largest subtree powered off under 50 % of the capacity: detection, repair, losses, churn; capacity after the repair; the router restarted under 50 % of the capacity again, until it is back in the border router's routing table.",
+  "description": "After the network has formed and is stable: per-hop RTT baseline and capacity search; the hop-1 router with the largest subtree switched off at 50 % of the capacity (detection, repair, losses, parent changes); capacity recheck after the repair; the router switched back on at 50 % of the capacity until it is back in the border router's routing table.",
   "phases": [
     {"use": "formed", "stable_s": 60},
     {"use": "probe", "duration_s": 300},

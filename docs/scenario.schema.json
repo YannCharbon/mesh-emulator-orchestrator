@@ -29,11 +29,11 @@
   "settings": {
    "type": "object",
    "title": "Settings",
-   "description": "Defaults of the whole scenario",
+   "description": "Settings of the whole scenario",
    "properties": {
     "poll_s": {
      "type": "number",
-     "title": "Poll",
+     "title": "Poll interval",
      "description": "How often conditions and disruptions are evaluated while waiting",
      "x-unit": "s",
      "minimum": 0.5,
@@ -41,24 +41,24 @@
     },
     "drain_s": {
      "type": "number",
-     "title": "Drain",
-     "description": "Packets sent in the last drain_s before an evaluation are not counted yet",
+     "title": "Drain time",
+     "description": "Packets sent this long before an evaluation are not counted yet",
      "x-unit": "s",
      "minimum": 0,
      "default": 10
     },
     "min_samples": {
      "type": "integer",
-     "title": "Samples",
-     "description": "Packets a window needs before a pdr, rtt or latency condition is decided",
+     "title": "Minimum samples",
+     "description": "Packets a window needs before a delivery ratio, RTT or one-way delay condition is decided",
      "x-unit": "packets",
      "minimum": 1,
      "default": 100
     },
     "min_node_samples": {
      "type": "integer",
-     "title": "Samples per router",
-     "description": "Packets a router needs in a window before its own delivery, loss or RTT counts (for the worst router and for rankings)",
+     "title": "Minimum samples per router",
+     "description": "Packets a router needs in a window before its own delivery ratio, loss or RTT counts (for the worst router and for rankings)",
      "x-unit": "packets",
      "minimum": 1,
      "default": 5
@@ -103,12 +103,12 @@
       "interval_s": {
        "type": "number",
        "title": "Interval",
-       "description": "Instead of rate_pps: mean interval of each router (default 30 s)",
+       "description": "Instead of a rate: mean interval between a router's packets",
        "x-unit": "s",
        "minimum": 0.001,
        "x-default": {
         "value": 30,
-        "text": "30 s when neither rate_pps nor rate_of is given"
+        "text": "30 s when no rate is given"
        }
       },
       "rate_of": {
@@ -116,8 +116,8 @@
       },
       "max_rate_pps": {
        "type": "number",
-       "title": "Rate cap",
-       "description": "With interval_s: at most this rate, whole network (a light probe whatever the network size)",
+       "title": "Rate limit",
+       "description": "With an interval: at most this rate over the whole network, so that the load stays light at any network size",
        "x-unit": "packets/s",
        "exclusiveMinimum": 0
       },
@@ -132,8 +132,8 @@
       },
       "dist": {
        "type": "string",
-       "title": "Intervals",
-       "description": "fixed or exp (Poisson)",
+       "title": "Packet spacing",
+       "description": "fixed: regular; exp: random (Poisson)",
        "enum": [
         "fixed",
         "exp"
@@ -146,7 +146,7 @@
       "echo": {
        "type": "boolean",
        "title": "Echo",
-       "description": "Targets answer, so that originators measure the RTT",
+       "description": "The targets answer each packet so that the senders measure the RTT",
        "default": true
       }
      },
@@ -175,7 +175,7 @@
          }
         ]
        },
-       "x-message": "give one of rate_pps, interval_s and rate_of"
+       "x-message": "Give one of rate, interval and relative rate"
       },
       {
        "not": {
@@ -188,7 +188,7 @@
          }
         ]
        },
-       "x-message": "max_rate_pps goes with interval_s, not rate_pps"
+       "x-message": "A rate limit applies only with an interval"
       },
       {
        "not": {
@@ -201,7 +201,7 @@
          }
         ]
        },
-       "x-message": "max_rate_pps goes with interval_s, not rate_of"
+       "x-message": "A rate limit applies only with an interval"
       }
      ]
     }
@@ -278,12 +278,12 @@
   "condition": {
    "type": "object",
    "title": "Condition",
-   "description": "A condition on the run, evaluated live at each poll",
+   "description": "A condition on the run, evaluated at each poll",
    "properties": {
     "is": {
      "type": "string",
      "title": "Kind",
-     "description": "immediately: true at once; time: virtual time reached; elapsed: time since the reference (the previous phase's end for a start, the phase's start for an end); formed: the network has joined; node_event: a node joined, changed or lost its parent, restarted; repaired: every router cut off by the last disruption that can be repaired has a route again; metric: a measured value compared with a threshold; all / any: a combination",
+     "description": "immediately: at once; time: at a virtual time; elapsed: after a delay (from the previous phase's end for a start, from the phase's start for an end); formed: the network has joined; node_event: nodes joined, changed or lost their parent, or restarted; repaired: every router cut off by the last repairable disruption has a route again; metric: a measured value compared with a threshold; all / any: a combination",
      "enum": [
       "immediately",
       "time",
@@ -299,14 +299,14 @@
     "t_s": {
      "type": "number",
      "title": "Time",
-     "description": "For time: virtual time since the run's start",
+     "description": "For time: virtual time since the start of the run",
      "x-unit": "s",
      "minimum": 0
     },
     "s": {
      "type": "number",
-     "title": "Seconds",
-     "description": "For elapsed",
+     "title": "Elapsed time",
+     "description": "For elapsed: time after the reference",
      "x-unit": "s",
      "minimum": 0
     },
@@ -339,7 +339,7 @@
     "stable_s": {
      "type": "number",
      "title": "Stable for",
-     "description": "For formed: and no parent change anywhere for this long",
+     "description": "For formed: no parent change anywhere for this long",
      "x-unit": "s",
      "minimum": 0,
      "default": 0
@@ -361,7 +361,7 @@
     "e2e": {
      "type": "boolean",
      "title": "End to end",
-     "description": "For repaired: also every cut-off router is in the border router's routing table and got an echo for a packet sent after the disruption (when it takes part in an echoed flow)",
+     "description": "For repaired: every cut-off router must also be in the border router's routing table and, in an echoed flow, receive an echo for a packet sent after the disruption",
      "default": false
     },
     "metric": {
@@ -403,7 +403,7 @@
     "op": {
      "type": "string",
      "title": "Comparison",
-     "description": "For metric. Default: \"worse than\" the value: >= for delays, queues, retries...; < for pdr, delivered_pps and joined_fraction",
+     "description": "For metric. Default: worse than the value (< for the delivery ratio, the delivered load and the share of joined routers; >= otherwise)",
      "enum": [
       ">=",
       ">",
@@ -420,13 +420,13 @@
        "delivered_pps",
        "joined_fraction"
       ],
-      "text": "worse than the value (< for pdr, delivered_pps and joined_fraction, else >=)"
+      "text": "worse than the value (< for the delivery ratio, the delivered load and the share of joined routers, else >=)"
      }
     },
     "value": {
      "type": "number",
      "title": "Value",
-     "description": "For metric: the threshold, in the metric's unit (or relative_to instead)"
+     "description": "For metric: the threshold, in the metric's unit (or a value relative to an earlier phase)"
     },
     "relative_to": {
      "$ref": "#/$defs/relative"
@@ -434,7 +434,7 @@
     "per_hop": {
      "type": "boolean",
      "title": "Per hop count",
-     "description": "For metric (rtt, latency): true if the comparison holds for any hop count, each against the same hop count of relative_to",
+     "description": "For RTT and one-way delay metrics: met when the comparison holds at any hop count, each against the same hop count of the earlier phase",
      "default": false
     },
     "flow": {
@@ -476,14 +476,14 @@
     },
     "min_samples": {
      "type": "integer",
-     "title": "Samples",
-     "description": "For pdr, rtt and latency metrics: at least this many packets in the window, else the condition is not decided yet (default: settings.min_samples)",
+     "title": "Minimum samples",
+     "description": "For delivery ratio, RTT and one-way delay metrics: at least this many packets in the window, else the condition is not decided yet",
      "x-unit": "packets",
      "minimum": 1,
      "x-default": {
       "rule": "setting",
       "setting": "min_samples",
-      "text": "the scenario setting min_samples"
+      "text": "the scenario's minimum samples setting"
      }
     },
     "of": {
@@ -517,7 +517,7 @@
        "t_s"
       ]
      },
-     "x-message": "a time condition needs t_s"
+     "x-message": "Give the time"
     },
     {
      "if": {
@@ -535,7 +535,7 @@
        "s"
       ]
      },
-     "x-message": "an elapsed condition needs s"
+     "x-message": "Give the elapsed time"
     },
     {
      "if": {
@@ -554,7 +554,7 @@
        "nodes"
       ]
      },
-     "x-message": "a node_event condition needs event and nodes"
+     "x-message": "Choose the event and the nodes"
     },
     {
      "if": {
@@ -594,7 +594,7 @@
        }
       ]
      },
-     "x-message": "a metric condition needs a metric and either value or relative_to (not both)"
+     "x-message": "Choose a metric, and either a value or a reference to an earlier phase (not both)"
     },
     {
      "if": {
@@ -612,7 +612,7 @@
        "of"
       ]
      },
-     "x-message": "all needs of"
+     "x-message": "Give the conditions to combine"
     },
     {
      "if": {
@@ -630,14 +630,14 @@
        "of"
       ]
      },
-     "x-message": "any needs of"
+     "x-message": "Give the conditions to combine"
     }
    ]
   },
   "phase": {
    "type": "object",
    "title": "Phase",
-   "description": "Start when [start]; set [load]; do [actions]; measure [measure]; end when [end] (or repeat)",
+   "description": "A hand-written phase: start condition, load, actions, measurements, and end condition or repetition",
    "properties": {
     "name": {
      "type": "string",
@@ -652,7 +652,7 @@
       "is": {
        "type": "string",
        "title": "Kind",
-       "description": "immediately: true at once; time: virtual time reached; elapsed: time since the reference (the previous phase's end for a start, the phase's start for an end); formed: the network has joined; node_event: a node joined, changed or lost its parent, restarted; repaired: every router cut off by the last disruption that can be repaired has a route again; metric: a measured value compared with a threshold; all / any: a combination",
+       "description": "immediately: at once; time: at a virtual time; elapsed: after a delay (from the previous phase's end for a start, from the phase's start for an end); formed: the network has joined; node_event: nodes joined, changed or lost their parent, or restarted; repaired: every router cut off by the last repairable disruption has a route again; metric: a measured value compared with a threshold; all / any: a combination",
        "enum": [
         "immediately",
         "time",
@@ -668,14 +668,14 @@
       "t_s": {
        "type": "number",
        "title": "Time",
-       "description": "For time: virtual time since the run's start",
+       "description": "For time: virtual time since the start of the run",
        "x-unit": "s",
        "minimum": 0
       },
       "s": {
        "type": "number",
-       "title": "Seconds",
-       "description": "For elapsed",
+       "title": "Elapsed time",
+       "description": "For elapsed: time after the reference",
        "x-unit": "s",
        "minimum": 0
       },
@@ -708,7 +708,7 @@
       "stable_s": {
        "type": "number",
        "title": "Stable for",
-       "description": "For formed: and no parent change anywhere for this long",
+       "description": "For formed: no parent change anywhere for this long",
        "x-unit": "s",
        "minimum": 0,
        "default": 0
@@ -730,7 +730,7 @@
       "e2e": {
        "type": "boolean",
        "title": "End to end",
-       "description": "For repaired: also every cut-off router is in the border router's routing table and got an echo for a packet sent after the disruption (when it takes part in an echoed flow)",
+       "description": "For repaired: every cut-off router must also be in the border router's routing table and, in an echoed flow, receive an echo for a packet sent after the disruption",
        "default": false
       },
       "metric": {
@@ -772,7 +772,7 @@
       "op": {
        "type": "string",
        "title": "Comparison",
-       "description": "For metric. Default: \"worse than\" the value: >= for delays, queues, retries...; < for pdr, delivered_pps and joined_fraction",
+       "description": "For metric. Default: worse than the value (< for the delivery ratio, the delivered load and the share of joined routers; >= otherwise)",
        "enum": [
         ">=",
         ">",
@@ -789,13 +789,13 @@
          "delivered_pps",
          "joined_fraction"
         ],
-        "text": "worse than the value (< for pdr, delivered_pps and joined_fraction, else >=)"
+        "text": "worse than the value (< for the delivery ratio, the delivered load and the share of joined routers, else >=)"
        }
       },
       "value": {
        "type": "number",
        "title": "Value",
-       "description": "For metric: the threshold, in the metric's unit (or relative_to instead)"
+       "description": "For metric: the threshold, in the metric's unit (or a value relative to an earlier phase)"
       },
       "relative_to": {
        "$ref": "#/$defs/relative"
@@ -803,7 +803,7 @@
       "per_hop": {
        "type": "boolean",
        "title": "Per hop count",
-       "description": "For metric (rtt, latency): true if the comparison holds for any hop count, each against the same hop count of relative_to",
+       "description": "For RTT and one-way delay metrics: met when the comparison holds at any hop count, each against the same hop count of the earlier phase",
        "default": false
       },
       "flow": {
@@ -845,14 +845,14 @@
       },
       "min_samples": {
        "type": "integer",
-       "title": "Samples",
-       "description": "For pdr, rtt and latency metrics: at least this many packets in the window, else the condition is not decided yet (default: settings.min_samples)",
+       "title": "Minimum samples",
+       "description": "For delivery ratio, RTT and one-way delay metrics: at least this many packets in the window, else the condition is not decided yet",
        "x-unit": "packets",
        "minimum": 1,
        "x-default": {
         "rule": "setting",
         "setting": "min_samples",
-        "text": "the scenario setting min_samples"
+        "text": "the scenario's minimum samples setting"
        }
       },
       "of": {
@@ -905,7 +905,7 @@
          "t_s"
         ]
        },
-       "x-message": "a time condition needs t_s"
+       "x-message": "Give the time"
       },
       {
        "if": {
@@ -923,7 +923,7 @@
          "s"
         ]
        },
-       "x-message": "an elapsed condition needs s"
+       "x-message": "Give the elapsed time"
       },
       {
        "if": {
@@ -942,7 +942,7 @@
          "nodes"
         ]
        },
-       "x-message": "a node_event condition needs event and nodes"
+       "x-message": "Choose the event and the nodes"
       },
       {
        "if": {
@@ -982,7 +982,7 @@
          }
         ]
        },
-       "x-message": "a metric condition needs a metric and either value or relative_to (not both)"
+       "x-message": "Choose a metric, and either a value or a reference to an earlier phase (not both)"
       },
       {
        "if": {
@@ -1000,7 +1000,7 @@
          "of"
         ]
        },
-       "x-message": "all needs of"
+       "x-message": "Give the conditions to combine"
       },
       {
        "if": {
@@ -1018,14 +1018,14 @@
          "of"
         ]
        },
-       "x-message": "any needs of"
+       "x-message": "Give the conditions to combine"
       }
      ]
     },
     "actions": {
      "type": "array",
      "title": "Actions",
-     "description": "Done in order at the start, after the load",
+     "description": "Done in order at the start, after the load is set",
      "items": {
       "type": "object",
       "title": "Action",
@@ -1034,7 +1034,7 @@
        "do": {
         "type": "string",
         "title": "Action",
-        "description": "kill: power off; restart: power off and a fresh start; leave: the interface goes down (a graceful leave); cut_links: every link of the nodes (or to peers) cut; partition: links between groups a and b cut; degrade_links: every link of the nodes at rssi_dbm; interferer_add, interferer_remove: external interference (central medium); mark: a note in the logs",
+        "description": "kill: switch off; restart: switch off and start again; leave: interface down (a graceful leave); cut_links: cut every link of the nodes (or those to the peers); partition: cut the links between groups a and b; degrade_links: set every link of the nodes to the given RSSI; interferer_add, interferer_remove: external interference (central medium); mark: a note in the logs",
         "enum": [
          "kill",
          "leave",
@@ -1061,15 +1061,15 @@
        },
        "for_s": {
         "type": "number",
-        "title": "For",
-        "description": "Undo after this long: restart the killed nodes, interface up, links back, interferer removed. Omitted: permanent",
+        "title": "Duration",
+        "description": "Undone after this long (switched-off nodes restarted, interface up, links restored, interferer removed); permanent when omitted",
         "x-unit": "s",
         "exclusiveMinimum": 0
        },
        "rssi_dbm": {
         "type": "number",
         "title": "RSSI",
-        "description": "For degrade_links",
+        "description": "For degrade_links: the RSSI of every link of the nodes",
         "x-unit": "dBm",
         "maximum": 0,
         "minimum": -200
@@ -1092,7 +1092,7 @@
        "text": {
         "type": "string",
         "title": "Text",
-        "description": "For mark"
+        "description": "For mark: the note written in the logs"
        }
       },
       "additionalProperties": false,
@@ -1116,7 +1116,7 @@
           "nodes"
          ]
         },
-        "x-message": "kill needs nodes"
+        "x-message": "Choose the nodes to switch off"
        },
        {
         "if": {
@@ -1134,7 +1134,7 @@
           "nodes"
          ]
         },
-        "x-message": "restart needs nodes"
+        "x-message": "Choose the nodes to restart"
        },
        {
         "if": {
@@ -1152,7 +1152,7 @@
           "nodes"
          ]
         },
-        "x-message": "leave needs nodes"
+        "x-message": "Choose the nodes that leave"
        },
        {
         "if": {
@@ -1170,7 +1170,7 @@
           "nodes"
          ]
         },
-        "x-message": "cut_links needs nodes"
+        "x-message": "Choose the nodes whose links are cut"
        },
        {
         "if": {
@@ -1189,7 +1189,7 @@
           "rssi_dbm"
          ]
         },
-        "x-message": "degrade_links needs nodes and rssi_dbm"
+        "x-message": "Choose the nodes and the RSSI of their links"
        },
        {
         "if": {
@@ -1208,7 +1208,7 @@
           "b"
          ]
         },
-        "x-message": "partition needs a and b"
+        "x-message": "Choose the two groups (a and b)"
        },
        {
         "if": {
@@ -1226,7 +1226,7 @@
           "spec"
          ]
         },
-        "x-message": "interferer_add needs spec"
+        "x-message": "Give the interferer specification"
        },
        {
         "if": {
@@ -1244,7 +1244,7 @@
           "name"
          ]
         },
-        "x-message": "interferer_remove needs name"
+        "x-message": "Give the interferer name"
        }
       ]
      }
@@ -1284,12 +1284,12 @@
         "interval_s": {
          "type": "number",
          "title": "Interval",
-         "description": "Instead of rate_pps: mean interval of each router (default 30 s)",
+         "description": "Instead of a rate: mean interval between a router's packets",
          "x-unit": "s",
          "minimum": 0.001,
          "x-default": {
           "value": 30,
-          "text": "30 s when neither rate_pps nor rate_of is given"
+          "text": "30 s when no rate is given"
          }
         },
         "rate_of": {
@@ -1297,8 +1297,8 @@
         },
         "max_rate_pps": {
          "type": "number",
-         "title": "Rate cap",
-         "description": "With interval_s: at most this rate, whole network (a light probe whatever the network size)",
+         "title": "Rate limit",
+         "description": "With an interval: at most this rate over the whole network, so that the load stays light at any network size",
          "x-unit": "packets/s",
          "exclusiveMinimum": 0
         },
@@ -1313,8 +1313,8 @@
         },
         "dist": {
          "type": "string",
-         "title": "Intervals",
-         "description": "fixed or exp (Poisson)",
+         "title": "Packet spacing",
+         "description": "fixed: regular; exp: random (Poisson)",
          "enum": [
           "fixed",
           "exp"
@@ -1327,7 +1327,7 @@
         "echo": {
          "type": "boolean",
          "title": "Echo",
-         "description": "Targets answer, so that originators measure the RTT",
+         "description": "The targets answer each packet so that the senders measure the RTT",
          "default": true
         }
        },
@@ -1356,7 +1356,7 @@
            }
           ]
          },
-         "x-message": "give one of rate_pps, interval_s and rate_of"
+         "x-message": "Give one of rate, interval and relative rate"
         },
         {
          "not": {
@@ -1369,7 +1369,7 @@
            }
           ]
          },
-         "x-message": "max_rate_pps goes with interval_s, not rate_pps"
+         "x-message": "A rate limit applies only with an interval"
         },
         {
          "not": {
@@ -1382,7 +1382,7 @@
            }
           ]
          },
-         "x-message": "max_rate_pps goes with interval_s, not rate_of"
+         "x-message": "A rate limit applies only with an interval"
         }
        ]
       },
@@ -1396,7 +1396,7 @@
      ],
      "title": "Load",
      "description": "The load from this phase on: settings, \"off\", or \"keep\" (the default)",
-     "x-message": "load is an object, \"off\" or \"keep\""
+     "x-message": "The load is either settings, \"off\" or \"keep\""
     },
     "measure": {
      "type": "object",
@@ -1406,7 +1406,7 @@
       "sets": {
        "type": "array",
        "title": "Measurements",
-       "description": "Any of: traffic: Delivery, RTT and one-way delay overall and per hop count, offered and delivered throughput; queues: Per node: queue depths, drops, MAC retries and give-ups, channel-access failures; mesh: Topology: parents, depths, orphans, parent changes, RPL control messages; power: Per node: charge and average current in the phase, by state (needs power recording); medium: Frames, airtime and reception outcomes of the radio medium",
+       "description": "Any of: traffic: Delivery, RTT and one-way delay (overall and per hop count), offered and delivered load; queues: Per node: queue depths, drops, MAC retries and give-ups, channel-access failures; mesh: Topology: parents, depths, orphans, parent changes, RPL control messages; power: Per node: charge and average current in the phase, by state (needs power recording); medium: Frames, airtime and reception outcomes of the radio medium",
        "items": {
         "type": "string",
         "enum": [
@@ -1423,8 +1423,8 @@
       },
       "settle_s": {
        "type": "number",
-       "title": "Settle",
-       "description": "Time after the start not measured",
+       "title": "Settling time",
+       "description": "Time after the start that is not measured",
        "x-unit": "s",
        "minimum": 0,
        "default": 0
@@ -1435,12 +1435,12 @@
     "end": {
      "type": "object",
      "title": "End",
-     "description": "When the phase ends: after a fixed duration (after_s), or when a condition holds, with a cap (max_s). Default: after 60 s",
+     "description": "When the phase ends: after a fixed duration, or when a condition holds, with a time limit. Default: after 60 s",
      "properties": {
       "is": {
        "type": "string",
        "title": "Kind",
-       "description": "immediately: true at once; time: virtual time reached; elapsed: time since the reference (the previous phase's end for a start, the phase's start for an end); formed: the network has joined; node_event: a node joined, changed or lost its parent, restarted; repaired: every router cut off by the last disruption that can be repaired has a route again; metric: a measured value compared with a threshold; all / any: a combination",
+       "description": "immediately: at once; time: at a virtual time; elapsed: after a delay (from the previous phase's end for a start, from the phase's start for an end); formed: the network has joined; node_event: nodes joined, changed or lost their parent, or restarted; repaired: every router cut off by the last repairable disruption has a route again; metric: a measured value compared with a threshold; all / any: a combination",
        "enum": [
         "immediately",
         "time",
@@ -1456,14 +1456,14 @@
       "t_s": {
        "type": "number",
        "title": "Time",
-       "description": "For time: virtual time since the run's start",
+       "description": "For time: virtual time since the start of the run",
        "x-unit": "s",
        "minimum": 0
       },
       "s": {
        "type": "number",
-       "title": "Seconds",
-       "description": "For elapsed",
+       "title": "Elapsed time",
+       "description": "For elapsed: time after the reference",
        "x-unit": "s",
        "minimum": 0
       },
@@ -1496,7 +1496,7 @@
       "stable_s": {
        "type": "number",
        "title": "Stable for",
-       "description": "For formed: and no parent change anywhere for this long",
+       "description": "For formed: no parent change anywhere for this long",
        "x-unit": "s",
        "minimum": 0,
        "default": 0
@@ -1518,7 +1518,7 @@
       "e2e": {
        "type": "boolean",
        "title": "End to end",
-       "description": "For repaired: also every cut-off router is in the border router's routing table and got an echo for a packet sent after the disruption (when it takes part in an echoed flow)",
+       "description": "For repaired: every cut-off router must also be in the border router's routing table and, in an echoed flow, receive an echo for a packet sent after the disruption",
        "default": false
       },
       "metric": {
@@ -1560,7 +1560,7 @@
       "op": {
        "type": "string",
        "title": "Comparison",
-       "description": "For metric. Default: \"worse than\" the value: >= for delays, queues, retries...; < for pdr, delivered_pps and joined_fraction",
+       "description": "For metric. Default: worse than the value (< for the delivery ratio, the delivered load and the share of joined routers; >= otherwise)",
        "enum": [
         ">=",
         ">",
@@ -1577,13 +1577,13 @@
          "delivered_pps",
          "joined_fraction"
         ],
-        "text": "worse than the value (< for pdr, delivered_pps and joined_fraction, else >=)"
+        "text": "worse than the value (< for the delivery ratio, the delivered load and the share of joined routers, else >=)"
        }
       },
       "value": {
        "type": "number",
        "title": "Value",
-       "description": "For metric: the threshold, in the metric's unit (or relative_to instead)"
+       "description": "For metric: the threshold, in the metric's unit (or a value relative to an earlier phase)"
       },
       "relative_to": {
        "$ref": "#/$defs/relative"
@@ -1591,7 +1591,7 @@
       "per_hop": {
        "type": "boolean",
        "title": "Per hop count",
-       "description": "For metric (rtt, latency): true if the comparison holds for any hop count, each against the same hop count of relative_to",
+       "description": "For RTT and one-way delay metrics: met when the comparison holds at any hop count, each against the same hop count of the earlier phase",
        "default": false
       },
       "flow": {
@@ -1633,14 +1633,14 @@
       },
       "min_samples": {
        "type": "integer",
-       "title": "Samples",
-       "description": "For pdr, rtt and latency metrics: at least this many packets in the window, else the condition is not decided yet (default: settings.min_samples)",
+       "title": "Minimum samples",
+       "description": "For delivery ratio, RTT and one-way delay metrics: at least this many packets in the window, else the condition is not decided yet",
        "x-unit": "packets",
        "minimum": 1,
        "x-default": {
         "rule": "setting",
         "setting": "min_samples",
-        "text": "the scenario setting min_samples"
+        "text": "the scenario's minimum samples setting"
        }
       },
       "of": {
@@ -1661,8 +1661,8 @@
       },
       "max_s": {
        "type": "number",
-       "title": "Cap",
-       "description": "With a condition: end after this long anyway",
+       "title": "Time limit",
+       "description": "With a condition: the phase ends after this long at the latest",
        "x-unit": "s",
        "minimum": 0,
        "default": 600
@@ -1686,7 +1686,7 @@
          "t_s"
         ]
        },
-       "x-message": "a time condition needs t_s"
+       "x-message": "Give the time"
       },
       {
        "if": {
@@ -1704,7 +1704,7 @@
          "s"
         ]
        },
-       "x-message": "an elapsed condition needs s"
+       "x-message": "Give the elapsed time"
       },
       {
        "if": {
@@ -1723,7 +1723,7 @@
          "nodes"
         ]
        },
-       "x-message": "a node_event condition needs event and nodes"
+       "x-message": "Choose the event and the nodes"
       },
       {
        "if": {
@@ -1763,7 +1763,7 @@
          }
         ]
        },
-       "x-message": "a metric condition needs a metric and either value or relative_to (not both)"
+       "x-message": "Choose a metric, and either a value or a reference to an earlier phase (not both)"
       },
       {
        "if": {
@@ -1781,7 +1781,7 @@
          "of"
         ]
        },
-       "x-message": "all needs of"
+       "x-message": "Give the conditions to combine"
       },
       {
        "if": {
@@ -1799,7 +1799,7 @@
          "of"
         ]
        },
-       "x-message": "any needs of"
+       "x-message": "Give the conditions to combine"
       },
       {
        "oneOf": [
@@ -1833,26 +1833,26 @@
          }
         }
        ],
-       "x-message": "end is either after_s alone (a fixed duration) or a condition (\"is\") with max_s"
+       "x-message": "The end is either a fixed duration, or a condition with a time limit"
       }
      ]
     },
     "repeat": {
      "type": "object",
      "title": "Repeat",
-     "description": "Iterations: the load changes at each, until a condition holds (a capacity search)",
+     "description": "The load changes at each iteration until a condition holds (a capacity search)",
      "properties": {
       "max": {
        "type": "integer",
        "title": "Iterations",
-       "description": "At most this many (confirmations included)",
+       "description": "Maximum number, confirmations included",
        "minimum": 1,
        "maximum": 100,
        "default": 12
       },
       "mul": {
        "type": "number",
-       "title": "Multiply",
+       "title": "Rate factor",
        "description": "The rate is multiplied by this at each iteration",
        "x-unit": "ratio",
        "exclusiveMinimum": 1,
@@ -1860,22 +1860,22 @@
       },
       "add_pps": {
        "type": "number",
-       "title": "Add",
-       "description": "Instead of mul: the rate grows by this at each iteration",
+       "title": "Rate increment",
+       "description": "Instead of a factor: the rate grows by this at each iteration",
        "x-unit": "packets/s",
        "exclusiveMinimum": 0
       },
       "window_s": {
        "type": "number",
-       "title": "Window",
-       "description": "Measured time of an iteration (made longer when the rate gives fewer than min_samples packets)",
+       "title": "Measurement window",
+       "description": "Measured time of an iteration (extended when the rate gives too few packets)",
        "x-unit": "s",
        "minimum": 1,
        "default": 60
       },
       "settle_s": {
        "type": "number",
-       "title": "Settle",
+       "title": "Settling time",
        "description": "Time at the new load before the window",
        "x-unit": "s",
        "minimum": 0,
@@ -1883,7 +1883,7 @@
       },
       "confirm": {
        "type": "integer",
-       "title": "Confirm",
+       "title": "Confirmations",
        "description": "The condition must hold on this many windows in a row at the same load",
        "x-unit": "windows",
        "minimum": 1,
@@ -1911,7 +1911,7 @@
          }
         ]
        },
-       "x-message": "give mul or add_pps, not both"
+       "x-message": "Give a rate factor or a rate increment, not both"
       }
      ]
     }
@@ -1932,7 +1932,7 @@
        }
       ]
      },
-     "x-message": "a phase has end or repeat, not both"
+     "x-message": "A phase has an end or a repetition, not both"
     }
    ]
   },
@@ -1946,7 +1946,7 @@
      "title": "Title",
      "description": "Shown above the graph",
      "x-default": {
-      "text": "the y columns' titles against the x column's"
+      "text": "\"<vertical axis> against <horizontal axis>\""
      }
     },
     "x": {
@@ -1993,19 +1993,19 @@
       "rtt.mean_ms": "RTT mean",
       "rtt.p95_ms": "RTT p95",
       "rtt.max_ms": "RTT max",
-      "latency.mean_ms": "Delay mean",
-      "latency.p95_ms": "Delay p95",
+      "latency.mean_ms": "One-way delay mean",
+      "latency.p95_ms": "One-way delay p95",
       "mac.retries": "MAC retries",
-      "mac.retries_per_frame": "Retries per frame",
+      "mac.retries_per_frame": "MAC retries per frame",
       "medium.collisions": "Collisions",
       "medium.collision_share": "Collision share",
-      "queue.mean_max": "Highest mean queue",
-      "power.min_ma": "Power min",
-      "power.mean_ma": "Power mean",
-      "power.max_ma": "Power max",
-      "power.max_node": "Power max node",
-      "power.br_ma": "Border router power",
-      "mesh.joined_fraction": "Joined"
+      "queue.mean_max": "Highest mean queue depth",
+      "power.min_ma": "Current min",
+      "power.mean_ma": "Current mean",
+      "power.max_ma": "Current max",
+      "power.max_node": "Highest-current router",
+      "power.br_ma": "Border router current",
+      "mesh.joined_fraction": "Joined routers"
      }
     },
     "y": {
@@ -2024,19 +2024,19 @@
       "rtt.mean_ms": "RTT mean",
       "rtt.p95_ms": "RTT p95",
       "rtt.max_ms": "RTT max",
-      "latency.mean_ms": "Delay mean",
-      "latency.p95_ms": "Delay p95",
+      "latency.mean_ms": "One-way delay mean",
+      "latency.p95_ms": "One-way delay p95",
       "mac.retries": "MAC retries",
-      "mac.retries_per_frame": "Retries per frame",
+      "mac.retries_per_frame": "MAC retries per frame",
       "medium.collisions": "Collisions",
       "medium.collision_share": "Collision share",
-      "queue.mean_max": "Highest mean queue",
-      "power.min_ma": "Power min",
-      "power.mean_ma": "Power mean",
-      "power.max_ma": "Power max",
-      "power.max_node": "Power max node",
-      "power.br_ma": "Border router power",
-      "mesh.joined_fraction": "Joined"
+      "queue.mean_max": "Highest mean queue depth",
+      "power.min_ma": "Current min",
+      "power.mean_ma": "Current mean",
+      "power.max_ma": "Current max",
+      "power.max_node": "Highest-current router",
+      "power.br_ma": "Border router current",
+      "mesh.joined_fraction": "Joined routers"
      },
      "oneOf": [
       {
@@ -2160,13 +2160,13 @@
   },
   "block_formed": {
    "type": "object",
-   "title": "Wait for the network",
-   "description": "Wait until the routers have joined (ready and in the border router's table) and no parent changed for stable_s",
+   "title": "Network formation",
+   "description": "Wait until the routers have joined (ready and in the border router's routing table) and no parent has changed for the stable time",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "Wait until the routers have joined (ready and in the border router's table) and no parent changed for stable_s",
+     "description": "Wait until the routers have joined (ready and in the border router's routing table) and no parent has changed for the stable time",
      "enum": [
       "formed"
      ]
@@ -2174,7 +2174,7 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Name of the step, unique; later steps refer to it (default: the block's)",
+     "description": "Unique name of the step, used by later steps",
      "x-default": {
       "value": "formed",
       "text": "the block's name"
@@ -2200,7 +2200,7 @@
     "timeout_s": {
      "type": "number",
      "title": "Timeout",
-     "description": "Start anyway after this long, flagged",
+     "description": "After this long, the scenario continues anyway and the timeout is reported",
      "x-unit": "s",
      "minimum": 0,
      "default": 3600
@@ -2214,12 +2214,12 @@
   "block_probe": {
    "type": "object",
    "title": "Per-hop RTT probe",
-   "description": "A light load, its RTT, delay and delivery per hop count: the baseline of later phases",
+   "description": "Measure the RTT, one-way delay and delivery ratio per hop count under a light load, as the baseline for later steps",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "A light load, its RTT, delay and delivery per hop count: the baseline of later phases",
+     "description": "Measure the RTT, one-way delay and delivery ratio per hop count under a light load, as the baseline for later steps",
      "enum": [
       "probe"
      ]
@@ -2227,7 +2227,7 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Name of the step, unique; later steps refer to it (default: the block's)",
+     "description": "Unique name of the step, used by later steps",
      "x-default": {
       "value": "probe",
       "text": "the block's name"
@@ -2236,7 +2236,7 @@
     "rate_pps": {
      "type": "number",
      "title": "Rate",
-     "description": "Offered packets/s, whole network (default: one packet per router every 30 s, at most 0.5 packets/s)",
+     "description": "Offered packets per second, whole network (default: one packet per router every 30 s, at most 0.5 packets/s)",
      "x-unit": "packets/s",
      "exclusiveMinimum": 0,
      "x-default": {
@@ -2274,8 +2274,8 @@
     },
     "settle_s": {
      "type": "number",
-     "title": "Settle",
-     "description": "Not measured at the start",
+     "title": "Settling time",
+     "description": "Time at the start that is not measured",
      "x-unit": "s",
      "minimum": 0,
      "default": 30
@@ -2298,12 +2298,12 @@
   "block_capacity": {
    "type": "object",
    "title": "Capacity search",
-   "description": "Raise the load step by step until the RTT reaches rtt_factor x the baseline's, the largest RTT max_rtt_ms, or the delivery falls below min_pdr (on confirm windows in a row); the capacity is the measured offered rate of the last step before",
+   "description": "Raise the load until the RTT reaches the RTT factor times the baseline RTT, the maximum RTT reaches its limit, or the delivery ratio falls below its minimum, on several windows in a row. The capacity is the offered load measured at the last level before saturation",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "Raise the load step by step until the RTT reaches rtt_factor x the baseline's, the largest RTT max_rtt_ms, or the delivery falls below min_pdr (on confirm windows in a row); the capacity is the measured offered rate of the last step before",
+     "description": "Raise the load until the RTT reaches the RTT factor times the baseline RTT, the maximum RTT reaches its limit, or the delivery ratio falls below its minimum, on several windows in a row. The capacity is the offered load measured at the last level before saturation",
      "enum": [
       "capacity"
      ]
@@ -2311,7 +2311,7 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Name of the step, unique; later steps refer to it (default: the block's)",
+     "description": "Unique name of the step, used by later steps",
      "x-default": {
       "value": "capacity",
       "text": "the block's name"
@@ -2325,52 +2325,52 @@
     },
     "start_rate_pps": {
      "type": "number",
-     "title": "First rate",
-     "description": "Packets/s of the first step (default: 2 x the baseline's)",
+     "title": "Initial rate",
+     "description": "Offered load of the first window",
      "x-unit": "packets/s",
      "exclusiveMinimum": 0,
      "x-default": {
       "rule": "times_baseline",
       "factor": 2,
       "field": "baseline",
-      "text": "2 x the rate of the baseline phase"
+      "text": "twice the rate of the baseline phase"
      }
     },
     "mul": {
      "type": "number",
-     "title": "Step factor",
-     "description": "Rate multiplied by this at each step",
+     "title": "Rate factor",
+     "description": "The rate is multiplied by this at each new load level",
      "x-unit": "ratio",
      "exclusiveMinimum": 1,
      "default": 1.5
     },
     "max_steps": {
      "type": "integer",
-     "title": "Steps",
-     "description": "At most this many windows",
+     "title": "Windows",
+     "description": "At most this many measurement windows",
      "minimum": 1,
      "maximum": 100,
      "default": 12
     },
     "window_s": {
      "type": "number",
-     "title": "Window",
-     "description": "Measured time of a step (longer when the rate gives too few packets)",
+     "title": "Measurement window",
+     "description": "Measured time of each window (extended when the rate gives too few packets)",
      "x-unit": "s",
      "minimum": 1,
      "default": 60
     },
     "settle_s": {
      "type": "number",
-     "title": "Settle",
-     "description": "Time at the new load before measuring",
+     "title": "Settling time",
+     "description": "Time at a new load before it is measured",
      "x-unit": "s",
      "minimum": 0,
      "default": 15
     },
     "confirm": {
      "type": "integer",
-     "title": "Confirm",
+     "title": "Confirmations",
      "description": "The condition must hold on this many windows in a row at the same load",
      "x-unit": "windows",
      "minimum": 1,
@@ -2379,8 +2379,8 @@
     },
     "rtt_metric": {
      "type": "string",
-     "title": "RTT metric",
-     "description": "The RTT compared with the baseline",
+     "title": "RTT statistic",
+     "description": "The RTT statistic compared with the baseline",
      "enum": [
       "rtt.mean_ms",
       "rtt.p50_ms",
@@ -2391,21 +2391,21 @@
     "rtt_factor": {
      "type": "number",
      "title": "RTT factor",
-     "description": "Saturated when the RTT reaches this x the baseline's",
+     "description": "Saturated when the RTT reaches this multiple of the baseline RTT",
      "x-unit": "ratio",
      "exclusiveMinimum": 1,
      "default": 2
     },
     "max_rtt_ms": {
      "type": "number",
-     "title": "RTT ceiling",
-     "description": "Saturated when the largest RTT reaches this",
+     "title": "Maximum RTT",
+     "description": "Saturated when the maximum RTT reaches this",
      "x-unit": "ms",
      "minimum": 1
     },
     "min_pdr": {
      "type": "number",
-     "title": "Delivery floor",
+     "title": "Minimum delivery ratio",
      "description": "Saturated when the delivery ratio falls below this",
      "x-unit": "ratio",
      "minimum": 0,
@@ -2448,12 +2448,12 @@
   "block_interference": {
    "type": "object",
    "title": "Interference",
-   "description": "An external interferer from the start of the phase, under a share of the capacity found; optionally first a reference at the same load without it (<name>_reference), the baseline of a recovery",
+   "description": "Add an external interferer under a share of the capacity found, optionally after a reference measurement at the same load without it (the baseline for a recovery)",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "An external interferer from the start of the phase, under a share of the capacity found; optionally first a reference at the same load without it (<name>_reference), the baseline of a recovery",
+     "description": "Add an external interferer under a share of the capacity found, optionally after a reference measurement at the same load without it (the baseline for a recovery)",
      "enum": [
       "interference"
      ]
@@ -2461,7 +2461,7 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Name of the step, unique; later steps refer to it (default: the block's)",
+     "description": "Unique name of the step, used by later steps",
      "x-default": {
       "value": "interference",
       "text": "the block's name"
@@ -2475,13 +2475,13 @@
     "interferer_name": {
      "type": "string",
      "title": "Interferer name",
-     "description": "Its name, to remove it later",
+     "description": "Name used to remove it later",
      "default": "jam"
     },
     "capacity_phase": {
      "type": "string",
-     "title": "Capacity phase",
-     "description": "Where the capacity comes from",
+     "title": "Capacity source",
+     "description": "The earlier capacity search that sets the load",
      "default": "capacity"
     },
     "load_fraction": {
@@ -2495,8 +2495,8 @@
     },
     "reference_s": {
      "type": "number",
-     "title": "Reference",
-     "description": "Before the interferer: this long measured at the same load without it, as the phase <name>_reference (0: none)",
+     "title": "Reference duration",
+     "description": "Measured time at the same load without the interferer, before it is added (0: none)",
      "x-unit": "s",
      "minimum": 0,
      "default": 0
@@ -2504,15 +2504,15 @@
     "duration_s": {
      "type": "number",
      "title": "Duration",
-     "description": "Length of the phase",
+     "description": "Measured time with the interferer",
      "x-unit": "s",
      "minimum": 1,
      "default": 300
     },
     "settle_s": {
      "type": "number",
-     "title": "Settle",
-     "description": "Not measured at the start (of the reference too)",
+     "title": "Settling time",
+     "description": "Time at the start that is not measured (also for the reference)",
      "x-unit": "s",
      "minimum": 0,
      "default": 30
@@ -2540,7 +2540,7 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Name of the step, unique; later steps refer to it (default: the block's)",
+     "description": "Unique name of the step, used by later steps",
      "x-default": {
       "value": "recovery",
       "text": "the block's name"
@@ -2549,27 +2549,27 @@
     "interferer_name": {
      "type": "string",
      "title": "Interferer name",
-     "description": "The interferer removed (\"all\": every one; \"\": none)",
+     "description": "The interferer to remove (\"all\": every one; empty: none)",
      "default": "all"
     },
     "baseline": {
      "type": "string",
      "title": "Baseline phase",
-     "description": "The reference RTT",
+     "description": "The phase whose RTT is the reference",
      "default": "probe"
     },
     "within": {
      "type": "number",
      "title": "Back within",
-     "description": "Ends when the RTT p95 is at most this x the baseline's",
+     "description": "Ends when the RTT p95 is at most this multiple of the baseline",
      "x-unit": "ratio",
      "minimum": 1,
      "default": 1.2
     },
     "max_s": {
      "type": "number",
-     "title": "Cap",
-     "description": "At most this long",
+     "title": "Time limit",
+     "description": "Ends after this long at the latest",
      "x-unit": "s",
      "minimum": 1,
      "default": 600
@@ -2583,12 +2583,12 @@
   "block_node_outage": {
    "type": "object",
    "title": "Switch nodes off",
-   "description": "Switch nodes off (power off) under a share of the capacity and measure until the mesh is repaired; optionally switch them back on afterwards and measure until they are back in the border router's routing table; or switch back on the nodes an earlier step switched off",
+   "description": "Switch nodes off under a share of the capacity and measure until the mesh is repaired; optionally switch them back on afterwards and measure until they are back in the border router's routing table; or switch back on the nodes an earlier step switched off",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "Switch nodes off (power off) under a share of the capacity and measure until the mesh is repaired; optionally switch them back on afterwards and measure until they are back in the border router's routing table; or switch back on the nodes an earlier step switched off",
+     "description": "Switch nodes off under a share of the capacity and measure until the mesh is repaired; optionally switch them back on afterwards and measure until they are back in the border router's routing table; or switch back on the nodes an earlier step switched off",
      "enum": [
       "node_outage"
      ]
@@ -2596,7 +2596,7 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Name of the step, unique; later steps refer to it (default: the block's)",
+     "description": "Unique name of the step, used by later steps",
      "x-default": {
       "rule": "by_field",
       "field": "mode",
@@ -2610,7 +2610,7 @@
     },
     "mode": {
      "type": "string",
-     "title": "What to do",
+     "title": "Action",
      "description": "Switch the nodes off and keep them off (the step ends when the mesh is repaired); switch them off, then back on once the mesh is repaired (the step ends when they are back in the border router's routing table); or switch back on the nodes an earlier step switched off (the step ends when they are back)",
      "enum": [
       "off",
@@ -2639,12 +2639,12 @@
     },
     "off_s": {
      "type": "number",
-     "title": "Off for at least",
+     "title": "Minimum time off",
      "description": "When they are switched back on: keep them off at least this long, even if the mesh is repaired sooner",
      "x-unit": "s",
      "minimum": 0,
      "x-default": {
-      "text": "until the mesh is repaired (or the cap)"
+      "text": "until the mesh is repaired (or the time limit)"
      }
     },
     "of_step": {
@@ -2654,8 +2654,8 @@
     },
     "capacity_phase": {
      "type": "string",
-     "title": "Capacity phase",
-     "description": "The load is a share of the capacity this earlier capacity search found (\"\": keep the load in force)",
+     "title": "Capacity source",
+     "description": "The earlier capacity search whose capacity sets the load (empty: keep the current load)",
      "default": "capacity"
     },
     "load_fraction": {
@@ -2669,8 +2669,8 @@
     },
     "max_s": {
      "type": "number",
-     "title": "Cap",
-     "description": "Each part (off, back on) ends after this long at most, flagged as not met; when they are kept off at least a given time, the off part may last that time if it is longer",
+     "title": "Time limit",
+     "description": "Each part (off, back on) ends after this long at the latest and is then reported as not met; with a minimum time off, the off part lasts at least that time",
      "x-unit": "s",
      "minimum": 1,
      "default": 600
@@ -2710,12 +2710,12 @@
   "block_node_failure": {
    "type": "object",
    "title": "Node failure",
-   "description": "Power off nodes (default: the hop-1 router with the largest subtree) under a share of the capacity, and measure until the mesh is repaired",
+   "description": "Switch off nodes (default: the hop-1 router with the largest subtree) under a share of the capacity, and measure until the mesh is repaired",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "Power off nodes (default: the hop-1 router with the largest subtree) under a share of the capacity, and measure until the mesh is repaired",
+     "description": "Switch off nodes (default: the hop-1 router with the largest subtree) under a share of the capacity, and measure until the mesh is repaired",
      "enum": [
       "node_failure"
      ]
@@ -2723,7 +2723,7 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Name of the step, unique; later steps refer to it (default: the block's)",
+     "description": "Unique name of the step, used by later steps",
      "x-default": {
       "value": "node_failure",
       "text": "the block's name"
@@ -2740,8 +2740,8 @@
     },
     "capacity_phase": {
      "type": "string",
-     "title": "Capacity phase",
-     "description": "Where the capacity comes from (\"\": keep the load)",
+     "title": "Capacity source",
+     "description": "The earlier capacity search that sets the load (empty: keep the current load)",
      "default": "capacity"
     },
     "load_fraction": {
@@ -2755,8 +2755,8 @@
     },
     "max_s": {
      "type": "number",
-     "title": "Cap",
-     "description": "At most this long",
+     "title": "Time limit",
+     "description": "Ends after this long at the latest",
      "x-unit": "s",
      "minimum": 1,
      "default": 600
@@ -2764,7 +2764,7 @@
     "e2e": {
      "type": "boolean",
      "title": "End to end",
-     "description": "For repaired: also every cut-off router is in the border router's routing table and got an echo for a packet sent after the disruption (when it takes part in an echoed flow)",
+     "description": "For repaired: every cut-off router must also be in the border router's routing table and, in an echoed flow, receive an echo for a packet sent after the disruption",
      "default": false
     }
    },
@@ -2791,7 +2791,7 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Name of the step, unique; later steps refer to it (default: the block's)",
+     "description": "Unique name of the step, used by later steps",
      "x-default": {
       "value": "node_restart",
       "text": "the block's name"
@@ -2805,8 +2805,8 @@
     },
     "capacity_phase": {
      "type": "string",
-     "title": "Capacity phase",
-     "description": "Where the capacity comes from (\"\": keep the load)",
+     "title": "Capacity source",
+     "description": "The earlier capacity search that sets the load (empty: keep the current load)",
      "default": "capacity"
     },
     "load_fraction": {
@@ -2820,8 +2820,8 @@
     },
     "max_s": {
      "type": "number",
-     "title": "Cap",
-     "description": "At most this long",
+     "title": "Time limit",
+     "description": "Ends after this long at the latest",
      "x-unit": "s",
      "minimum": 1,
      "default": 600
@@ -2836,13 +2836,13 @@
   },
   "block_capacity_check": {
    "type": "object",
-   "title": "Capacity again",
-   "description": "A capacity search from a share of an earlier capacity (e.g. after a repair), against a fresh baseline: by default a probe of the network as it is now, then the search",
+   "title": "Capacity recheck",
+   "description": "Search the capacity again (for example after a repair), from a share of an earlier capacity and against a new baseline: by default, a probe of the network in its current state, then the search",
    "properties": {
     "use": {
      "type": "string",
      "title": "Block",
-     "description": "A capacity search from a share of an earlier capacity (e.g. after a repair), against a fresh baseline: by default a probe of the network as it is now, then the search",
+     "description": "Search the capacity again (for example after a repair), from a share of an earlier capacity and against a new baseline: by default, a probe of the network in its current state, then the search",
      "enum": [
       "capacity_check"
      ]
@@ -2850,7 +2850,7 @@
     "name": {
      "type": "string",
      "title": "Name",
-     "description": "Name of the step, unique; later steps refer to it (default: the block's)",
+     "description": "Unique name of the step, used by later steps",
      "x-default": {
       "value": "capacity_check",
       "text": "the block's name"
@@ -2858,14 +2858,14 @@
     },
     "capacity_phase": {
      "type": "string",
-     "title": "Earlier capacity",
-     "description": "The capacity it starts from",
+     "title": "Capacity source",
+     "description": "The earlier capacity search whose capacity sets the initial rate",
      "default": "capacity"
     },
     "start_fraction": {
      "type": "number",
-     "title": "First rate",
-     "description": "Share of the earlier capacity of the first step",
+     "title": "Initial rate",
+     "description": "Share of the earlier capacity offered in the first window",
      "x-unit": "ratio",
      "exclusiveMinimum": 0,
      "default": 0.5
@@ -2873,7 +2873,7 @@
     "baseline": {
      "type": "string",
      "title": "Baseline",
-     "description": "\"self\": a probe of its own first (<name>_probe); else an earlier phase",
+     "description": "\"self\": its own probe first; otherwise the name of an earlier phase",
      "default": "self"
     },
     "probe_s": {
@@ -2886,39 +2886,39 @@
     },
     "mul": {
      "type": "number",
-     "title": "Step factor",
-     "description": "Rate multiplied by this at each step",
+     "title": "Rate factor",
+     "description": "The rate is multiplied by this at each new load level",
      "x-unit": "ratio",
      "exclusiveMinimum": 1,
      "default": 1.5
     },
     "max_steps": {
      "type": "integer",
-     "title": "Steps",
-     "description": "At most this many windows",
+     "title": "Windows",
+     "description": "At most this many measurement windows",
      "minimum": 1,
      "maximum": 100,
      "default": 8
     },
     "window_s": {
      "type": "number",
-     "title": "Window",
-     "description": "Measured time of a step (longer when the rate gives too few packets)",
+     "title": "Measurement window",
+     "description": "Measured time of each window (extended when the rate gives too few packets)",
      "x-unit": "s",
      "minimum": 1,
      "default": 60
     },
     "settle_s": {
      "type": "number",
-     "title": "Settle",
-     "description": "Time at the new load before measuring",
+     "title": "Settling time",
+     "description": "Time at a new load before it is measured",
      "x-unit": "s",
      "minimum": 0,
      "default": 15
     },
     "confirm": {
      "type": "integer",
-     "title": "Confirm",
+     "title": "Confirmations",
      "description": "The condition must hold on this many windows in a row at the same load",
      "x-unit": "windows",
      "minimum": 1,
@@ -2928,14 +2928,14 @@
     "rtt_factor": {
      "type": "number",
      "title": "RTT factor",
-     "description": "Saturated when the RTT reaches this x the baseline's",
+     "description": "Saturated when the RTT reaches this multiple of the baseline RTT",
      "x-unit": "ratio",
      "exclusiveMinimum": 1,
      "default": 2
     },
     "min_pdr": {
      "type": "number",
-     "title": "Delivery floor",
+     "title": "Minimum delivery ratio",
      "description": "Saturated when the delivery ratio falls below this",
      "x-unit": "ratio",
      "minimum": 0,
@@ -2978,7 +2978,7 @@
   "selector": {
    "type": "object",
    "title": "Nodes",
-   "description": "Which nodes an action acts on, resolved from the topology when the action runs: the candidates (select), then optionally ranked by a measured value (rank_by) and picked",
+   "description": "The nodes an action applies to, resolved from the topology when the action runs: the candidates, optionally ranked by a measured value, then picked",
    "properties": {
     "select": {
      "type": "string",
@@ -3015,7 +3015,7 @@
     "step": {
      "type": "string",
      "title": "Step",
-     "description": "The name of an earlier step that switched nodes off"
+     "description": "The earlier step that switched the nodes off"
     },
     "id": {
      "type": "integer",
@@ -3069,7 +3069,7 @@
     "label": {
      "type": "string",
      "title": "Label",
-     "description": "Legacy (select label): the label of an earlier action; use select step",
+     "description": "Older files only: the label of an earlier action (use an earlier step instead)",
      "x-hidden": true
     },
     "rank_by": {
@@ -3096,7 +3096,7 @@
       "queue.mean": "Mean queue",
       "queue.max": "Queue peak",
       "rtt.mean_ms": "Mean RTT",
-      "rtt.max_ms": "Largest RTT",
+      "rtt.max_ms": "Maximum RTT",
       "mac.retries_per_frame": "MAC retries per frame",
       "mac.retries": "MAC retries",
       "medium.collisions": "Collisions",
@@ -3108,7 +3108,7 @@
     "rank_window_s": {
      "type": "number",
      "title": "Ranking window",
-     "description": "The ranking value is measured over this long before the step starts",
+     "description": "The ranking value is measured over this period before the step starts",
      "x-unit": "s",
      "minimum": 1,
      "default": 60
@@ -3116,7 +3116,7 @@
     "pick": {
      "type": "string",
      "title": "Pick",
-     "description": "Which of the candidates: all of them; the highest by the ranking (a number of them, a share of them, or all those at or above a threshold; when none is at or above it, the step is skipped); the routers with the largest subtree or the most children; drawn at random; the lowest IDs",
+     "description": "Which candidates: all of them; the highest by the ranking (a number, a share, or all those at or above a threshold; when none reaches it, the step is skipped); the routers with the largest subtree or the most children; drawn at random; the lowest IDs",
      "enum": [
       "all",
       "top",
@@ -3265,7 +3265,7 @@
        "id"
       ]
      },
-     "x-message": "select id needs id"
+     "x-message": "Give the node ID"
     },
     {
      "if": {
@@ -3283,7 +3283,7 @@
        "ids"
       ]
      },
-     "x-message": "select ids needs ids"
+     "x-message": "Give the node IDs"
     },
     {
      "if": {
@@ -3301,7 +3301,7 @@
        "hop"
       ]
      },
-     "x-message": "select hop needs hop"
+     "x-message": "Give the hop count"
     },
     {
      "if": {
@@ -3320,7 +3320,7 @@
        "hop"
       ]
      },
-     "x-message": "select ancestor needs of and hop"
+     "x-message": "Give the node and the hop count"
     },
     {
      "if": {
@@ -3338,7 +3338,7 @@
        "storey"
       ]
      },
-     "x-message": "select storey needs storey"
+     "x-message": "Give the storey"
     },
     {
      "if": {
@@ -3356,7 +3356,7 @@
        "box"
       ]
      },
-     "x-message": "select area needs box"
+     "x-message": "Give the area"
     },
     {
      "if": {
@@ -3374,7 +3374,7 @@
        "label"
       ]
      },
-     "x-message": "select label needs label"
+     "x-message": "Give the label"
     },
     {
      "if": {
@@ -3392,14 +3392,14 @@
        "fraction"
       ]
      },
-     "x-message": "pick fraction needs fraction"
+     "x-message": "Give the share"
     }
    ]
   },
   "relative": {
    "type": "object",
    "title": "Relative to",
-   "description": "Factor x the same metric (or another one) measured in an earlier phase",
+   "description": "A multiple of a metric measured in an earlier phase",
    "properties": {
     "phase": {
      "type": "string",
@@ -3409,7 +3409,7 @@
     "metric": {
      "type": "string",
      "title": "Metric",
-     "description": "The earlier phase's metric (default: the condition's metric); a capacity search also has capacity_pps",
+     "description": "The metric of the earlier phase (default: the condition's metric); a capacity search also gives its capacity (capacity_pps)",
      "enum": [
       "delivered_pps",
       "latency.max_ms",
@@ -3489,14 +3489,14 @@
   },
   "rtt.max_ms": {
    "unit": "ms",
-   "description": "Largest round-trip time",
+   "description": "Maximum round-trip time",
    "set": "traffic",
    "worse": "high",
-   "per_node": "the largest RTT of the packets the router originated"
+   "per_node": "the maximum RTT of the packets the router originated"
   },
   "rtt.min_ms": {
    "unit": "ms",
-   "description": "Smallest round-trip time",
+   "description": "Minimum round-trip time",
    "set": "traffic",
    "worse": "high",
    "per_node": null
@@ -3517,14 +3517,14 @@
   },
   "latency.max_ms": {
    "unit": "ms",
-   "description": "Largest one-way delay",
+   "description": "Maximum one-way delay",
    "set": "traffic",
    "worse": "high",
    "per_node": null
   },
   "offered_pps": {
    "unit": "packets/s",
-   "description": "Packets sent per second by the flow (measured), whole network",
+   "description": "Packets sent per second by the flow, measured over the whole network",
    "set": "traffic",
    "worse": "high",
    "per_node": null
@@ -3594,7 +3594,7 @@
   },
   "mesh.parent_changes": {
    "unit": "changes",
-   "description": "Changes to a new parent seen in the window, all routers",
+   "description": "Parent changes in the window, all routers",
    "set": "mesh",
    "worse": "high",
    "per_node": null
@@ -3608,7 +3608,7 @@
   },
   "power.avg_ma": {
    "unit": "mA",
-   "description": "Mean over the routers of their average current in the window (needs power recording)",
+   "description": "Mean of the routers' average currents in the window (needs power recording)",
    "set": "power",
    "worse": "high",
    "per_node": "the router's average current"
@@ -3622,28 +3622,28 @@
   },
   "medium.airtime_s_per_s": {
    "unit": "s/s",
-   "description": "Airtime of every frame sent per second of the window (sum over all nodes)",
+   "description": "Total airtime of the frames sent, per second of the window (all nodes)",
    "set": "medium",
    "worse": "high",
    "per_node": null
   },
   "medium.loss_share": {
    "unit": "ratio",
-   "description": "Frames lost at receivers that were listening, over those heard (central medium)",
+   "description": "Share of the frames heard by listening receivers that were lost (central medium)",
    "set": "medium",
    "worse": "high",
    "per_node": null
   },
   "loss": {
    "unit": "ratio",
-   "description": "Share of the application packets lost in the window (sent and not delivered, or not echoed when the flow is echoed): one minus the delivery ratio",
+   "description": "Share of the application packets lost in the window (not delivered, or not echoed for an echoed flow): one minus the delivery ratio",
    "set": "traffic",
    "worse": "high",
    "per_node": "the share of the packets the router originated that were lost"
   },
   "mac.retries": {
    "unit": "retries",
-   "description": "MAC retransmissions of the unicast frames delivered in the window (the sum over the frames of their retries), all nodes",
+   "description": "MAC retransmissions of the unicast frames delivered in the window, all nodes",
    "set": "queues",
    "worse": "high",
    "per_node": "the MAC retransmissions of the router's unicast frames delivered"
@@ -3681,8 +3681,8 @@
   },
   "rtt.max_ms": {
    "unit": "ms",
-   "title": "Largest RTT",
-   "description": "Largest round-trip time of the node's packets in the ranking window"
+   "title": "Maximum RTT",
+   "description": "Maximum round-trip time of the node's packets in the ranking window"
   },
   "mac.retries_per_frame": {
    "unit": "retries",
@@ -3734,7 +3734,7 @@
   "step_index": {
    "unit": "",
    "title": "Step",
-   "description": "Index of the scenario step running (the entry of \"phases\"); null outside one"
+   "description": "Index of the scenario step running; empty outside a step"
   },
   "offered_pps": {
    "unit": "packets/s",
@@ -3754,7 +3754,7 @@
   "loss": {
    "unit": "ratio",
    "title": "Loss",
-   "description": "1 - delivery ratio, main flow"
+   "description": "One minus the delivery ratio, main flow"
   },
   "rtt.min_ms": {
    "unit": "ms",
@@ -3774,16 +3774,16 @@
   "rtt.max_ms": {
    "unit": "ms",
    "title": "RTT max",
-   "description": "Largest round-trip time, main flow"
+   "description": "Maximum round-trip time, main flow"
   },
   "latency.mean_ms": {
    "unit": "ms",
-   "title": "Delay mean",
+   "title": "One-way delay mean",
    "description": "Mean one-way delay, main flow"
   },
   "latency.p95_ms": {
    "unit": "ms",
-   "title": "Delay p95",
+   "title": "One-way delay p95",
    "description": "95th percentile of the one-way delay, main flow"
   },
   "mac.retries": {
@@ -3793,7 +3793,7 @@
   },
   "mac.retries_per_frame": {
    "unit": "retries",
-   "title": "Retries per frame",
+   "title": "MAC retries per frame",
    "description": "MAC retries per unicast frame delivered, all nodes"
   },
   "medium.collisions": {
@@ -3808,37 +3808,37 @@
   },
   "queue.mean_max": {
    "unit": "frames",
-   "title": "Highest mean queue",
+   "title": "Highest mean queue depth",
    "description": "Highest mean queue depth of a node (MAC plus adaptation layer)"
   },
   "power.min_ma": {
    "unit": "mA",
-   "title": "Power min",
+   "title": "Current min",
    "description": "Lowest average current of a router (needs power recording)"
   },
   "power.mean_ma": {
    "unit": "mA",
-   "title": "Power mean",
-   "description": "Mean over the routers of their average current (needs power recording)"
+   "title": "Current mean",
+   "description": "Mean of the routers' average currents (needs power recording)"
   },
   "power.max_ma": {
    "unit": "mA",
-   "title": "Power max",
+   "title": "Current max",
    "description": "Highest average current of a router (needs power recording)"
   },
   "power.max_node": {
    "unit": "",
-   "title": "Power max node",
+   "title": "Highest-current router",
    "description": "The router with the highest average current"
   },
   "power.br_ma": {
    "unit": "mA",
-   "title": "Border router power",
+   "title": "Border router current",
    "description": "Average current of the border router (needs power recording)"
   },
   "mesh.joined_fraction": {
    "unit": "ratio",
-   "title": "Joined",
+   "title": "Joined routers",
    "description": "Share of the running routers with a route to the border router at the end of the window or step"
   }
  }

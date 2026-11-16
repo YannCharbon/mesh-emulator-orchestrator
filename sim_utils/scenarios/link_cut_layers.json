@@ -1,7 +1,7 @@
 {
   "format": "wssim-scenario 1",
   "name": "Links of a hop-2 router cut for 120 s",
-  "description": "A hand-written scenario without blocks: a steady load from 300 s; every link of a random hop-2 router cut for 120 s; measure until the mesh is repaired, then 120 s after the links come back.",
+  "description": "Hand-written phases: a steady load from 300 s; every link of a random hop-2 router cut for 120 s; measurement until the mesh is repaired, then for 120 s after the links are restored.",
   "settings": {"poll_s": 2},
   "phases": [
     {"name": "steady", "start": {"is": "time", "t_s": 300},

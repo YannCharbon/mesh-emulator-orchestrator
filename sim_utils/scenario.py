@@ -1396,9 +1396,8 @@ class Driver:
                            'reached': sat is not None and last_ok is not None,
                            'searched': 'down' if direction < 0 else 'up', 'confirm': confirm,
                            'min_samples': self.min_samples,
-                           'detail': (sat['detail'] if sat else 'the condition never held: the capacity is at least '
-                                      'the last rate') if last_ok else
-                           'every rate tried met the condition: the capacity is below the lowest'}
+                           'detail': (sat['detail'] if sat else 'no saturation: the capacity is at least the last rate') if last_ok else
+                           'saturated at every rate tried: the capacity is below the lowest one'}
         base = self._baseline_of(until)
         if base:
             rec['capacity']['baseline'] = base
