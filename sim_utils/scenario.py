@@ -109,6 +109,7 @@ class Driver:
         self.load = None            # the load settings in force (dict) or None
         self.load_args = None       # their command
         self.killed = set()
+        self.kills = 0          # nodes switched off so far (for the answers expected)
         self.programs = {}
         self.instances = {}
         self.children = []
@@ -135,7 +136,7 @@ class Driver:
         self.off = {}               # node -> [[t_off, t_on or None]]: when the scenario had it switched off
         self.parent_min_dbm = self.settings.get('parent_min_dbm', -80)
         self.seq = 0                # node commands: sequence of their acknowledgements
-        self.pending_acks = {}      # seq -> (nodes expected, command)
+        self.pending_acks = {}      # seq -> (nodes expected, command, kills so far)
         self.disruptions = []       # every disruption, tracked until repaired or the end
         self.last_track = None
         self.restart_times = {}     # node -> virtual times it was started again
@@ -173,17 +174,20 @@ class Driver:
         r = self.cmd(f'{"ask" if ask else "node"} {ids} #{self.seq} {text}')
         if not r.startswith('ok '):
             raise Abort(f'conductor refused "{text[:80]}": {r}')
-        self.pending_acks[self.seq] = (int(r.split()[1]), text)
+        self.pending_acks[self.seq] = (int(r.split()[1]), text, self.kills)
         return int(r.split()[1])
 
     def check_acks(self):
-        for seq, (n, text) in list(self.pending_acks.items()):
+        for seq, (n, text, kills) in list(self.pending_acks.items()):
             got = [(nid, ok, why) for (nid, sq), (ok, why) in self.run.acks.items() if sq == seq]
             bad = [(nid, why) for nid, ok, why in got if not ok]
             if bad:
                 raise Abort(f'node command "{text[:80]}" failed: ' +
                             '; '.join(f'node {nid}: {why}' for nid, why in bad[:5]))
-            if len(got) < n:
+            # a node switched off after the command was sent cannot answer it
+            # (several nodes switched off in one action: each kill's command
+            # reaches the nodes killed after it)
+            if len(got) < n - (self.kills - kills):
                 raise Abort(f'node command "{text[:80]}": {len(got)} of {n} nodes answered')
             del self.pending_acks[seq]
 
@@ -711,6 +715,7 @@ class Driver:
         r = self.cmd(f'kill {n}')
         if r.startswith('ok'):
             self.killed.add(n)
+            self.kills += 1
             self.off.setdefault(n, []).append([round(self.now, 6), None])
             # no more packets to or from it (down streams, p2p peers)
             self.node('all', f'load exclude {n}')

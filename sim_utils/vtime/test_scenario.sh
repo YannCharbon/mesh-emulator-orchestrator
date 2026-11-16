@@ -225,5 +225,15 @@ printf '{"format": "wssim-scenario 1", "phases": [{"use": "probe"}, {"use": "cap
 if python3 "$HERE/../scenario.py" --check "$OUT/bad.json" | grep -q '"/phases/2/load_fraction"'; then echo "ok   validator: load_fraction 0 refused"
 else echo "FAIL validator: load_fraction 0 accepted"; OK=1; fi
 rm -f "$OUT/bad.json"
+# several nodes switched off by one action: each kill's "load exclude" reaches
+# the nodes killed after it, which cannot answer (300-node run of 2026-11-16)
+d="$OUT/multikill"; rm -rf "$d"
+printf '%s\n' '{"format": "wssim-scenario 1", "phases": [{"use": "formed", "stable_s": 30}, {"use": "probe", "duration_s": 120},' \
+    '{"use": "node_outage", "name": "out", "mode": "off_then_on", "capacity_phase": "", "max_s": 300,' \
+    ' "nodes": {"select": "all", "rank_by": "queue.mean", "pick": "top", "count": 3}}]}' > "$d.json"
+WSSIM_SEED=1 TUN=none SCENARIO="$d.json" "$HERE/run.sh" "$1" "$2" "$d" > "$d.out" 2>&1; RC=$?
+if [ "$RC" = 0 ] && grep -q "step 2 out ends (completed)" "$d/scenario.log"; then echo "ok   three nodes switched off by one action, then back on"
+else echo "FAIL multikill: run status $RC ($d/scenario.log)"; OK=1; fi
+[ "${KEEP:-0}" = 1 ] || rm -rf "$d" "$d.json" "$d.out"
 echo "test_scenario: $([ $OK = 0 ] && echo PASSED || echo FAILED) ($((SECONDS - T0)) s wall time)"
 exit $OK
