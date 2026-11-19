@@ -413,3 +413,18 @@ a156a55b258a3aa69be5b6760f142871558c195811cfaaac2b4ef00649195aa2  ./seed10/node1
 dd346ee51c8587b34f66717e1420442dd042a8dd5a8edddf3feb2c280564715f  ./seed10/node13.log
 42261a26507757f555a786d9179bce1ca571495a8ad07143a7950bec93e7bdf4  ./seed10/node14.log
 ```
+
+## MTS bench measurements of 2026-11-19
+
+Measurements on the MTS bench, kept as the baseline of the bench–emulator comparison (TB5). Not byte-for-byte
+references: hardware runs do not repeat exactly. Wi-SUN 0.2.9 on all 13 boards, `ws.min_sens` -93 dBm, fixed
+attenuator 40 dB. Results and method: `mesh-testbed-controller/docs/BENCH_MEASUREMENTS.md` §1–§4 and
+`documents/pre-study/investigation/Test_Bench_MTS.md` §1.6; scripts in `mts-tools`.
+
+| Folder | What | Bench |
+| --- | --- | --- |
+| `bench_equiv_2026-11-19` | Run 1 of the first equivalence series (BR -13 dBm, attenuators 70 / 20 dB): formation and RTT per hop at 13:13–13:20; its outage part ran after 13:20, when attenuator 1 was put back in the path. Not used in the comparison | Attenuator 1 **bypassed** until about 13:20 |
+| `bench_att1_2026-11-19` (+ `.log`) | Attenuator 1 sweep, cold start per setting: 0, 20, 40 dB with attenuator 2 at 30 dB (`bench_rsl_sweep.py` format) | Corrected |
+| `bench_att2_2026-11-19` (+ `.log`) | Attenuator 2 sweep: 0, 20, 40 dB with attenuator 1 at 24 dB | Corrected |
+| `bench_equiv_2026-11-19_fixed` | Five equivalence runs at 24 / 24 dB, every node +14 dBm (`bench_equiv.py`: `runs.jsonl`, a snapshot per run, `log.txt`); `emulator/`: the scenario, each run's measured topology, the emulator's `report.json` of seeds 1–6 per run, `comparison.md`. Run 1's `detected_s` is invalid (script bug, kept as `detected_s_invalid`) | Corrected |
+| `bench_form_24-0_2026-11-19` | Four formations at 24 / 0 dB (`bench_3hop.py`), to test whether the join gap depends on the layer 2–3 link level (it does not) | Corrected |
