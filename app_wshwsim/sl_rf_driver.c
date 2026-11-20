@@ -431,8 +431,13 @@ static void rf_phy_preamble(void)
 }
 
 // The MAC's PHY configuration (PHY mode): its data rate, unless fixed.
+// Channels of the MAC's channel plan (0 until the MAC configures the PHY): a channel number at or above it is not a
+// channel of the plan, and a radio tuned to it receives nothing (phy_rf_state_control).
+static uint16_t rf_channel_count;
+
 static void rf_phy_configure(const phy_rf_channel_configuration_s *config)
 {
+    rf_channel_count = config->number_of_channels;
     rf_phy_mode = rf_phy_mode_of(config);
     rf_phy_preamble();
     if (rf_phy_legacy || rf_datarate_fixed || !config->datarate || config->datarate == rf_datarate)
@@ -569,6 +574,15 @@ static int8_t phy_rf_state_control(phy_interface_state_e new_state, uint8_t rf_c
         driver_state = DRVSTATE_IDLE;
         set_shm_cca_state();
     }
+    // The radio receives on the channel given with UP, as a real driver does (the S2-LP's rf_receive() programs it
+    // and keeps it), even one outside the channel plan: then it receives nothing until the MAC sets another channel.
+    // Before 2026-11-20 the radio went back to the last channel set with PHY_EXTENSION_SET_CHANNEL, so a MAC that
+    // started on an invalid channel (255: the stack's discovery, fixed in nanostack-generic-standalone d776ecb) still
+    // received here and was deaf on the bench.
+    new_channel = rf_channel;
+    if (rf_channel_count && rf_channel >= rf_channel_count)
+        WARN("rf: channel %u is not a channel of the plan (%u channels): the radio receives nothing", rf_channel,
+             rf_channel_count);
     _rf_check_and_change_channel(rf_channel);
     _rf_set_rx();
     return 0;
