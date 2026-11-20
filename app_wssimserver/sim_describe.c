@@ -48,6 +48,8 @@ static const struct desc descs[] = {
     // Virtual time
     { "vtime", "vtime", "N", "int", NULL, NULL, N, NULL, "VIRTUAL_TIME.md", "Virtual time: conduct N nodes (1 to 4096)" },
     { "vtime-end", "vtime", "SECONDS", "number", NULL, NULL, N, "vtime", "VIRTUAL_TIME.md", "End the run at this virtual time" },
+    { "vtime-control", "vtime", "SOCKET", "string", NULL, NULL, N, "vtime", "SCENARIOS.md",
+      "A scenario driver steps the run through this UNIX stream socket (set by the run script with SCENARIO)" },
     { "drift", "vtime", "[IDS:]PPM", "spec", NULL, "0", R, "vtime", "VIRTUAL_TIME.md",
       "Clock error of these nodes (all if no IDS), in ppm; the last one naming a node wins" },
     { "drift-random", "vtime", "PPM", "number", NULL, "0", N, "vtime", "VIRTUAL_TIME.md",
