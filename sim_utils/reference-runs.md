@@ -7,7 +7,30 @@ repository's `.gitignore`); this file is the committed copy of
 `reference-runs/README.md`. Everything else is reproducible from its commits,
 seed and options: virtual-time runs are deterministic.
 
-## dag_simple_8c5677e (current)
+## dag_simple_d776ecb (current)
+
+| | |
+| --- | --- |
+| What | FAN 1.0 `dag_simple` (15 nodes, no LFN), seeds 1–10, 300 virtual seconds each, virtual time, no clock drift, legacy medium (`--medium=legacy`), no TUN device (`TUN=none`), `SETARCH=1` |
+| Stack | `nanostack-generic-standalone` d776ecb (a router searching for its network starts its MAC on its drawn fixed channel, not on channel 255; an asynchronous sweep returns to the channel it started from, not to its second-to-last channel) |
+| Emulator | `mesh-emulator-orchestrator` d563a37 (in-tree `build-vt`; the emulated radio receives on the channel given with UP, as the S2-LP driver does) |
+| Made with | `sim_utils/migration/nonreg_dag_simple.sh build-vt $(pwd) none <out>`; made twice, 10 of 10 seeds identical |
+| Size | 274 MB, 794 files (`seed1`–`seed10`, `seed<N>.run` the runs' outputs, `results.txt`, `make.log`, `SHA256SUMS`) |
+| Compare | `sim_utils/migration/nonreg_dag_simple.sh build-vt $(pwd) /home/yann/mesh-emulator-rework/reference-runs/dag_simple_d776ecb`; exit status 1 on any difference |
+| Regenerate | check out the two commits above, build `build-vt` (`docs/VIRTUAL_TIME.md` §2), then the command above; the logs must match `SHA256SUMS` (sha256 of the list: `cb9579bfcacf6667c2e85466365c5ab9073f90c2c55c82976fce7e7028b27292`) |
+
+Why new runs: the discovery-channel fix of 2026-11-20 (the MTS bench's searching routers were deaf on channel 255;
+the controller's `docs/BENCH_MEASUREMENTS.md` §4) changes the channel every searching router listens on, so the logs
+differ from the previous reference from the MAC start on (all 10 seeds). The join milestones are **identical** to
+`dag_simple_8c5677e`, not only statistically equivalent: the legacy medium of these runs takes frames on any channel
+while a node does not hop yet (the radio's `YET FHSS OFF & WRONG CHANNEL` warning), so the channel a searching node
+listens on changes the logged channel numbers but no timing. Routers that reached each milestone in the first 295 s,
+and median (old and new alike): parent selected 135, 94.0 s; authentication done 135, 97.8 s; operational 132,
+106.0 s; ready 127, 149.5 s; routers ready per seed 12–14 (median 13). Runs with the central medium do change: on the
+bench's measured links, layer 2 and 3 join at 138 / 212 s with the fix against 171 / 245 s without (6 seeds each, no
+fading).
+
+## dag_simple_8c5677e (before stack d776ecb)
 
 | | |
 | --- | --- |
