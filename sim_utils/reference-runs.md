@@ -466,3 +466,4 @@ cycles). Results: `mesh-testbed-controller/docs/BENCH_MEASUREMENTS.md` §4; scri
 | `bench_searchsingle_2026-11-20` | Start of a series resetting one layer-3 node at a time; stopped after the formation (no cycle) |
 | `bench_searchdisc_2026-11-20` | 6 cycles with the discovery fix on layer 3 (stack `fix-discovery-channel` `d776ecb`, 0.2.9 build 3) |
 | `bench_coldfix_2026-11-20` | 5 cold starts with the discovery fix on all 12 routers (`bench_3hop.py`), consoles; `restore_029.txt` the return to the original 0.2.9; `independent_investigation/` the parallel investigation's patches, scripts and emulator results |
+| `bench_0210_2026-11-20` | Firmware 0.2.10 (stack `d776ecb`) installed on all 13 boards in parallel (`bench_flash.py`, slot check), then 3 cold starts at 24 / 24 dB (`bench_3hop.py`) with consoles, then the normal state (20 / 30 dB) |
