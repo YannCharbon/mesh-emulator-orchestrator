@@ -15,8 +15,9 @@
 #   reference  a directory with seed1 ... seedN, e.g. the permanent reference
 #              runs (sim_utils/reference-runs.md): the current one is
 #              /home/yann/mesh-emulator-rework/reference-runs/dag_simple_d776ecb
-#              (stack 8c5677e, GS12; dag_simple_b1b9cc5 for builds before it
-#              or with NANOSTACK_MAC_RETRY_SUN_BACKOFF=OFF).
+#              (stack d776ecb, the discovery-channel fix; dag_simple_8c5677e
+#              for stacks 8c5677e to dd977ca, dag_simple_b1b9cc5 for builds
+#              before 8c5677e or with NANOSTACK_MAC_RETRY_SUN_BACKOFF=OFF).
 #              "none": make the runs without comparing them (outdir needed):
 #              how the reference runs are made
 #   outdir     where the runs go (default: a new temporary directory, deleted
