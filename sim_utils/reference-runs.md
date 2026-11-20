@@ -428,3 +428,18 @@ attenuator 40 dB. Results and method: `mesh-testbed-controller/docs/BENCH_MEASUR
 | `bench_att2_2026-11-19` (+ `.log`) | Attenuator 2 sweep: 0, 20, 40 dB with attenuator 1 at 24 dB | Corrected |
 | `bench_equiv_2026-11-19_fixed` | Five equivalence runs at 24 / 24 dB, every node +14 dBm (`bench_equiv.py`: `runs.jsonl`, a snapshot per run, `log.txt`); `emulator/`: the scenario, each run's measured topology, the emulator's `report.json` of seeds 1–6 per run, `comparison.md`. Run 1's `detected_s` is invalid (script bug, kept as `detected_s_invalid`) | Corrected |
 | `bench_form_24-0_2026-11-19` | Four formations at 24 / 0 dB (`bench_3hop.py`), to test whether the join gap depends on the layer 2–3 link level (it does not) | Corrected |
+
+## MTS bench measurements of 2026-11-20: searching routers and the discovery-channel bug
+
+Same bench state as above (corrected cabling, Wi-SUN 0.2.9, every node +14 dBm, attenuators 24 / 24 dB during the
+cycles). Results: `mesh-testbed-controller/docs/BENCH_MEASUREMENTS.md` §4; scripts in `mts-tools`
+(`bench_search_channels.py`, `search_channel_analyse.py`, `search_radio_counters.py`, `search_compare.py`).
+
+| Folder | What |
+| --- | --- |
+| `bench_search_2026-11-20` | 6 cycles of the four layer-3 nodes reset together, original 0.2.9: their channel and parent every second, consoles |
+| `bench_search33_2026-11-20` | 4 such cycles with the radio counters every second, while searching and for 60 s after joining |
+| `bench_searchfix_2026-11-20` | 6 cycles with a first, partial fix on layer 3 (0.2.9 build 2: tune to the fixed channel in the FHSS); superseded |
+| `bench_searchsingle_2026-11-20` | Start of a series resetting one layer-3 node at a time; stopped after the formation (no cycle) |
+| `bench_searchdisc_2026-11-20` | 6 cycles with the discovery fix on layer 3 (stack `fix-discovery-channel` `d776ecb`, 0.2.9 build 3) |
+| `bench_coldfix_2026-11-20` | 5 cold starts with the discovery fix on all 12 routers (`bench_3hop.py`), consoles; `restore_029.txt` the return to the original 0.2.9; `independent_investigation/` the parallel investigation's patches, scripts and emulator results |
