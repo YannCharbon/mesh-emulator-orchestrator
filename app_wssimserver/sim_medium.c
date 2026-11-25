@@ -1715,7 +1715,7 @@ struct med_lock *med_take_broken(void)
 bool med_verdict(struct med_lock *l, uint64_t now, struct sim_verdict *v)
 {
     double logp, p_ok, sinr;
-    bool ok;
+    bool ok, lost = false;
     int outcome;
 
     if (l->broken && l->refs == 2) {
@@ -1754,10 +1754,12 @@ bool med_verdict(struct med_lock *l, uint64_t now, struct sim_verdict *v)
         }
         if ((mix64(med.rng_l[n] += 0x9e3779b97f4a7c15ULL) >> 11) * 0x1.0p-53 < med.loss) {
             ok = false;
+            lost = true;
             med.lost_random++;
         }
     }
-    outcome = ok ? MED_OK : l->n_intf ? MED_INTERFERENCE : MED_NOISE;
+    // a frame destroyed by --medium-loss counts as lost to noise, interferers or not
+    outcome = ok ? MED_OK : (l->n_intf && !lost) ? MED_INTERFERENCE : MED_NOISE;
     med_log(l->t_end, l->src, l->node, l->frame_id, outcome, l->dbm, sinr, &l->cs, l->ext_mw);
     memset(v, 0, sizeof(*v));
     memcpy(v->magic, "xv", 2);

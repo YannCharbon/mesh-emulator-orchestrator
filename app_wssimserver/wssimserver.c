@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <signal.h>
 #include <errno.h>
+#include <sys/file.h>
 #include <stdlib.h>
 #include <time.h>
 #include <stdarg.h>
@@ -387,9 +388,9 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --medium-break-db=[MODE:]DB|off  between the windows, a frame this much stronger\n");
     fprintf(stream, "                            makes both lost (fg25: 2.5; em4: off)\n");
     fprintf(stream, "  --medium-adjacent-db=[MODE:]DB|off  a frame on the next channel interferes this much\n");
+    fprintf(stream, "                            weaker (fg25: 10; em4: off)\n");
     fprintf(stream, "  --medium-loss=P           every frame a receiver would decode is destroyed with probability P\n"
                     "                            (independent per receiver and frame, as ns-3's --loss; 0)\n");
-    fprintf(stream, "                            weaker (fg25: 10; em4: off)\n");
     fprintf(stream, "  --medium-log=FILE         central: one line per frame and receiver (t_end_us src dst\n");
     fprintf(stream, "                            frame_id outcome rx_dbm sinr_min_db)\n");
     fprintf(stream, "  Preamble sniffing (central medium, docs/MEDIUM.md §10):\n");
@@ -2789,13 +2790,15 @@ static void *shm_create(const char *name, size_t size, int *fd)
 {
     void *ptr;
 
-    shm_unlink(name);
-    // O_EXCL: two servers started at once with the same socket path would
-    // otherwise share one table (each node's radio state, the links)
-    *fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
-    FATAL_ON(*fd < 0 && errno == EEXIST, 1, "shm_open %s: another server uses this socket path; give each run its own", name);
+    // One server per table: the server holds an exclusive lock on it while it
+    // runs, so a second server on the same socket path fails here instead of
+    // sharing (or unlinking) the first one's radio states and links. A table
+    // left over by a crashed run is not locked: it is reused, emptied.
+    *fd = shm_open(name, O_CREAT | O_RDWR, 0666);
     FATAL_ON(*fd < 0, 1, "shm_open %s: %m", name);
-    FATAL_ON(ftruncate(*fd, size) < 0, 1, "ftruncate %s: %m", name);
+    FATAL_ON(flock(*fd, LOCK_EX | LOCK_NB) < 0 && errno == EWOULDBLOCK, 1,
+             "%s: another server uses this socket path; give each run its own", name);
+    FATAL_ON(ftruncate(*fd, 0) < 0 || ftruncate(*fd, size) < 0, 1, "ftruncate %s: %m", name);
     ptr = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, *fd, 0);
     FATAL_ON(ptr == MAP_FAILED, 1, "mmap %s: %m", name);
     return ptr;
@@ -2864,9 +2867,9 @@ int main(int argc, char **argv)
         unlink(ctl_path);
     munmap(ptr, SIM_SHM_CCA_SIZE);
     munmap(infos_ptr, SIM_SHM_INFOS_SIZE);
+    shm_unlink(shm_name);         // before the lock goes with the close
+    shm_unlink(shm_infos_name);
     close(shm_fd);
     close(shm_infos_fd);
-    shm_unlink(shm_name);
-    shm_unlink(shm_infos_name);
     return status;
 }
