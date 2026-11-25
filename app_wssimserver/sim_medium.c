@@ -33,6 +33,7 @@
 #define MED_RNG_K 0x6d656469756d0001ULL
 // The smooth capture model's streams (§13.3)
 #define MED_RNG_CAPTURE_K 0x6361707475720001ULL
+#define MED_RNG_LOSS_K 0x6c6f737300000001ULL   // --medium-loss: a stream of its own
 
 enum med_outcome {
     MED_OK,
@@ -226,6 +227,10 @@ static struct {
     struct med_lock *locks[SIM_MAX_NODES];
     uint64_t rng[SIM_MAX_NODES];
     bool rng_set[SIM_MAX_NODES];
+    double loss;                // --medium-loss: probability that a received frame is destroyed
+    uint64_t rng_l[SIM_MAX_NODES];
+    bool rng_l_set[SIM_MAX_NODES];
+    uint64_t lost_random;
     uint64_t outcomes[MED_OUTCOMES];
     uint64_t frames, cca_queries, cca_energy;
     uint64_t cca_ext;           // CCA queries with an external interferer on (§13)
@@ -502,6 +507,13 @@ void med_set_break_db(const char *arg)
 void med_set_adjacent_db(const char *arg)
 {
     med_set_db_or_off("--medium-adjacent-db", arg, PO_ADJ);
+}
+
+// --medium-loss=P: every frame that a receiver would decode is destroyed with
+// probability P, independently per receiver and frame (as ns-3's --loss)
+void med_set_loss(const char *arg)
+{
+    med.loss = med_number("--medium-loss", arg, 0, 1);
 }
 
 /* ---- options of §13 (through sim_interf.c's intf_option()) */
@@ -1733,6 +1745,18 @@ bool med_verdict(struct med_lock *l, uint64_t now, struct sim_verdict *v)
     p_ok = exp(logp);
     // One draw, only when the outcome is not certain (§2)
     ok = p_ok >= 1 || (p_ok > 0 && !(-expm1(logp) > med_uniform(l->node)));
+    if (ok && med.loss > 0) {
+        // --medium-loss: one draw on a stream of its own, so the other draws stay as without it
+        int n = l->node;
+        if (!med.rng_l_set[n]) {
+            med.rng_l[n] = mix64(med.seed + mix64((uint64_t)n + 1) + MED_RNG_LOSS_K);
+            med.rng_l_set[n] = true;
+        }
+        if ((mix64(med.rng_l[n] += 0x9e3779b97f4a7c15ULL) >> 11) * 0x1.0p-53 < med.loss) {
+            ok = false;
+            med.lost_random++;
+        }
+    }
     outcome = ok ? MED_OK : l->n_intf ? MED_INTERFERENCE : MED_NOISE;
     med_log(l->t_end, l->src, l->node, l->frame_id, outcome, l->dbm, sinr, &l->cs, l->ext_mw);
     memset(v, 0, sizeof(*v));
@@ -2485,6 +2509,9 @@ void med_finish(void)
     INFO("medium: %llu frames, outcomes at receivers:", (unsigned long long)med.frames);
     for (i = 0; i < MED_OUTCOMES; i++)
         INFO("medium:   %-14s %llu", outcome_names[i], (unsigned long long)med.outcomes[i]);
+    if (med.loss > 0)
+        INFO("medium: %llu frames destroyed by --medium-loss=%g (counted as noise above)",
+             (unsigned long long)med.lost_random, med.loss);
     INFO("medium: %llu sync searches broken by a stronger frame (lost by interference)",
          (unsigned long long)med.broken);
     INFO("medium: %llu CCA queries, %llu with a frame on air", (unsigned long long)med.cca_queries,

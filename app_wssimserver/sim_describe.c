@@ -105,6 +105,8 @@ static const struct desc descs[] = {
       "MEDIUM.md §2.1", "Between the windows, a frame this much stronger makes both lost" },
     { "medium-adjacent-db", "medium", "[MODE:]DB|off", "spec", NULL, "per model (fg25: 10; em4: off)", R, "vtime",
       "MEDIUM.md §2.1", "A frame on the next channel interferes this much weaker" },
+    { "medium-loss", "medium", "P", "number", NULL, "0", N, "vtime", "MEDIUM.md §2",
+      "Every frame a receiver would decode is destroyed with this probability, independently per receiver and frame" },
     { "medium-log", "medium", "FILE", "file", NULL, NULL, N, "vtime", "MEDIUM.md §7",
       "One line per frame and receiver (t_end_us src dst frame_id outcome rx_dbm sinr_min_db ...)" },
     // Sniffing

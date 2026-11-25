@@ -36,6 +36,7 @@ void med_set_capture_early(const char *arg);    // --medium-capture-early-bits=[
 void med_set_capture_sfd(const char *arg);      // --medium-capture-sfd=[MODE:]on|off
 void med_set_break_db(const char *arg);         // --medium-break-db=[MODE:]DB|off
 void med_set_adjacent_db(const char *arg);      // --medium-adjacent-db=[MODE:]DB|off
+void med_set_loss(const char *arg);             // --medium-loss=P
 void med_set_log(const char *path);             // --medium-log=FILE
 // docs/MEDIUM.md §13, through sim_interf.c's intf_option()
 void med_note_option(void);                     // an option that needs the central medium

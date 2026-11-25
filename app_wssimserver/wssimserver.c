@@ -387,6 +387,8 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --medium-break-db=[MODE:]DB|off  between the windows, a frame this much stronger\n");
     fprintf(stream, "                            makes both lost (fg25: 2.5; em4: off)\n");
     fprintf(stream, "  --medium-adjacent-db=[MODE:]DB|off  a frame on the next channel interferes this much\n");
+    fprintf(stream, "  --medium-loss=P           every frame a receiver would decode is destroyed with probability P\n"
+                    "                            (independent per receiver and frame, as ns-3's --loss; 0)\n");
     fprintf(stream, "                            weaker (fg25: 10; em4: off)\n");
     fprintf(stream, "  --medium-log=FILE         central: one line per frame and receiver (t_end_us src dst\n");
     fprintf(stream, "                            frame_id outcome rx_dbm sinr_min_db)\n");
@@ -440,6 +442,7 @@ enum {
     OPT_MEDIUM_CAPTURE_SFD,
     OPT_MEDIUM_BREAK_DB,
     OPT_MEDIUM_ADJACENT_DB,
+    OPT_MEDIUM_LOSS,
     OPT_MEDIUM_LOG,
     OPT_MEDIUM_PRESET,
     OPT_DESCRIBE,
@@ -669,6 +672,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         { "medium-capture-sfd", required_argument, 0, OPT_MEDIUM_CAPTURE_SFD },
         { "medium-break-db", required_argument, 0, OPT_MEDIUM_BREAK_DB },
         { "medium-adjacent-db", required_argument, 0, OPT_MEDIUM_ADJACENT_DB },
+        { "medium-loss", required_argument, 0, OPT_MEDIUM_LOSS },
         { "medium-log", required_argument, 0, OPT_MEDIUM_LOG },
         { "medium-preset", required_argument, 0, OPT_MEDIUM_PRESET },
         { "describe", required_argument, 0, OPT_DESCRIBE },
@@ -966,6 +970,9 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
                 break;
             case OPT_MEDIUM_ADJACENT_DB:
                 med_set_adjacent_db(optarg);
+                break;
+            case OPT_MEDIUM_LOSS:
+                med_set_loss(optarg);
                 break;
             case OPT_MEDIUM_LOG:
                 med_set_log(optarg);
@@ -2783,7 +2790,10 @@ static void *shm_create(const char *name, size_t size, int *fd)
     void *ptr;
 
     shm_unlink(name);
-    *fd = shm_open(name, O_CREAT | O_RDWR, 0666);
+    // O_EXCL: two servers started at once with the same socket path would
+    // otherwise share one table (each node's radio state, the links)
+    *fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
+    FATAL_ON(*fd < 0 && errno == EEXIST, 1, "shm_open %s: another server uses this socket path; give each run its own", name);
     FATAL_ON(*fd < 0, 1, "shm_open %s: %m", name);
     FATAL_ON(ftruncate(*fd, size) < 0, 1, "ftruncate %s: %m", name);
     ptr = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, *fd, 0);
