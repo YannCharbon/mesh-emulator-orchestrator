@@ -116,8 +116,8 @@ depth = ns_port_sleep_depth(holds, idle_us, &rule);   // LIGHT or DEEP
 
 - **holds:** reasons to keep the fast clock, a bit set like the firmware's EM1 requirements: `NS_PORT_HOLD_RADIO` (the radio is not off; an idle radio holds too when the profile's `idle_holds_clock` is 1, because RAIL time needs the HFXO unless `RAIL_ConfigSleep()` is used), `NS_PORT_HOLD_PERIPH` (UART, SPI).
 - **idle_us:** from the end of the wake's modelled work to the next deadline in "xi".
-- **rule.deep_min_us:** `ns_port_deep_min_us()` from the profile: the shortest idle for which deep sleep costs less charge than light sleep, and at least the length of its two transitions. For the FG25 profile: 219 µs.
-- **A profile whose `sleep_ma` is not above `deep_sleep_ma`** makes deep sleep never pay: `deep_min_us` is infinite, every idle is a light sleep charged at `sleep_ma`, and `deep_sleep_ma` (the floor) is never charged. The conductor warns about it when it loads such a profile (since 2026-11-26). A profile that folds the processor's EM1 current into the radio's currents must still give `sleep_ma` a value above the floor (for example the datasheet's EM1) and take it out of the radio's currents.
+- **rule.deep_min_us:** `ns_port_deep_min_us()` from the profile: the shortest idle for which deep sleep costs less charge than light sleep, and at least the length of its two transitions. For `examples/power/efr32fg25-soc.ini`: 219 µs (`efr32fg25-lfn.ini`: 266 µs; the fire alarm mesh stack's FG25 profile, firemesh `tools/emu/fg25-300k.ini`: 1176 µs, its wake from EM2 costing 2.52 µC). The conductor prints it when it loads a profile.
+- **A profile whose `sleep_ma` is not above `deep_sleep_ma`** makes deep sleep never pay: `deep_min_us` is infinite, every idle is a light sleep charged at `sleep_ma`, and `deep_sleep_ma` (the floor) is never charged. The conductor warns about it when it loads such a profile, for its common values and for each PHY mode's copy (`key@MODE`) (since 2026-11-26). A profile that folds the processor's EM1 current into the radio's currents must still give `sleep_ma` a value above the floor (for example the datasheet's EM1) and take it out of the radio's currents.
 
 The ledger evaluates the rule at each "xi". A board's port would call the same function before it sleeps (FreeRTOS `configPRE_SLEEP_PROCESSING`), with the same inputs. For FFNs the radio always holds, so part 1 never chooses deep sleep; the rule's deep path is exercised by `test_power.py`.
 
@@ -539,7 +539,21 @@ Source: the firmware repo's `docs/RADIO_TIMING_POWER_RESULTS.md` §6 (EM5): RAIL
 
 ### 12.11 The energy monitor's offset on kit 440235509 (2026-11-26)
 
-With its target powered off (`commander adapter power off`), the energy monitor of kit 440235509 (BRD4001A) read 6.0–8.3 µA. After `commander aem calibrate` (the target is powered off during the calibration) it read 0.13 µA, and EM2 floors on that kit dropped from 10.3–10.8 µA to 4.3–4.5 µA (the same images: a firmware that only sleeps in EM2, and the internal measurement firmware without windows). Currents above about 1 mA did not change (a listening moment of that firmware: 4.19 µC before, 4.22 µC after). So the floors of that kit read on other days (5.8–12.3 µA, §12.8: "an excess specific to that kit") most likely carried an offset of this kind, which varies between days; averages measured there carry it in full, charges per wake (counted above the floor) do not. Before measuring a floor on a BRD4001A, read it with the target off and calibrate when it is not near zero.
+With its target powered off (`commander adapter power off`), the energy monitor of kit 440235509 (BRD4001A) read 6.0–8.3 µA at about 11:40. After `commander aem calibrate` (the target is powered off during the calibration) it read 0.13 µA, and EM2 floors on that kit dropped from 10.3–10.8 µA to 4.3–4.5 µA (the same images: a firmware that only sleeps in EM2, and the internal measurement firmware without windows). Currents above about 1 mA did not change (a listening moment of that firmware: 4.19 µC before, 4.22 µC after). The raw files of this first session were not kept; the figures are from its console output.
+
+**The zero drifts after a calibration.** Sessions with saved raw files (`calibration.txt` and `target_off_after.txt` in the run directories `cal_1`, `fix1`, `p3`, `p4` of the fire alarm stack's kit runs, session scratch directory `kitpower-runs/`):
+
+| Time | Target off | Note |
+| --- | --- | --- |
+| 13:55 | −2.09 µA | 2 h 15 min after the 11:40 calibration; between those, traces read 55–64 % of their samples between wakes below zero (medians −0.65 to −1.65 µA) and their floors fell from 2.6 to 1.5 µA |
+| 13:55 | 0.08 µA | right after a new calibration; a sleep-only image then reads 4.18 µA |
+| 14:11 | 0.20 µA | after a 16 min run |
+| 14:31 | 0.21 µA, 0.18 µA after a new calibration | sleep-only image 4.37 µA |
+| 14:50 | 0.02 µA | after a 19 min run |
+| 14:51 | −0.19 µA, 0.04 µA after a new calibration | sleep-only image 4.26 µA |
+| 15:05 | 0.01 µA | after a 13 min run |
+
+So the zero moved by about 2 µA over two hours in the morning and by under 0.2 µA within each afternoon run. How to handle it: (1) quote charges per wake (counted above the floor between wakes) and their sums as the primary result: they do not depend on the zero; (2) for an absolute average, calibrate, measure a sleep-only image right away, run, and read the target-off value again at the end; quote the average with that floor, and the target-off reading as its uncertainty. The floors of that kit read on other days (5.8–12.3 µA, §12.8: "an excess specific to that kit") most likely carried such an offset; averages measured there carry it in full, charges per wake do not.
 
 ## 13. LFN timed receive windows (GS8 stage 2, 2026-10-28)
 
