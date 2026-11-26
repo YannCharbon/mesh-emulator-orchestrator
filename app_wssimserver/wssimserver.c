@@ -1025,7 +1025,7 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
     FATAL_ON((drift_specs_n || drift_random_ppb) && !ctxt->vtime_nodes, 1, "--drift needs --vtime");
     FATAL_ON((vt_ctls_n || vt_frames_path || vt_drops_n) && !ctxt->vtime_nodes, 1,
              "--vtime-kill, --vtime-start, --vtime-power-up, --vtime-cut, --vtime-link and --vtime-frames need --vtime");
-    FATAL_ON(med_options_given() && !ctxt->vtime_nodes, 1, "--medium needs --vtime");
+    FATAL_ON(med_options_given() && !ctxt->vtime_nodes, 1, "a medium option (--medium or --medium-*, e.g. --medium-loss) needs --vtime");
     if (ctxt->vtime_nodes)
         med_default_central();
     FATAL_ON(med_tuning_given() && !med_central(), 1,

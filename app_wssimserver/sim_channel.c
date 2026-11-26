@@ -610,7 +610,7 @@ void chan_options_done(void)
     FATAL_ON(ch.spacing_hz > 0 && !(ch.fading && ch.bc_hz > 0), 1,
              "--medium-chan-spacing needs frequency-selective fading (--medium-fading-bc not inf)");
     FATAL_ON(ch.reciprocal_given && !chan_varies() && !(ch.lburst && ch.lburst_scope == BURST_LINK), 1,
-             "--medium-reciprocal needs --medium-fading, --medium-shadowing, --medium-burst or --medium-loss-burst per link");
+             "--medium-reciprocal needs --medium-fading, --medium-shadowing, --medium-burst, or --medium-loss-burst per link with a loss above 0");
     if (ch.n_dumps)
         chan_dump();
 }
