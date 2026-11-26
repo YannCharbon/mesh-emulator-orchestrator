@@ -568,6 +568,12 @@ static struct pwr_profile *profile_get(const char *path)
          p->name, path, p->kind,
          !strcmp(p->kind, "soc") ? "MCU and radio on one chip" : "MCU and a separate transceiver",
          (unsigned long long)p->rule.deep_min_us);
+    // a light sleep that costs no more than deep sleep is always chosen, so
+    // the deep-sleep floor would never be charged (POWER_MODEL.md §4)
+    if (p->rule.deep_min_us == UINT64_MAX && p->i_mcu[MCU_DEEP] > 0)
+        WARN("power: profile %s: mcu.sleep_ma (%g mA) is not above mcu.deep_sleep_ma (%g mA): its nodes never sleep deep "
+             "and the floor is never charged; light sleep is charged at sleep_ma instead",
+             p->name, p->i_mcu[MCU_SLEEP], p->i_mcu[MCU_DEEP]);
     {
         char modes[64] = "";
         size_t len = 0;
