@@ -239,7 +239,8 @@ static void profile_set(struct pwr_profile *p, bool *seen, int line, const char 
     *(double *)((char *)p + profile_keys[i].off) = parse_number(p->path, line, key, val);
 }
 
-static void profile_check(struct pwr_profile *p)
+// common: the profile's common values when p is a PHY mode's copy (NULL otherwise)
+static void profile_check(struct pwr_profile *p, const struct pwr_profile *common)
 {
     const char *path = p->path;
 
@@ -248,6 +249,22 @@ static void profile_check(struct pwr_profile *p)
     p->rule.deep_min_us = ns_port_deep_min_us(p->i_mcu[MCU_SLEEP], p->i_mcu[MCU_DEEP],
                                               p->t_mt[MT_DEEP_ENTER], p->i_mt[MT_DEEP_ENTER],
                                               p->t_mt[MT_DEEP_WAKE], p->i_mt[MT_DEEP_WAKE]);
+    // a light sleep that costs no more than deep sleep is always chosen, so
+    // the deep-sleep floor would never be charged (POWER_MODEL.md §4); checked
+    // for the common values and for each PHY mode's copy (a copy only when
+    // its own values cause it: the common values' warning is not repeated)
+    bool never = p->rule.deep_min_us == UINT64_MAX && p->i_mcu[MCU_DEEP] > 0;
+    bool common_never = common && common->rule.deep_min_us == UINT64_MAX && common->i_mcu[MCU_DEEP] > 0;
+    if (never && !(common_never && p->i_mcu[MCU_SLEEP] == common->i_mcu[MCU_SLEEP]
+                   && p->i_mcu[MCU_DEEP] == common->i_mcu[MCU_DEEP])) {
+        char m[32] = "";
+
+        if (p->mode)
+            snprintf(m, sizeof(m), " (values of PHY mode %s)", mode_names[p->mode]);
+        WARN("power: profile %s%s: mcu.sleep_ma (%g mA) is not above mcu.deep_sleep_ma (%g mA): its nodes never sleep "
+             "deep and the floor is never charged; light sleep is charged at sleep_ma instead",
+             p->name, m, p->i_mcu[MCU_SLEEP], p->i_mcu[MCU_DEEP]);
+    }
 }
 
 // The profile for each PHY mode that has "key@MODE" lines: a copy of the
@@ -276,7 +293,7 @@ static void profile_modes(struct pwr_profile *p, struct pwr_mode_line *lines)
             profile_set(q, seen, l->line, l->key, l->val);
         }
         if (q) {
-            profile_check(q);
+            profile_check(q, p);
             p->by_mode[m] = q;
         }
     }
@@ -368,7 +385,7 @@ static struct pwr_profile *profile_load(const char *path)
         FATAL(1, "%s: MCU + RCP profiles need the split programs in virtual time (EM3 step 2)", path);
     FATAL_ON(strcmp(p->kind, "soc") && strcmp(p->kind, "mcu+transceiver"), 1,
              "%s: profile.kind must be soc or mcu+transceiver, got \"%s\"", path, p->kind);
-    profile_check(p);
+    profile_check(p, NULL);
     profile_modes(p, lines);
     return p;
 }
@@ -564,10 +581,15 @@ static struct pwr_profile *profile_get(const char *path)
     pwr.profiles = p;
     // profile.kind is the hardware's architecture, not the use of the
     // profile: an LFN profile of a single-chip radio is "soc" too
-    INFO("power: profile %s, file %s: hardware kind %s (%s), deep sleep from %llu us of idle",
-         p->name, path, p->kind,
-         !strcmp(p->kind, "soc") ? "MCU and radio on one chip" : "MCU and a separate transceiver",
-         (unsigned long long)p->rule.deep_min_us);
+    {
+        char dm[48] = "never";
+
+        if (p->rule.deep_min_us != UINT64_MAX)
+            snprintf(dm, sizeof(dm), "from %llu us of idle", (unsigned long long)p->rule.deep_min_us);
+        INFO("power: profile %s, file %s: hardware kind %s (%s), deep sleep %s",
+             p->name, path, p->kind,
+             !strcmp(p->kind, "soc") ? "MCU and radio on one chip" : "MCU and a separate transceiver", dm);
+    }
     {
         char modes[64] = "";
         size_t len = 0;
