@@ -54,6 +54,12 @@ bool chan_varies(void);
 // parts. A perfect link (an edge without a value) does not vary.
 void chan_apply(int rx, int tx, uint64_t t, uint16_t chan, uint32_t rate_bps, bool perfect, float *dbm,
                 struct chan_sample *s);
+// --medium-loss-burst is on
+bool chan_loss_bursts(void);
+// The probability that a frame of link (rx hears tx) starting at t (µs) is
+// destroyed by a frame-loss burst: the option's LOSS in the bad state, else 0.
+// Independent of the link's level, and applies to perfect links too.
+double chan_loss_burst(int rx, int tx, uint64_t t);
 // The extra columns of a medium log line (empty when nothing varies)
 int chan_log_columns(char *buf, size_t size, const struct chan_sample *s);
 

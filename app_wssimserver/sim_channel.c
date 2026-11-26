@@ -32,6 +32,11 @@
  * the first state drawn from the stationary probabilities. A query walks
  * the sojourns from the cached one (or from 0 for an earlier time): the cost
  * is proportional to the number of sojourns between two queries.
+ *
+ * Frame-loss bursts (--medium-loss-burst, docs/MEDIUM.md §12.2) are the same
+ * renewal process on keys of their own: in the bad state the medium destroys
+ * each frame with a probability, whatever the link's level (the medium
+ * draws; this module gives the state).
  */
 #define _GNU_SOURCE
 #include <math.h>
@@ -53,7 +58,8 @@
 #define CHAN_CACHE_SETS 16384   // the cache of processes: 32768 entries (12 MB)
 #define CHAN_CACHE_WAYS 2
 
-enum { CP_SHADOW_LINK = 1, CP_SHADOW_NODE, CP_FADING, CP_BURST_LINK, CP_BURST_NODE, CP_TAP_DELAY, CP_TAP = 16 };
+enum { CP_SHADOW_LINK = 1, CP_SHADOW_NODE, CP_FADING, CP_BURST_LINK, CP_BURST_NODE, CP_TAP_DELAY, CP_LOSS_LINK,
+       CP_LOSS_NODE, CP_TAP = 16 };
 enum { BURST_LINK, BURST_RX, BURST_NODE };
 static const char *const burst_scopes[] = { "link", "receiver", "node" };
 
@@ -99,6 +105,10 @@ static struct {
     bool burst;
     int burst_scope;            // BURST_*: one process per link, per receiver, or per node
     double good_s, bad_s, burst_db;
+    // --medium-loss-burst: frames destroyed in the bad state, whatever the link's level
+    bool lburst;
+    int lburst_scope;           // BURST_*
+    double lb_good_s, lb_bad_s, lb_loss;
     double bc_hz;               // coherence bandwidth, 0: flat fading
     bool bc_given;
     double spacing_hz;          // channel spacing, 0: from the data rate
@@ -114,6 +124,7 @@ static struct {
     size_t used;
     uint64_t evictions;
     uint64_t samples, bad_samples, draws;
+    uint64_t lb_queries, lb_bad;  // frame-loss burst states asked, those bad
 } ch = {
     .x0 = 9.0,
     .b = 0.9,
@@ -126,7 +137,7 @@ static struct {
 const char *const chan_option_names[] = {
     "medium-rx-model", "medium-rx-curve", "medium-combine", "medium-fading", "medium-shadowing",
     "medium-node-share", "medium-reciprocal", "medium-burst", "medium-var-dump", "medium-fading-bc",
-    "medium-chan-spacing", NULL
+    "medium-chan-spacing", "medium-loss-burst", NULL
 };
 
 /* ---- options */
@@ -239,6 +250,26 @@ bool chan_set_option(const char *name, const char *arg)
             }
             ch.burst = true;
         }
+    } else if (!strcmp(name, "medium-loss-burst")) {
+        if (!strcmp(arg, "off")) {
+            ch.lburst = false;
+        } else {
+            n = chan_list(name, arg, w, 4);
+            FATAL_ON(n != 3 && n != 4, 1, "--medium-loss-burst: expected GOOD_S,BAD_S,LOSS[,link|rx|node] or off: %s", arg);
+            ch.lb_good_s = chan_number(name, w[0], 1e-4, 1e7);
+            ch.lb_bad_s = chan_number(name, w[1], 1e-4, 1e7);
+            ch.lb_loss = chan_number(name, w[2], 0, 1);
+            ch.lburst_scope = BURST_LINK;
+            if (n == 4) {
+                if (!strcmp(w[3], "rx"))
+                    ch.lburst_scope = BURST_RX;
+                else if (!strcmp(w[3], "node"))
+                    ch.lburst_scope = BURST_NODE;
+                else
+                    FATAL_ON(strcmp(w[3], "link"), 1, "--medium-loss-burst: the scope is link, rx or node: %s", arg);
+            }
+            ch.lburst = ch.lb_loss > 0;
+        }
     } else if (!strcmp(name, "medium-var-dump")) {
         struct chan_dump *d;
         int i;
@@ -299,6 +330,10 @@ void chan_help(FILE *stream)
     fprintf(stream, "  --medium-reciprocal=on|off  the same variation in both directions of a link (on)\n");
     fprintf(stream, "  --medium-burst=GOOD_S,BAD_S,DB[,link|rx|node]|off  loss bursts: mean good and bad\n");
     fprintf(stream, "                            durations, attenuation in the bad state, per link, receiver or node (off)\n");
+    fprintf(stream, "  --medium-loss-burst=GOOD_S,BAD_S,LOSS[,link|rx|node]|off  frame-loss bursts: mean good and\n");
+    fprintf(stream, "                            bad durations; in the bad state each frame a receiver would decode is\n");
+    fprintf(stream, "                            destroyed with probability LOSS, whatever the link's level; per link,\n");
+    fprintf(stream, "                            receiver or node (off)\n");
     fprintf(stream, "  --medium-var-dump=RX,TX,FROM_S,STEP_S,COUNT[,shuffle][,ch=N|hop=N][,rate=BPS]  print a\n");
     fprintf(stream, "                            link's variation and exit\n");
 }
@@ -457,8 +492,8 @@ static void chan_process(uint64_t key, double tau_us, uint64_t t, double v[2])
         v[i] = (1 - f) * xl[i] + f * xh[i];
 }
 
-// The burst state of key at t
-static bool chan_burst_bad(uint64_t key, uint64_t t)
+// The burst state of key at t, for mean sojourns good_s and bad_s
+static bool chan_burst_bad(uint64_t key, uint64_t t, double good_s, double bad_s)
 {
     struct chan_ent *e = chan_find(key);
     double u1, u2, mean;
@@ -468,8 +503,8 @@ static bool chan_burst_bad(uint64_t key, uint64_t t)
         chan_uniforms(key, 0, &u1, &u2);
         e->n = 0;
         e->start = 0;
-        e->bad = u2 < ch.bad_s / (ch.good_s + ch.bad_s);
-        mean = (e->bad ? ch.bad_s : ch.good_s) * 1e6;
+        e->bad = u2 < bad_s / (good_s + bad_s);
+        mean = (e->bad ? bad_s : good_s) * 1e6;
         e->end = (uint64_t)ceil(-mean * log(u1));
         if (e->end < 1)
             e->end = 1;
@@ -479,12 +514,51 @@ static bool chan_burst_bad(uint64_t key, uint64_t t)
         e->bad = !e->bad;
         e->start = e->end;
         chan_uniforms(key, e->n, &u1, &u2);
-        mean = (e->bad ? ch.bad_s : ch.good_s) * 1e6;
+        mean = (e->bad ? bad_s : good_s) * 1e6;
         e->end = e->start + (uint64_t)ceil(-mean * log(u1));
         if (e->end == e->start)
             e->end++;
     }
     return e->bad;
+}
+
+bool chan_loss_bursts(void)
+{
+    return ch.lburst;
+}
+
+// Share of the time a frame-loss burst process is bad (per node: either end)
+static double chan_loss_bad_share(void)
+{
+    double p = ch.lb_bad_s / (ch.lb_good_s + ch.lb_bad_s);
+
+    return ch.lburst_scope == BURST_NODE ? 1 - (1 - p) * (1 - p) : p;
+}
+
+double chan_loss_burst(int rx, int tx, uint64_t t)
+{
+    int a = rx, b = tx;
+    bool bad;
+
+    if (!ch.lburst)
+        return 0;
+    ch.lb_queries++;
+    if (ch.lburst_scope == BURST_RX) {
+        bad = chan_burst_bad(chan_key(CP_LOSS_NODE, rx, 0), t, ch.lb_good_s, ch.lb_bad_s);
+    } else if (ch.lburst_scope == BURST_NODE) {
+        bad = chan_burst_bad(chan_key(CP_LOSS_NODE, rx, 0), t, ch.lb_good_s, ch.lb_bad_s) |
+              chan_burst_bad(chan_key(CP_LOSS_NODE, tx, 0), t, ch.lb_good_s, ch.lb_bad_s);
+    } else {
+        if (ch.reciprocal && a > b) {
+            a = tx;
+            b = rx;
+        }
+        bad = chan_burst_bad(chan_key(CP_LOSS_LINK, a, b), t, ch.lb_good_s, ch.lb_bad_s);
+    }
+    if (!bad)
+        return 0;
+    ch.lb_bad++;
+    return ch.lb_loss;
 }
 
 /* ---- the run */
@@ -535,8 +609,8 @@ void chan_options_done(void)
              "--medium-fading-bc needs fading (--medium-fading, or --medium-rx-model=layered)");
     FATAL_ON(ch.spacing_hz > 0 && !(ch.fading && ch.bc_hz > 0), 1,
              "--medium-chan-spacing needs frequency-selective fading (--medium-fading-bc not inf)");
-    FATAL_ON(ch.reciprocal_given && !chan_varies(), 1,
-             "--medium-reciprocal needs --medium-fading, --medium-shadowing or --medium-burst");
+    FATAL_ON(ch.reciprocal_given && !chan_varies() && !(ch.lburst && ch.lburst_scope == BURST_LINK), 1,
+             "--medium-reciprocal needs --medium-fading, --medium-shadowing, --medium-burst or --medium-loss-burst per link");
     if (ch.n_dumps)
         chan_dump();
 }
@@ -573,15 +647,23 @@ void chan_start(uint64_t seed)
              ch.bad_s, ch.burst_db);
     if (chan_varies())
         INFO("medium: links vary%s", ch.reciprocal ? ", the same in both directions" : ", each direction apart");
+    if (ch.lburst)
+        INFO("medium: frame-loss bursts per %s%s: good %g s, bad %g s, a frame destroyed with probability %g in the "
+             "bad state (bad %.3g %% of the time, mean loss %.3g %%)", burst_scopes[ch.lburst_scope],
+             ch.lburst_scope == BURST_LINK ? (ch.reciprocal ? " (both directions together)" : " (each direction apart)") : "",
+             ch.lb_good_s, ch.lb_bad_s, ch.lb_loss, 100 * chan_loss_bad_share(),
+             100 * ch.lb_loss * chan_loss_bad_share());
 }
 
 void chan_finish(void)
 {
-    if (!chan_varies())
-        return;
-    INFO("medium: link variation: %llu samples, %llu in a bad state, %llu Gaussian pairs drawn, %zu processes cached "
-         "(of %d), %llu evicted", (unsigned long long)ch.samples, (unsigned long long)ch.bad_samples,
-         (unsigned long long)ch.draws, ch.used, CHAN_CACHE_SETS * CHAN_CACHE_WAYS, (unsigned long long)ch.evictions);
+    if (ch.lburst)
+        INFO("medium: frame-loss bursts: %llu frames asked, %llu in a bad state", (unsigned long long)ch.lb_queries,
+             (unsigned long long)ch.lb_bad);
+    if (chan_varies())
+        INFO("medium: link variation: %llu samples, %llu in a bad state, %llu Gaussian pairs drawn, %zu processes cached "
+             "(of %d), %llu evicted", (unsigned long long)ch.samples, (unsigned long long)ch.bad_samples,
+             (unsigned long long)ch.draws, ch.used, CHAN_CACHE_SETS * CHAN_CACHE_WAYS, (unsigned long long)ch.evictions);
     free(ch.tab);
     ch.tab = NULL;
     ch.used = ch.evictions = 0;
@@ -668,11 +750,12 @@ void chan_apply(int rx, int tx, uint64_t t, uint16_t chan, uint32_t rate_bps, bo
         // process (a node in its bad state attenuates all its links, both
         // ways); the node processes are the same in both scopes
         if (ch.burst_scope == BURST_RX)
-            s->bad = chan_burst_bad(chan_key(CP_BURST_NODE, rx, 0), t);
+            s->bad = chan_burst_bad(chan_key(CP_BURST_NODE, rx, 0), t, ch.good_s, ch.bad_s);
         else if (ch.burst_scope == BURST_NODE)
-            s->bad = chan_burst_bad(chan_key(CP_BURST_NODE, rx, 0), t) | chan_burst_bad(chan_key(CP_BURST_NODE, tx, 0), t);
+            s->bad = chan_burst_bad(chan_key(CP_BURST_NODE, rx, 0), t, ch.good_s, ch.bad_s) |
+                     chan_burst_bad(chan_key(CP_BURST_NODE, tx, 0), t, ch.good_s, ch.bad_s);
         else
-            s->bad = chan_burst_bad(chan_key(CP_BURST_LINK, a, b), t);
+            s->bad = chan_burst_bad(chan_key(CP_BURST_LINK, a, b), t, ch.good_s, ch.bad_s);
         if (s->bad) {
             s->burst_db = -ch.burst_db;
             ch.bad_samples++;
@@ -753,6 +836,7 @@ static void chan_dump(void)
     uint64_t seed = seed_env && *seed_env ? strtoull(seed_env, NULL, 0) : 1;
     struct chan_sample *out;
     uint64_t *order, j, r, tmp;
+    uint8_t *lbad;
     float dbm;
     int d;
 
@@ -762,7 +846,8 @@ static void chan_dump(void)
 
         out = calloc(x->n, sizeof(*out));
         order = calloc(x->n, sizeof(*order));
-        FATAL_ON(!out || !order, 1, "calloc: %m");
+        lbad = calloc(x->n, 1);
+        FATAL_ON(!out || !order || !lbad, 1, "calloc: %m");
         for (j = 0; j < (uint64_t)x->n; j++)
             order[j] = j;
         if (x->shuffle) {
@@ -780,10 +865,18 @@ static void chan_dump(void)
             dbm = 0;
             chan_apply(x->rx, x->tx, (uint64_t)llround((x->t0 + i * x->dt) * 1e6),
                        x->hop ? (uint16_t)(i * 7 % x->hop) : x->chan, x->rate, false, &dbm, &out[i]);
+            if (ch.lburst)
+                lbad[i] = chan_loss_burst(x->rx, x->tx, (uint64_t)llround((x->t0 + i * x->dt) * 1e6)) > 0;
         }
-        for (j = 0; j < (uint64_t)x->n; j++)
-            printf("%d %d %llu %.6f %.6f %d\n", x->rx, x->tx, (unsigned long long)llround((x->t0 + j * x->dt) * 1e6),
+        // With --medium-loss-burst, a seventh column: the frame-loss burst state (1: bad)
+        for (j = 0; j < (uint64_t)x->n; j++) {
+            printf("%d %d %llu %.6f %.6f %d", x->rx, x->tx, (unsigned long long)llround((x->t0 + j * x->dt) * 1e6),
                    out[j].shadow_db, out[j].fading_db, out[j].bad);
+            if (ch.lburst)
+                printf(" %d", lbad[j]);
+            printf("\n");
+        }
+        free(lbad);
         free(out);
         free(order);
     }

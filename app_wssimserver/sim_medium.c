@@ -34,6 +34,7 @@
 // The smooth capture model's streams (§13.3)
 #define MED_RNG_CAPTURE_K 0x6361707475720001ULL
 #define MED_RNG_LOSS_K 0x6c6f737300000001ULL   // --medium-loss: a stream of its own
+#define MED_RNG_LBURST_K 0x6c62757273740001ULL // --medium-loss-burst: another
 
 enum med_outcome {
     MED_OK,
@@ -231,6 +232,9 @@ static struct {
     uint64_t rng_l[SIM_MAX_NODES];
     bool rng_l_set[SIM_MAX_NODES];
     uint64_t lost_random;
+    uint64_t rng_b[SIM_MAX_NODES];  // --medium-loss-burst's draws
+    bool rng_b_set[SIM_MAX_NODES];
+    uint64_t lost_burst;
     uint64_t outcomes[MED_OUTCOMES];
     uint64_t frames, cca_queries, cca_energy;
     uint64_t cca_ext;           // CCA queries with an external interferer on (§13)
@@ -513,7 +517,14 @@ void med_set_adjacent_db(const char *arg)
 // probability P, independently per receiver and frame (as ns-3's --loss)
 void med_set_loss(const char *arg)
 {
-    med.loss = med_number("--medium-loss", arg, 0, 1);
+    char *end;
+
+    // A double, not med_number()'s float: the probability is the one given
+    med.loss = strtod(arg, &end);
+    FATAL_ON(end == arg || *end || !(med.loss >= 0 && med.loss <= 1), 1,
+             "--medium-loss: expected a number from 0 to 1: %s", arg);
+    // Central medium only: refused with --medium=legacy and without --vtime
+    med.given = med.tuning = true;
 }
 
 /* ---- options of §13 (through sim_interf.c's intf_option()) */
@@ -1712,6 +1723,16 @@ struct med_lock *med_take_broken(void)
     return l;
 }
 
+// One uniform in [0, 1) of a per-node stream keyed by k
+static double med_stream(uint64_t *rng, bool *set, int n, uint64_t k)
+{
+    if (!set[n]) {
+        rng[n] = mix64(med.seed + mix64((uint64_t)n + 1) + k);
+        set[n] = true;
+    }
+    return (mix64(rng[n] += 0x9e3779b97f4a7c15ULL) >> 11) * 0x1.0p-53;
+}
+
 bool med_verdict(struct med_lock *l, uint64_t now, struct sim_verdict *v)
 {
     double logp, p_ok, sinr;
@@ -1747,18 +1768,24 @@ bool med_verdict(struct med_lock *l, uint64_t now, struct sim_verdict *v)
     ok = p_ok >= 1 || (p_ok > 0 && !(-expm1(logp) > med_uniform(l->node)));
     if (ok && med.loss > 0) {
         // --medium-loss: one draw on a stream of its own, so the other draws stay as without it
-        int n = l->node;
-        if (!med.rng_l_set[n]) {
-            med.rng_l[n] = mix64(med.seed + mix64((uint64_t)n + 1) + MED_RNG_LOSS_K);
-            med.rng_l_set[n] = true;
-        }
-        if ((mix64(med.rng_l[n] += 0x9e3779b97f4a7c15ULL) >> 11) * 0x1.0p-53 < med.loss) {
+        if (med_stream(med.rng_l, med.rng_l_set, l->node, MED_RNG_LOSS_K) < med.loss) {
             ok = false;
             lost = true;
             med.lost_random++;
         }
     }
-    // a frame destroyed by --medium-loss counts as lost to noise, interferers or not
+    if (ok && chan_loss_bursts()) {
+        // --medium-loss-burst: the burst state at the frame's start, then (when the loss
+        // is below 1) one draw on another stream of its own
+        double pb = chan_loss_burst(l->node, l->src, l->t_start);
+
+        if (pb > 0 && (pb >= 1 || med_stream(med.rng_b, med.rng_b_set, l->node, MED_RNG_LBURST_K) < pb)) {
+            ok = false;
+            lost = true;
+            med.lost_burst++;
+        }
+    }
+    // a frame destroyed by --medium-loss or --medium-loss-burst counts as lost to noise, interferers or not
     outcome = ok ? MED_OK : (l->n_intf && !lost) ? MED_INTERFERENCE : MED_NOISE;
     med_log(l->t_end, l->src, l->node, l->frame_id, outcome, l->dbm, sinr, &l->cs, l->ext_mw);
     memset(v, 0, sizeof(*v));
@@ -2514,6 +2541,9 @@ void med_finish(void)
     if (med.loss > 0)
         INFO("medium: %llu frames destroyed by --medium-loss=%g (counted as noise above)",
              (unsigned long long)med.lost_random, med.loss);
+    if (chan_loss_bursts())
+        INFO("medium: %llu frames destroyed by --medium-loss-burst (counted as noise above)",
+             (unsigned long long)med.lost_burst);
     INFO("medium: %llu sync searches broken by a stronger frame (lost by interference)",
          (unsigned long long)med.broken);
     INFO("medium: %llu CCA queries, %llu with a frame on air", (unsigned long long)med.cca_queries,

@@ -111,6 +111,10 @@ def simserver(d):
             m = re.match(r'^medium: preset (\w+)', line)
             if m:
                 out['preset'] = m.group(1)
+            # frames destroyed by the loss that does not depend on the link (MEDIUM.md §12.2)
+            m = re.match(r'^medium: (\d+) frames destroyed by --medium-loss(-burst|=\S+) ', line)
+            if m:
+                out.setdefault('destroyed', {})['bursts' if m.group(2) == '-burst' else 'random'] = int(m.group(1))
             m = re.match(r'^medium: (\d+) CCA queries, (\d+) with a frame on air', line)
             if m:
                 out['cca_queries'], out['cca_with_frame'] = int(m.group(1)), int(m.group(2))

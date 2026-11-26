@@ -105,8 +105,8 @@ static const struct desc descs[] = {
       "MEDIUM.md §2.1", "Between the windows, a frame this much stronger makes both lost" },
     { "medium-adjacent-db", "medium", "[MODE:]DB|off", "spec", NULL, "per model (fg25: 10; em4: off)", R, "vtime",
       "MEDIUM.md §2.1", "A frame on the next channel interferes this much weaker" },
-    { "medium-loss", "medium", "P", "number", NULL, "0", N, "vtime", "MEDIUM.md §2",
-      "Every frame a receiver would decode is destroyed with this probability, independently per receiver and frame" },
+    { "medium-loss", "medium", "P", "number", NULL, "0", N, "vtime", "MEDIUM.md §12.2",
+      "Every frame a receiver would decode is destroyed with this probability, independently per receiver and frame (as ns-3's random loss)" },
     { "medium-log", "medium", "FILE", "file", NULL, NULL, N, "vtime", "MEDIUM.md §7",
       "One line per frame and receiver (t_end_us src dst frame_id outcome rx_dbm sinr_min_db ...)" },
     // Sniffing
@@ -193,6 +193,8 @@ static const struct desc descs[] = {
       "The same variation in both directions of a link" },
     { "medium-burst", "variation", "GOOD_S,BAD_S,DB[,link|rx|node]|off", "spec", NULL, "off", N, "vtime",
       "MEDIUM.md §12.2", "Loss bursts: mean good and bad durations, attenuation in the bad state" },
+    { "medium-loss-burst", "variation", "GOOD_S,BAD_S,LOSS[,link|rx|node]|off", "spec", NULL, "off", N, "vtime",
+      "MEDIUM.md §12.2", "Frame-loss bursts: mean good and bad durations; in the bad state each frame a receiver would decode is destroyed with probability LOSS, whatever the link's level" },
     { "medium-var-dump", "variation", "RX,TX,FROM_S,STEP_S,COUNT[,...]", "spec", NULL, NULL, N, "vtime",
       "MEDIUM.md §12.1", "Print a link's variation and exit" },
     // Interference and spectrum

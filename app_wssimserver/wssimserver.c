@@ -390,7 +390,8 @@ void print_help(FILE *stream, int exit_code) {
     fprintf(stream, "  --medium-adjacent-db=[MODE:]DB|off  a frame on the next channel interferes this much\n");
     fprintf(stream, "                            weaker (fg25: 10; em4: off)\n");
     fprintf(stream, "  --medium-loss=P           every frame a receiver would decode is destroyed with probability P\n"
-                    "                            (independent per receiver and frame, as ns-3's --loss; 0)\n");
+                    "                            (independent per receiver and frame, as ns-3's random loss; 0); bursts of\n"
+                    "                            frame loss: --medium-loss-burst below\n");
     fprintf(stream, "  --medium-log=FILE         central: one line per frame and receiver (t_end_us src dst\n");
     fprintf(stream, "                            frame_id outcome rx_dbm sinr_min_db)\n");
     fprintf(stream, "  Preamble sniffing (central medium, docs/MEDIUM.md §10):\n");
@@ -1029,12 +1030,12 @@ void parse_commandline(struct ctxt *ctxt, int argc, char *argv[])
         med_default_central();
     FATAL_ON(med_tuning_given() && !med_central(), 1,
              "--medium-tx-ref, --medium-tx-max, --medium-lock-snr, --medium-model, --medium-int-curve, --medium-capture-*, "
-             "--medium-break-db, --medium-adjacent-*, --medium-log, --sniff-* and --interferer* need the central "
+             "--medium-break-db, --medium-adjacent-*, --medium-loss, --medium-log, --sniff-* and --interferer* need the central "
              "medium (not --medium=legacy)");
     chan_options_done();
     FATAL_ON(chan_options_given() && !med_central(), 1,
              "--medium-rx-model, --medium-rx-curve, --medium-combine, --medium-fading, --medium-shadowing, "
-             "--medium-node-share, --medium-reciprocal and --medium-burst need the central medium (--vtime, not "
+             "--medium-node-share, --medium-reciprocal, --medium-burst and --medium-loss-burst need the central medium (--vtime, not "
              "--medium=legacy)");
     // The ledger follows each node's radio and MCU without gaps (a node
     // powered up late: its ledger starts at its first wake)
