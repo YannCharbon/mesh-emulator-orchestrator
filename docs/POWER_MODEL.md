@@ -541,7 +541,7 @@ Source: the firmware repo's `docs/RADIO_TIMING_POWER_RESULTS.md` §6 (EM5): RAIL
 
 With its target powered off (`commander adapter power off`), the energy monitor of kit 440235509 (BRD4001A) read 6.0–8.3 µA at about 11:40. After `commander aem calibrate` (the target is powered off during the calibration) it read 0.13 µA, and EM2 floors on that kit dropped from 10.3–10.8 µA to 4.3–4.5 µA (the same images: a firmware that only sleeps in EM2, and the internal measurement firmware without windows). Currents above about 1 mA did not change (a listening moment of that firmware: 4.19 µC before, 4.22 µC after). The raw files of this first session were not kept; the figures are from its console output.
 
-**The zero drifts after a calibration.** Sessions with saved raw files (`calibration.txt` and `target_off_after.txt` in the run directories `cal_1`, `fix1`, `p3`, `p4`, `rb` of the fire alarm stack's kit runs, session scratch directory `kitpower-runs/`):
+**The zero drifts after a calibration.** Sessions with saved raw files (`calibration.txt` and `target_off_after.txt` in the run directories `cal_1`, `fix1`, `p3`, `p4`, `rb`, `rxw425` of the fire alarm stack's kit runs, session scratch directory `kitpower-runs/`):
 
 | Time | Target off | Note |
 | --- | --- | --- |
@@ -554,8 +554,10 @@ With its target powered off (`commander adapter power off`), the energy monitor 
 | 15:05 | 0.01 µA | after a 13 min run |
 | 15:27 | 0.52 µA, 0.20 µA after a new calibration | sleep-only image 4.42 µA |
 | 15:42 | −0.07 µA | after a 15 min run |
+| 16:12 | −5.63 µA, 0.15 µA after a new calibration | sleep-only image 4.44 µA |
+| 16:32 | 5.46 µA | after a 18 min run (floor 9.8 µA in its trace): the run's average is void |
 
-So the zero moved by about 2 µA over two hours in the morning, by up to 0.5 µA between afternoon runs (0.01 µA at 15:05, 0.52 µA at 15:27) and by up to 0.27 µA within one run (0.20 → −0.07 µA in the run from 15:27). How to handle it: (1) quote charges per wake (counted above the floor between wakes) and their sums as the primary result: they do not depend on the zero; (2) for an absolute average, calibrate, measure a sleep-only image right away, run, and read the target-off value again at the end; quote the average with that floor, and the target-off reading as its uncertainty. The floors of that kit read on other days (5.8–12.3 µA, §12.8: "an excess specific to that kit") most likely carried such an offset; averages measured there carry it in full, charges per wake do not.
+So the zero moved by about 2 µA over two hours in the morning, by up to 0.5 µA between afternoon runs (0.01 µA at 15:05, 0.52 µA at 15:27) and by up to 0.27 µA within one run (0.20 → −0.07 µA in the run from 15:27), but also by 5.6 µA in the half hour before 16:12 and by 5.3 µA within the 18 min run that followed. The zero is therefore not stable enough to trust any absolute average without reading the target-off value at its end. How to handle it: (1) quote charges per wake (counted above the floor between wakes) and their sums as the primary result: they do not depend on the zero; (2) for an absolute average, calibrate, measure a sleep-only image right away, run, and read the target-off value again at the end; quote the average with that floor, and the target-off reading as its uncertainty. The floors of that kit read on other days (5.8–12.3 µA, §12.8: "an excess specific to that kit") most likely carried such an offset; averages measured there carry it in full, charges per wake do not.
 
 ## 13. LFN timed receive windows (GS8 stage 2, 2026-10-28)
 
